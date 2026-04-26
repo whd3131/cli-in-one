@@ -4,8 +4,6 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import {
   Archive,
-  ChevronLeft,
-  ChevronRight,
   Check,
   Clock3,
   FolderOpen,
@@ -13,6 +11,7 @@ import {
   GripVertical,
   Grid2X2,
   History,
+  Languages,
   LayoutGrid,
   MessageSquarePlus,
   Minus,
@@ -122,6 +121,154 @@ const codexFileMeta = {
   }
 };
 
+const messages = {
+  zh: {
+    appSubtitle: '本地项目与会话',
+    expandSidebar: '展开侧边栏',
+    collapseSidebar: '收起侧边栏',
+    newChat: '新对话',
+    temporaryChat: '临时对话',
+    addProject: '新增项目',
+    codexConfig: 'Codex 配置',
+    projects: '项目',
+    projectEmpty: '选择一个目录后会在这里管理项目会话。',
+    temporaryConversations: '临时对话',
+    temporaryEmpty: '不绑定项目的对话会显示在这里。',
+    recordsFolder: '会话记录目录',
+    settings: '设置',
+    conversationDirLoading: '会话目录初始化中',
+    closeAll: '全部关闭',
+    workspace: '工作区',
+    noProject: '不绑定项目',
+    addSession: '新增会话',
+    directory: '目录',
+    chooseDirectory: '选择目录',
+    zoomOut: '缩小',
+    zoomIn: '放大',
+    arrange: '整理',
+    runningModePipe: '管道模式',
+    runtimeStarting: '启动中',
+    session: '会话',
+    sessionFallbackTitle: '会话',
+    startEmpty: '新增会话开始',
+    startHint: '新会话会自动在当前目录启动 codex。',
+    movePanel: '移动会话',
+    restart: '重启',
+    close: '关闭',
+    resize: '调整大小',
+    preferences: '偏好',
+    appearance: '外观',
+    light: '浅色',
+    dark: '深色',
+    language: '语言',
+    chinese: '中文',
+    english: 'English',
+    reload: '刷新',
+    validate: '校验',
+    openFolder: '打开目录',
+    save: '保存',
+    loading: '加载中',
+    settingsDescription: '应用偏好、Codex 配置文件和本地会话记录。',
+    tempLabel: '临时',
+    uncached: '尚未缓存历史记录',
+    createdProjectConversation: '已创建 {name} 的新对话',
+    createdTemporaryConversation: '已创建临时对话',
+    switchedProject: '当前项目：{name}',
+    addedProject: '已新增项目：{name}',
+    switchedExistingProject: '已切换到项目：{name}',
+    openedHistory: '已切换历史记录：{title}',
+    openedHistoryWithPanels: '已在当前画布中打开历史：{title}',
+    cachedConversation: '已缓存会话记录：{title}',
+    cacheFailed: '缓存会话记录失败：{message}',
+    openRecordsFailed: '打开会话记录目录失败：{message}',
+    ptyFallback: '当前使用管道模式；安装 node-pty 成功后会自动切换到 ConPTY。',
+    codexReadFailed: '读取 Codex 配置失败：{message}',
+    reloadFailed: '刷新失败：{message}',
+    saveFailed: '保存失败：{message}',
+    openDirFailed: '打开目录失败：{message}',
+    invalidNotSaved: '{name}，未保存。',
+    unsavedCloseConfirm: '{name} 还没有保存，确认关闭？',
+    switchDiscardConfirm: '切换文件会丢弃当前未保存更改，确认切换？',
+    reloadDiscardConfirm: '重新加载 {name} 会丢弃未保存更改，确认刷新？',
+    newConversationConfirm: '开始新对话会关闭当前画布中的运行会话，确认继续？'
+  },
+  en: {
+    appSubtitle: 'Local projects and sessions',
+    expandSidebar: 'Expand sidebar',
+    collapseSidebar: 'Collapse sidebar',
+    newChat: 'New chat',
+    temporaryChat: 'Temporary chat',
+    addProject: 'Add project',
+    codexConfig: 'Codex config',
+    projects: 'Projects',
+    projectEmpty: 'Choose a folder to manage project sessions here.',
+    temporaryConversations: 'Temporary chats',
+    temporaryEmpty: 'Chats without a project appear here.',
+    recordsFolder: 'Conversation records',
+    settings: 'Settings',
+    conversationDirLoading: 'Conversation folder loading',
+    closeAll: 'Close all',
+    workspace: 'Workspace',
+    noProject: 'No project',
+    addSession: 'New session',
+    directory: 'Directory',
+    chooseDirectory: 'Choose directory',
+    zoomOut: 'Zoom out',
+    zoomIn: 'Zoom in',
+    arrange: 'Arrange',
+    runningModePipe: 'Pipe mode',
+    runtimeStarting: 'Starting',
+    session: 'Session',
+    sessionFallbackTitle: 'Session',
+    startEmpty: 'Start a new session',
+    startHint: 'New sessions automatically start codex in the current directory.',
+    movePanel: 'Move session',
+    restart: 'Restart',
+    close: 'Close',
+    resize: 'Resize',
+    preferences: 'Preferences',
+    appearance: 'Appearance',
+    light: 'Light',
+    dark: 'Dark',
+    language: 'Language',
+    chinese: '中文',
+    english: 'English',
+    reload: 'Reload',
+    validate: 'Validate',
+    openFolder: 'Open folder',
+    save: 'Save',
+    loading: 'Loading',
+    settingsDescription: 'App preferences, Codex config files, and local conversation records.',
+    tempLabel: 'Temporary',
+    uncached: 'History has not been cached yet',
+    createdProjectConversation: 'Created a new chat for {name}',
+    createdTemporaryConversation: 'Created a temporary chat',
+    switchedProject: 'Current project: {name}',
+    addedProject: 'Added project: {name}',
+    switchedExistingProject: 'Switched to project: {name}',
+    openedHistory: 'Switched history: {title}',
+    openedHistoryWithPanels: 'Opened history in the current canvas: {title}',
+    cachedConversation: 'Cached conversation: {title}',
+    cacheFailed: 'Failed to cache conversation: {message}',
+    openRecordsFailed: 'Failed to open conversation folder: {message}',
+    ptyFallback: 'Pipe mode is active. Install node-pty successfully to use ConPTY.',
+    codexReadFailed: 'Failed to read Codex config: {message}',
+    reloadFailed: 'Reload failed: {message}',
+    saveFailed: 'Save failed: {message}',
+    openDirFailed: 'Open folder failed: {message}',
+    invalidNotSaved: '{name}, not saved.',
+    unsavedCloseConfirm: '{name} has unsaved changes. Close anyway?',
+    switchDiscardConfirm: 'Switching files will discard unsaved changes. Continue?',
+    reloadDiscardConfirm: 'Reloading {name} will discard unsaved changes. Continue?',
+    newConversationConfirm: 'Starting a new chat will close running sessions on the current canvas. Continue?'
+  }
+};
+
+function translate(language, key, values = {}) {
+  const template = messages[language]?.[key] || messages.zh[key] || key;
+  return template.replace(/\{(\w+)\}/g, (_match, name) => String(values[name] ?? ''));
+}
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
@@ -136,13 +283,14 @@ function loadSettings() {
     return {
       cwd: saved.cwd || '',
       theme: saved.theme === 'dark' ? 'dark' : 'light',
+      language: saved.language === 'en' ? 'en' : 'zh',
       view: saved.view && Number.isFinite(saved.view.x) && Number.isFinite(saved.view.y) && Number.isFinite(saved.view.scale)
         ? { x: saved.view.x, y: saved.view.y, scale: clamp(saved.view.scale, 0.35, 2.5) }
         : { x: 80, y: 80, scale: 1 }
     };
   } catch {
     localStorage.removeItem(settingsKey);
-    return { cwd: '', theme: 'light', view: { x: 80, y: 80, scale: 1 } };
+    return { cwd: '', theme: 'light', language: 'zh', view: { x: 80, y: 80, scale: 1 } };
   }
 }
 
@@ -321,6 +469,7 @@ function TerminalPanel({
   panel,
   active,
   scale,
+  t,
   theme,
   onActivate,
   onClose,
@@ -488,22 +637,19 @@ function TerminalPanel({
       }}
       onPointerDown={() => onActivate(panel.id)}
     >
-      <CardHeader className="grid h-9 flex-none grid-cols-[28px_minmax(70px,1fr)_auto_28px_28px] items-center gap-1.5 space-y-0 border-b border-[var(--panel-header-border)] bg-[var(--panel-header)] px-1.5 py-1">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="h-6 w-6 cursor-grab text-muted-foreground"
-          title="移动"
-          aria-label="移动终端"
-          onPointerDown={startDrag}
-        >
+      <CardHeader
+        className="grid h-9 flex-none cursor-grab grid-cols-[28px_minmax(70px,1fr)_auto_28px_28px] items-center gap-1.5 space-y-0 border-b border-[var(--panel-header-border)] bg-[var(--panel-header)] px-1.5 py-1 active:cursor-grabbing"
+        title={t('movePanel')}
+        onPointerDown={startDrag}
+      >
+        <Button type="button" variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" tabIndex={-1}>
           <GripVertical className="h-4 w-4" />
         </Button>
         <Input
-          className="h-6 min-w-0 border-transparent bg-transparent px-2 text-sm font-semibold shadow-none focus:border-border focus:bg-background focus-visible:ring-0"
+          className="h-6 min-w-0 cursor-grab border-transparent bg-transparent px-2 text-sm font-semibold shadow-none focus:border-border focus:bg-background focus-visible:ring-0"
           value={panel.title}
           spellCheck={false}
+          readOnly
           onChange={(event) => onTitleChange(panel.id, event.target.value)}
         />
         <Badge
@@ -517,8 +663,9 @@ function TerminalPanel({
           variant="outline"
           size="icon"
           className="h-6 w-6 text-xs font-bold"
-          title="重启"
-          aria-label="重启终端"
+          title={t('restart')}
+          aria-label={t('restart')}
+          onPointerDown={(event) => event.stopPropagation()}
           onClick={() => onRestart(panel.id)}
         >
           <RefreshCw className="h-3.5 w-3.5" />
@@ -528,20 +675,21 @@ function TerminalPanel({
           variant="destructive"
           size="icon"
           className="h-6 w-6"
-          title="关闭"
-          aria-label="关闭终端"
+          title={t('close')}
+          aria-label={t('close')}
+          onPointerDown={(event) => event.stopPropagation()}
           onClick={() => onClose(panel.id)}
         >
           <X className="h-3.5 w-3.5" />
         </Button>
       </CardHeader>
       <CardContent ref={hostRef} className="terminal-host p-2" />
-      <div className="resize-handle" title="调整大小" onPointerDown={startResize} />
+      <div className="resize-handle" title={t('resize')} onPointerDown={startResize} />
     </Card>
   );
 }
 
-function CodexConfigDialog({ open, onOpenChange, showToast }) {
+function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onThemeChange, open, showToast, t, theme }) {
   const [activeFile, setActiveFile] = useState('auth');
   const [pathText, setPathText] = useState('');
   const [value, setValue] = useState('');
@@ -560,7 +708,7 @@ function CodexConfigDialog({ open, onOpenChange, showToast }) {
   }, []);
 
   const loadFile = useCallback(async (kind) => {
-    setStatusMessage('加载中');
+    setStatusMessage(t('loading'));
     const snapshot = await bridge.readCodexConfig(kind);
     setPathText(snapshot.path);
     setValue(snapshot.content || '');
@@ -583,9 +731,9 @@ function CodexConfigDialog({ open, onOpenChange, showToast }) {
 
     loadFile(activeFile).catch((error) => {
       setStatusMessage(error.message, 'error');
-      showToast(`读取 Codex 配置失败：${error.message}`);
+      showToast(t('codexReadFailed', { message: error.message }));
     });
-  }, [activeFile, loadFile, open, setStatusMessage, showToast]);
+  }, [activeFile, loadFile, open, setStatusMessage, showToast, t]);
 
   useEffect(() => () => window.clearTimeout(validationTimer.current), []);
 
@@ -623,7 +771,7 @@ function CodexConfigDialog({ open, onOpenChange, showToast }) {
   };
 
   const handleOpenChange = (nextOpen) => {
-    if (!nextOpen && dirty && !window.confirm(`${codexFileMeta[activeFile].title} 还没有保存，确认关闭？`)) {
+    if (!nextOpen && dirty && !window.confirm(t('unsavedCloseConfirm', { name: codexFileMeta[activeFile].title }))) {
       return;
     }
     onOpenChange(nextOpen);
@@ -634,7 +782,7 @@ function CodexConfigDialog({ open, onOpenChange, showToast }) {
       return;
     }
 
-    if (dirty && !window.confirm('切换文件会丢弃当前未保存更改，确认切换？')) {
+    if (dirty && !window.confirm(t('switchDiscardConfirm'))) {
       return;
     }
 
@@ -642,24 +790,24 @@ function CodexConfigDialog({ open, onOpenChange, showToast }) {
   };
 
   const reload = () => {
-    if (dirty && !window.confirm(`重新加载 ${codexFileMeta[activeFile].title} 会丢弃未保存更改，确认刷新？`)) {
+    if (dirty && !window.confirm(t('reloadDiscardConfirm', { name: codexFileMeta[activeFile].title }))) {
       return;
     }
     loadFile(activeFile).catch((error) => {
       setStatusMessage(error.message, 'error');
-      showToast(`刷新失败：${error.message}`);
+      showToast(t('reloadFailed', { message: error.message }));
     });
   };
 
   const save = async () => {
     const valid = await validate();
     if (!valid) {
-      showToast(`${codexFileMeta[activeFile].invalid}，未保存。`);
+      showToast(t('invalidNotSaved', { name: codexFileMeta[activeFile].invalid }));
       return;
     }
 
     setSaving(true);
-    setStatusMessage('保存中');
+    setStatusMessage(`${t('save')}...`);
     try {
       const snapshot = await bridge.writeCodexConfig(activeFile, value);
       setPathText(snapshot.path);
@@ -672,25 +820,57 @@ function CodexConfigDialog({ open, onOpenChange, showToast }) {
       showToast(`${codexFileMeta[activeFile].saved}${backupNote}。`);
     } catch (error) {
       setStatusMessage(error.message, 'error');
-      showToast(`保存失败：${error.message}`);
+      showToast(t('saveFailed', { message: error.message }));
     } finally {
       setSaving(false);
     }
   };
 
   const openFolder = () => {
-    bridge.openCodexConfigFolder().catch((error) => showToast(`打开目录失败：${error.message}`));
+    bridge.openCodexConfigFolder().catch((error) => showToast(t('openDirFailed', { message: error.message })));
   };
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent id="codexConfigPanel" className="grid h-[calc(100vh-100px)] grid-rows-[auto_1fr_auto] p-0">
         <DialogHeader>
-          <DialogTitle id="codexConfigTitle">{codexFileMeta[activeFile].title}</DialogTitle>
-          <DialogDescription id="codexConfigPath" title={pathText}>{pathText}</DialogDescription>
+          <DialogTitle id="codexConfigTitle">{t('settings')}</DialogTitle>
+          <DialogDescription id="codexConfigPath" title={pathText}>{t('settingsDescription')}</DialogDescription>
         </DialogHeader>
 
         <div className="grid min-h-0 grid-rows-[auto_1fr_auto] gap-2 p-3">
+          <div className="grid gap-3 rounded-md border border-border bg-muted/35 p-3">
+            <div className="grid gap-2 md:grid-cols-2">
+              <div className="grid gap-1.5">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <Languages className="h-4 w-4" />
+                  {t('language')}
+                </Label>
+                <div className="flex gap-2">
+                  <Button type="button" variant={language === 'zh' ? 'primary' : 'outline'} onClick={() => onLanguageChange('zh')}>
+                    {t('chinese')}
+                  </Button>
+                  <Button type="button" variant={language === 'en' ? 'primary' : 'outline'} onClick={() => onLanguageChange('en')}>
+                    {t('english')}
+                  </Button>
+                </div>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-sm font-medium">{t('appearance')}</Label>
+                <div className="flex gap-2">
+                  <Button type="button" variant={theme === 'light' ? 'primary' : 'outline'} onClick={() => onThemeChange('light')}>
+                    <Sun className="h-4 w-4" />
+                    {t('light')}
+                  </Button>
+                  <Button type="button" variant={theme === 'dark' ? 'primary' : 'outline'} onClick={() => onThemeChange('dark')}>
+                    <Moon className="h-4 w-4" />
+                    {t('dark')}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <Tabs value={activeFile} onValueChange={switchFile}>
             <TabsList>
               <TabsTrigger className={cn(activeFile === 'auth' && 'active')} data-codex-file="auth" value="auth" onClick={() => switchFile('auth')}>
@@ -731,19 +911,19 @@ function CodexConfigDialog({ open, onOpenChange, showToast }) {
         <DialogFooter>
           <Button id="reloadCodexConfig" type="button" onClick={reload}>
             <RefreshCw className="h-4 w-4" />
-            刷新
+            {t('reload')}
           </Button>
           <Button id="validateCodexConfig" type="button" onClick={() => validate()}>
             <Check className="h-4 w-4" />
-            校验
+            {t('validate')}
           </Button>
           <Button id="openCodexFolder" type="button" onClick={openFolder}>
             <FolderOpen className="h-4 w-4" />
-            打开目录
+            {t('openFolder')}
           </Button>
           <Button id="saveCodexConfig" type="button" variant="primary" onClick={save} disabled={saving}>
             <Save className="h-4 w-4" />
-            保存
+            {t('save')}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -757,12 +937,14 @@ function WorkspaceSidebar({
   activeConversationId,
   appInfo,
   onAddProject,
+  onKillAll,
   onNewConversation,
   onOpenCodexConfig,
   onOpenConversationFolder,
   onSelectConversation,
   onSelectProject,
   onStartTemporaryConversation,
+  t,
   onToggleCollapsed
 }) {
   const collapsed = workspace.sidebarCollapsed;
@@ -771,20 +953,20 @@ function WorkspaceSidebar({
   if (collapsed) {
     return (
       <Sidebar collapsed>
-        <IconButton label="展开侧边栏" onClick={onToggleCollapsed}>
+        <IconButton label={t('expandSidebar')} onClick={onToggleCollapsed}>
           <PanelLeftOpen className="h-4 w-4" />
         </IconButton>
-        <IconButton label="新对话" onClick={() => onNewConversation()}>
+        <IconButton label={t('newChat')} onClick={() => onNewConversation()}>
           <MessageSquarePlus className="h-4 w-4" />
         </IconButton>
-        <IconButton label="新增项目" onClick={onAddProject}>
+        <IconButton label={t('addProject')} onClick={onAddProject}>
           <FolderPlus className="h-4 w-4" />
         </IconButton>
-        <IconButton label="临时对话" onClick={onStartTemporaryConversation}>
+        <IconButton label={t('temporaryChat')} onClick={onStartTemporaryConversation}>
           <Archive className="h-4 w-4" />
         </IconButton>
         <div className="sidebar-rail-spacer" />
-        <IconButton label="Codex 配置" onClick={onOpenCodexConfig}>
+        <IconButton label={t('settings')} onClick={onOpenCodexConfig}>
           <Settings2 className="h-4 w-4" />
         </IconButton>
       </Sidebar>
@@ -798,10 +980,10 @@ function WorkspaceSidebar({
           <span className="brand-mark" />
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold">CLI in One</div>
-            <div className="truncate text-xs text-muted-foreground">本地项目与会话</div>
+            <div className="truncate text-xs text-muted-foreground">{t('appSubtitle')}</div>
           </div>
         </div>
-        <IconButton label="收起侧边栏" onClick={onToggleCollapsed}>
+        <IconButton label={t('collapseSidebar')} onClick={onToggleCollapsed}>
           <PanelLeftClose className="h-4 w-4" />
         </IconButton>
       </SidebarHeader>
@@ -809,27 +991,27 @@ function WorkspaceSidebar({
       <div className="sidebar-actions">
         <Button className="w-full justify-start" variant="ghost" onClick={() => onNewConversation()}>
           <MessageSquarePlus className="h-4 w-4" />
-          新对话
+          {t('newChat')}
         </Button>
         <Button className="w-full justify-start" variant="ghost" onClick={onStartTemporaryConversation}>
           <Archive className="h-4 w-4" />
-          临时对话
+          {t('temporaryChat')}
         </Button>
       </div>
 
       <SidebarContent>
         <SidebarSection>
           <div className="sidebar-section-title">
-            <span>项目</span>
+            <span>{t('projects')}</span>
             <div className="flex items-center gap-1">
-              <IconButton label="新增项目" onClick={onAddProject}>
+              <IconButton label={t('addProject')} onClick={onAddProject}>
                 <FolderPlus className="h-4 w-4" />
               </IconButton>
             </div>
           </div>
 
           {workspace.projects.length === 0 && (
-            <div className="sidebar-empty">选择一个目录后会在这里管理项目会话。</div>
+            <div className="sidebar-empty">{t('projectEmpty')}</div>
           )}
 
           <div className="space-y-2">
@@ -865,12 +1047,12 @@ function WorkspaceSidebar({
 
         <SidebarSection>
           <div className="sidebar-section-title">
-            <span>临时对话</span>
+            <span>{t('temporaryConversations')}</span>
             <Clock3 className="h-3.5 w-3.5 text-muted-foreground" />
           </div>
 
           {temporary.length === 0 && (
-            <div className="sidebar-empty">不绑定项目的对话会显示在这里。</div>
+            <div className="sidebar-empty">{t('temporaryEmpty')}</div>
           )}
 
           {temporary.slice(0, 10).map((conversation) => (
@@ -892,14 +1074,18 @@ function WorkspaceSidebar({
       <SidebarFooter>
         <Button className="w-full justify-start" variant="ghost" onClick={onOpenConversationFolder}>
           <FolderOpen className="h-4 w-4" />
-          会话记录目录
+          {t('recordsFolder')}
+        </Button>
+        <Button className="w-full justify-start" variant="destructive" onClick={onKillAll}>
+          <Trash2 className="h-4 w-4" />
+          {t('closeAll')}
         </Button>
         <Button className="w-full justify-start" variant="ghost" onClick={onOpenCodexConfig}>
           <Settings2 className="h-4 w-4" />
-          设置
+          {t('settings')}
         </Button>
         <div className="truncate px-2 text-[11px] text-muted-foreground" title={appInfo?.conversationDir || ''}>
-          {appInfo?.conversationDir || '会话目录初始化中'}
+          {appInfo?.conversationDir || t('conversationDirLoading')}
         </div>
       </SidebarFooter>
     </Sidebar>
@@ -912,6 +1098,7 @@ export default function App() {
   const [appInfo, setAppInfo] = useState(null);
   const [cwd, setCwd] = useState(initialSettings.cwd);
   const [theme, setTheme] = useState(initialSettings.theme);
+  const [language, setLanguage] = useState(initialSettings.language);
   const [view, setView] = useState(initialSettings.view);
   const [workspace, setWorkspace] = useState(initialWorkspace);
   const [panels, setPanels] = useState([]);
@@ -944,6 +1131,7 @@ export default function App() {
     () => findConversation(workspace, workspace.activeConversationId),
     [workspace]
   );
+  const t = useCallback((key, values) => translate(language, key, values), [language]);
 
   useEffect(() => {
     panelsRef.current = panels;
@@ -984,12 +1172,12 @@ export default function App() {
         setCwd(activeProject?.path || info.homeDir || '');
       }
       if (!info.ptyEnabled) {
-        showToast('当前使用管道模式；安装 node-pty 成功后会自动切换到 ConPTY。');
+        showToast(t('ptyFallback'));
       }
     }).catch((error) => {
       showToast(error.message);
     });
-  }, [activeProject?.path, showToast]);
+  }, [activeProject?.path, showToast, t]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -998,9 +1186,9 @@ export default function App() {
   useEffect(() => {
     window.clearTimeout(saveSettingsTimer.current);
     saveSettingsTimer.current = window.setTimeout(() => {
-      localStorage.setItem(settingsKey, JSON.stringify({ cwd, theme, view }));
+      localStorage.setItem(settingsKey, JSON.stringify({ cwd, theme, language, view }));
     }, 180);
-  }, [cwd, theme, view]);
+  }, [cwd, language, theme, view]);
 
   useEffect(() => () => window.clearTimeout(saveSettingsTimer.current), []);
 
@@ -1060,7 +1248,7 @@ export default function App() {
       view: viewRef.current,
       panelCount: panelSnapshots.length,
       panels: panelSnapshots,
-      preview: lastTranscript || (panelSnapshots.length ? `${panelSnapshots.length} 个会话窗口` : '空会话'),
+      preview: lastTranscript || (panelSnapshots.length ? `${panelSnapshots.length} ${t('session')}` : t('uncached')),
       platform: appInfoRef.current?.platform || navigator.platform
     };
   }, []);
@@ -1083,13 +1271,13 @@ export default function App() {
         snapshotPath: result.path,
         savedAt: result.savedAt
       });
-      showToast(`已缓存会话记录：${snapshot.title}`);
+      showToast(t('cachedConversation', { title: snapshot.title }));
     } catch (error) {
-      showToast(`缓存会话记录失败：${error.message}`);
+      showToast(t('cacheFailed', { message: error.message }));
     } finally {
       snapshotSaving.current = false;
     }
-  }, [buildConversationSnapshot, showToast, updateConversationRecord]);
+  }, [buildConversationSnapshot, showToast, t, updateConversationRecord]);
 
   const markActivity = useCallback(() => {
     lastActivityAt.current = Date.now();
@@ -1154,10 +1342,10 @@ export default function App() {
 
   const createConversationRecord = useCallback((project = null) => {
     const now = Date.now();
-    const projectLabel = project ? project.name : '临时';
+    const projectLabel = project ? project.name : t('tempLabel');
     return {
       id: createLocalId('conversation'),
-      title: `${projectLabel}对话 ${new Date(now).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`,
+      title: `${projectLabel} ${new Date(now).toLocaleString(language === 'en' ? 'en-US' : 'zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`,
       projectId: project?.id || null,
       projectName: project?.name || null,
       cwd: project?.path || cwdRef.current || appInfoRef.current?.homeDir || '',
@@ -1165,16 +1353,16 @@ export default function App() {
       updatedAt: now,
       panelCount: 0,
       panels: [],
-      preview: '尚未缓存历史记录',
+      preview: t('uncached'),
       view: { x: 80, y: 80, scale: 1 }
     };
-  }, []);
+  }, [language, t]);
 
   const startNewConversation = useCallback(async (projectId = workspaceRef.current.activeProjectId, options = {}) => {
     const currentWorkspace = workspaceRef.current;
     const project = options.temporary ? null : currentWorkspace.projects.find((item) => item.id === projectId) || null;
 
-    if (panelsRef.current.length > 0 && !window.confirm('开始新对话会关闭当前画布中的运行会话，确认继续？')) {
+    if (panelsRef.current.length > 0 && !window.confirm(t('newConversationConfirm'))) {
       return null;
     }
 
@@ -1187,21 +1375,22 @@ export default function App() {
     setCwd(record.cwd || appInfoRef.current?.homeDir || '');
     updateConversationRecord(record);
     markActivity();
-    showToast(project ? `已创建 ${project.name} 的新对话` : '已创建临时对话');
+    showToast(project ? t('createdProjectConversation', { name: project.name }) : t('createdTemporaryConversation'));
     return record;
-  }, [createConversationRecord, markActivity, showToast, updateConversationRecord]);
+  }, [createConversationRecord, markActivity, showToast, t, updateConversationRecord]);
 
   const createTerminal = useCallback(async (slot = {}) => {
     const center = viewportCenterOnCanvas();
     const width = Number.isFinite(slot.width) ? slot.width : 640;
     const height = Number.isFinite(slot.height) ? slot.height : 380;
-    const title = slot.title || `会话 ${panelsRef.current.length + 1}`;
+    const title = slot.title || `${t('session')} ${panelsRef.current.length + 1}`;
     const x = Number.isFinite(slot.x) ? slot.x : center.x - width / 2;
     const y = Number.isFinite(slot.y) ? slot.y : center.y - height / 2;
 
     let conversationId = workspaceRef.current.activeConversationId;
     if (!conversationId) {
-      const record = await startNewConversation(null, { temporary: true });
+      const activeProjectId = workspaceRef.current.activeProjectId;
+      const record = await startNewConversation(activeProjectId, { temporary: !activeProjectId });
       if (!record) {
         return null;
       }
@@ -1237,7 +1426,7 @@ export default function App() {
     markActivity();
     window.requestAnimationFrame(() => terminalInstances.current.get(meta.id)?.term.focus());
     return panel;
-  }, [markActivity, startNewConversation, viewportCenterOnCanvas]);
+  }, [markActivity, startNewConversation, t, viewportCenterOnCanvas]);
 
   const closeTerminal = useCallback(async (id) => {
     try {
@@ -1330,10 +1519,10 @@ export default function App() {
         ...slot,
         width,
         height,
-        title: `会话 ${baseNumber + index + 1}`
+        title: `${t('session')} ${baseNumber + index + 1}`
       });
     }
-  }, [createTerminal, viewportCenterOnCanvas]);
+  }, [createTerminal, t, viewportCenterOnCanvas]);
 
   const killAll = useCallback(async () => {
     await bridge.killAllTerminals();
@@ -1364,7 +1553,7 @@ export default function App() {
       workspaceRef.current = nextWorkspace;
       setWorkspace(nextWorkspace);
       setCwd(existing.path);
-      showToast(`已切换到项目：${existing.name}`);
+      showToast(t('switchedExistingProject', { name: existing.name }));
       return;
     }
 
@@ -1386,8 +1575,8 @@ export default function App() {
     workspaceRef.current = nextWorkspace;
     setWorkspace(nextWorkspace);
     setCwd(project.path);
-    showToast(`已新增项目：${project.name}`);
-  }, [showToast]);
+    showToast(t('addedProject', { name: project.name }));
+  }, [showToast, t]);
 
   const selectProject = useCallback((projectId) => {
     const project = workspaceRef.current.projects.find((item) => item.id === projectId);
@@ -1398,22 +1587,14 @@ export default function App() {
     workspaceRef.current = nextWorkspace;
     setWorkspace(nextWorkspace);
     setCwd(project.path);
-    showToast(`当前项目：${project.name}`);
-  }, [showToast]);
+    showToast(t('switchedProject', { name: project.name }));
+  }, [showToast, t]);
 
   const selectConversation = useCallback(async (conversation) => {
     if (!conversation) {
       return;
     }
 
-    if (panelsRef.current.length > 0 && !window.confirm('打开历史记录会关闭当前画布中的运行会话，确认继续？')) {
-      return;
-    }
-
-    await bridge.killAllTerminals();
-    transcriptsRef.current.clear();
-    setPanels([]);
-    setActiveId(null);
     const nextWorkspace = {
       ...workspaceRef.current,
       activeProjectId: conversation.projectId || null,
@@ -1424,10 +1605,15 @@ export default function App() {
     setCwd(conversation.cwd || appInfoRef.current?.homeDir || '');
     setView(conversation.view || { x: 80, y: 80, scale: 1 });
 
+    if (panelsRef.current.some((panel) => panel.conversationId === conversation.id)) {
+      showToast(t('openedHistory', { title: conversation.title }));
+      return;
+    }
+
     const savedPanels = Array.isArray(conversation.panels) ? conversation.panels : [];
     for (const [index, panel] of savedPanels.entries()) {
       await createTerminal({
-        title: panel.title || `会话 ${index + 1}`,
+        title: panel.title || `${t('session')} ${index + 1}`,
         cwd: panel.cwd || conversation.cwd,
         x: Number.isFinite(panel.x) ? panel.x : 80 + index * 42,
         y: Number.isFinite(panel.y) ? panel.y : 80 + index * 42,
@@ -1436,8 +1622,10 @@ export default function App() {
       });
     }
 
-    showToast(`已打开历史：${conversation.title}`);
-  }, [createTerminal, showToast]);
+    showToast(savedPanels.length
+      ? t('openedHistoryWithPanels', { title: conversation.title })
+      : t('openedHistory', { title: conversation.title }));
+  }, [createTerminal, showToast, t]);
 
   const zoomAt = useCallback((clientX, clientY, nextScale) => {
     const rect = getViewportRect();
@@ -1514,8 +1702,8 @@ export default function App() {
   }, []);
 
   const openConversationFolder = useCallback(() => {
-    bridge.openConversationFolder().catch((error) => showToast(`打开会话记录目录失败：${error.message}`));
-  }, [showToast]);
+    bridge.openConversationFolder().catch((error) => showToast(t('openRecordsFailed', { message: error.message })));
+  }, [showToast, t]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -1545,7 +1733,7 @@ export default function App() {
 
   const minorGrid = 48 * view.scale;
   const majorGrid = minorGrid * 4;
-  const activeTitle = activeConversation?.title || (activeProject ? `${activeProject.name} 工作区` : '临时对话');
+  const activeTitle = activeConversation?.title || (activeProject ? `${activeProject.name} ${t('workspace')}` : t('temporaryChat'));
 
   return (
     <TooltipProvider>
@@ -1556,12 +1744,14 @@ export default function App() {
           activeConversationId={workspace.activeConversationId}
           appInfo={appInfo}
           onAddProject={addProject}
+          onKillAll={killAll}
           onNewConversation={() => startNewConversation().catch((error) => showToast(error.message))}
           onOpenCodexConfig={() => setCodexOpen(true)}
           onOpenConversationFolder={openConversationFolder}
           onSelectConversation={(conversation) => selectConversation(conversation).catch((error) => showToast(error.message))}
           onSelectProject={selectProject}
           onStartTemporaryConversation={() => startNewConversation(null, { temporary: true }).catch((error) => showToast(error.message))}
+          t={t}
           onToggleCollapsed={toggleSidebar}
         />
 
@@ -1570,7 +1760,7 @@ export default function App() {
             <div className="min-w-[160px] max-w-[260px]">
               <div className="truncate text-sm font-semibold">{activeTitle}</div>
               <div className="truncate text-xs text-muted-foreground">
-                {activeProject ? activeProject.path : '不绑定项目'}
+                {activeProject ? activeProject.path : t('noProject')}
               </div>
             </div>
 
@@ -1579,7 +1769,7 @@ export default function App() {
             <div className="flex shrink-0 items-center gap-2">
               <Button id="addTerminal" variant="primary" onClick={() => createTerminal().catch((error) => showToast(error.message))}>
                 <Plus className="h-4 w-4" />
-                新增会话
+                {t('addSession')}
               </Button>
               <Button id="addGrid" onClick={addGrid}>
                 <Grid2X2 className="h-4 w-4" />
@@ -1591,7 +1781,7 @@ export default function App() {
 
             <div className="flex h-10 min-w-[250px] flex-1 items-center gap-2 rounded-lg border border-border bg-card px-2 pl-3">
               <Label htmlFor="cwdInput" className="shrink-0 text-sm text-muted-foreground">
-                目录
+                {t('directory')}
               </Label>
               <Input
                 id="cwdInput"
@@ -1603,7 +1793,7 @@ export default function App() {
                   markActivity();
                 }}
               />
-              <IconButton id="browseDir" label="选择目录" onClick={chooseDirectory}>
+              <IconButton id="browseDir" label={t('chooseDirectory')} onClick={chooseDirectory}>
                 <FolderOpen className="h-4 w-4" />
               </IconButton>
             </div>
@@ -1611,7 +1801,7 @@ export default function App() {
             <Separator orientation="vertical" className="h-8" />
 
             <div className="flex shrink-0 items-center gap-1.5">
-              <IconButton id="zoomOut" label="缩小" onClick={() => {
+              <IconButton id="zoomOut" label={t('zoomOut')} onClick={() => {
                 const rect = getViewportRect();
                 zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, view.scale / 1.16);
               }}>
@@ -1621,42 +1811,13 @@ export default function App() {
                 <RotateCcw className="h-4 w-4" />
                 {Math.round(view.scale * 100)}%
               </Button>
-              <IconButton id="zoomIn" label="放大" onClick={() => {
+              <IconButton id="zoomIn" label={t('zoomIn')} onClick={() => {
                 const rect = getViewportRect();
                 zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, view.scale * 1.16);
               }}>
                 <ZoomIn className="h-4 w-4" />
               </IconButton>
             </div>
-
-            <Separator orientation="vertical" className="h-8" />
-
-            <div className="flex shrink-0 items-center gap-2">
-              <Button id="arrangeGrid" onClick={arrangeGrid}>
-                <LayoutGrid className="h-4 w-4" />
-                整理
-              </Button>
-              <IconButton
-                id="toggleTheme"
-                label={theme === 'dark' ? '切换浅色模式' : '切换深色模式'}
-                onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
-              >
-                {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-              </IconButton>
-              <Button id="killAll" variant="destructive" onClick={killAll}>
-                <Trash2 className="h-4 w-4" />
-                全部关闭
-              </Button>
-            </div>
-
-            <Badge
-              id="runtimeStatus"
-              variant={appInfo?.ptyEnabled ? 'success' : 'outline'}
-              className="runtime-status min-w-[116px] justify-center truncate font-normal"
-              title={appInfo?.ptyError || appInfo?.defaultShell || ''}
-            >
-              {appInfo ? (appInfo.ptyEnabled ? 'ConPTY' : '管道模式') : '启动中'}
-            </Badge>
           </header>
 
           <main
@@ -1671,6 +1832,12 @@ export default function App() {
             onPointerDown={startViewportPan}
             onWheel={handleWheel}
           >
+            <div className="canvas-tools">
+              <Button id="arrangeGrid" onClick={arrangeGrid}>
+                <LayoutGrid className="h-4 w-4" />
+                {t('arrange')}
+              </Button>
+            </div>
             <div
               id="stage"
               className="stage"
@@ -1682,6 +1849,7 @@ export default function App() {
                   panel={panel}
                   active={panel.id === activeId}
                   scale={view.scale}
+                  t={t}
                   theme={theme}
                   onActivate={activatePanel}
                   onClose={closeTerminal}
@@ -1689,7 +1857,7 @@ export default function App() {
                   onResize={updatePanel}
                   onRestart={restartTerminal}
                   onTerminalInput={handleTerminalInput}
-                  onTitleChange={(id, title) => updatePanel(id, { title: title.trim() || '会话' })}
+                  onTitleChange={(id, title) => updatePanel(id, { title: title.trim() || t('sessionFallbackTitle') })}
                   registerTerminal={registerTerminal}
                 />
               ))}
@@ -1700,10 +1868,10 @@ export default function App() {
                 <CardContent className="p-5">
                   <div className="flex items-center justify-center gap-2 text-xl font-bold text-foreground">
                     <SquareTerminal className="h-6 w-6 text-primary" />
-                    新增会话开始
+                    {t('startEmpty')}
                   </div>
                   <div className="mt-2 text-sm text-muted-foreground">
-                    新会话会自动在当前目录启动 codex。
+                    {t('startHint')}
                   </div>
                 </CardContent>
               </Card>
@@ -1712,7 +1880,16 @@ export default function App() {
         </div>
       </div>
 
-      <CodexConfigDialog open={codexOpen} onOpenChange={setCodexOpen} showToast={showToast} />
+      <CodexConfigDialog
+        language={language}
+        onLanguageChange={setLanguage}
+        onOpenChange={setCodexOpen}
+        onThemeChange={setTheme}
+        open={codexOpen}
+        showToast={showToast}
+        t={t}
+        theme={theme}
+      />
 
       {toast && (
         <Card id="toast" className="toast">

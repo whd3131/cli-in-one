@@ -280,6 +280,22 @@
   cursor: grabbing;
 }
 
+.canvas-tools {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 5000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, hsl(var(--background)) 86%, transparent);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.14);
+  backdrop-filter: blur(10px);
+}
+
 .stage {
   position: absolute;
   top: 0;
