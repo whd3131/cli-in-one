@@ -9,8 +9,6 @@ function subscribe(channel, callback) {
 contextBridge.exposeInMainWorld('cliBridge', {
   getAppInfo: () => ipcRenderer.invoke('app:info'),
   getSystemStats: () => ipcRenderer.invoke('app:system-stats'),
-  getLatestRelease: (options) => ipcRenderer.invoke('release:latest', options),
-  openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
   openWorkspacePath: (targetPath) => ipcRenderer.invoke('workspace:open-path', targetPath),
   readWorkspaceTree: (options) => ipcRenderer.invoke('workspace:read-tree', options),
   readWorkspaceSkills: (options) => ipcRenderer.invoke('workspace:read-skills', options),

@@ -18,10 +18,6 @@ try {
 
 const sessions = new Map();
 let mainWindow = null;
-const releasesUrl = 'https://github.com/whd3131/cli-in-one/releases';
-const latestReleaseApiUrl = 'https://api.github.com/repos/whd3131/cli-in-one/releases/latest';
-const releaseCacheTtlMs = 10 * 60 * 1000;
-let latestReleaseCache = null;
 const cursorModelCatalogCacheTtlMs = 10 * 60 * 1000;
 let cursorModelCatalogCache = null;
 const APP_STORAGE_DIR_NAME = '.cli-in-one';
@@ -1153,63 +1149,6 @@ function sendToRenderer(webContents, channel, payload) {
   if (webContents && !webContents.isDestroyed()) {
     webContents.send(channel, payload);
   }
-}
-
-function normalizeLatestRelease(data) {
-  if (!data || typeof data !== 'object') {
-    throw new Error('GitHub Releases 返回了无效数据。');
-  }
-
-  return {
-    tagName: typeof data.tag_name === 'string' ? data.tag_name : '',
-    name: typeof data.name === 'string' ? data.name : '',
-    body: typeof data.body === 'string' ? data.body : '',
-    htmlUrl: typeof data.html_url === 'string' ? data.html_url : releasesUrl,
-    publishedAt: typeof data.published_at === 'string' ? data.published_at : '',
-    prerelease: Boolean(data.prerelease)
-  };
-}
-
-async function getLatestReleaseSnapshot(force = false) {
-  const now = Date.now();
-  if (
-    !force &&
-    latestReleaseCache &&
-    now - latestReleaseCache.fetchedAt < releaseCacheTtlMs
-  ) {
-    return latestReleaseCache;
-  }
-
-  const response = await fetch(latestReleaseApiUrl, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': `cli-in-one/${app.getVersion()}`,
-      'X-GitHub-Api-Version': '2022-11-28'
-    }
-  });
-
-  if (!response.ok) {
-    throw new Error(`读取 GitHub Releases 失败：HTTP ${response.status}`);
-  }
-
-  latestReleaseCache = {
-    fetchedAt: now,
-    release: normalizeLatestRelease(await response.json())
-  };
-  return latestReleaseCache;
-}
-
-function normalizeAllowedExternalUrl(value) {
-  const parsed = new URL(value || releasesUrl);
-  if (
-    parsed.protocol !== 'https:' ||
-    parsed.hostname !== 'github.com' ||
-    !parsed.pathname.startsWith('/whd3131/cli-in-one/releases')
-  ) {
-    throw new Error('只能打开 CLI in One 的 GitHub Releases 链接。');
-  }
-
-  return parsed.href;
 }
 
 function appendTerminalTranscript(session, data) {
@@ -2532,15 +2471,6 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('app:system-stats', () => getSystemStats());
-
-  ipcMain.handle('release:latest', (_event, options = {}) => {
-    return getLatestReleaseSnapshot(Boolean(options.force));
-  });
-
-  ipcMain.handle('app:open-external', async (_event, url) => {
-    await electronShell.openExternal(normalizeAllowedExternalUrl(url));
-    return true;
-  });
 
   ipcMain.handle('workspace:open-path', (_event, targetPath) => {
     return openLocalPath(targetPath);

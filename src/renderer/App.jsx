@@ -28,6 +28,7 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Pin,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -66,7 +67,6 @@ const bridge = window.cliBridge;
 const settingsKey = 'cli-in-one.settings.v3';
 const workspaceKey = 'cli-in-one.workspace.v1';
 const appLogoUrl = `${import.meta.env.BASE_URL}logo.webp`;
-const releasesUrl = 'https://github.com/whd3131/cli-in-one/releases';
 const cliProviderIconMarkup = {
   codex: codexIconSvg,
   'cursor-agent': cursorIconSvg
@@ -77,8 +77,14 @@ const noProjectCanvasKey = '__no_project__';
 const historyProjectId = '__history__';
 const endpointWidth = 300;
 const endpointHeight = 44;
+const canvasFrameMinWidth = 220;
+const canvasFrameMinHeight = 140;
+const canvasFrameDefaultWidth = 360;
+const canvasFrameDefaultHeight = 200;
 const zoomPresetScales = [0.5, 1, 1.5, 2];
 const systemStatsRefreshMs = 2000;
+const memoryUsageWarningThreshold = 0.85;
+const memoryUsageCriticalThreshold = 0.95;
 const panelIdleThresholdMs = 12000;
 const panelActivityFlushMs = 120;
 const formSelectClassName = 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50';
@@ -385,6 +391,9 @@ const messages = {
     collapseSidebar: '收起侧边栏',
     addProject: '新增项目',
     deleteProject: '删除项目',
+    pinProject: '置顶项目',
+    unpinProject: '取消置顶',
+    dragProject: '拖拽排序',
     codexConfig: 'Codex 配置',
     projects: '项目',
     projectEmpty: '选择一个目录后会在这里管理项目。',
@@ -458,6 +467,15 @@ const messages = {
     minimizeSession: '缩成端点',
     expandSession: '展开会话',
     renameSession: '修改会话名称',
+    addCanvasFrame: '说明框',
+    addCanvasFrameArmed: '拖拽画框',
+    canvasFrameHint: '在空白画布拖拽一下，创建一个只给人看的说明框。',
+    moveCanvasFrame: '移动说明框',
+    resizeCanvasFrame: '调整说明框大小',
+    renameCanvasFrame: '修改说明框标题',
+    deleteCanvasFrame: '删除说明框',
+    canvasFrameDefaultTitle: '流程说明',
+    canvasFrameTitlePlaceholder: '这组 CMD 在做什么',
     groupEndpoints: '分组端点',
     ungroupEndpoints: '取消分组',
     endpointGroup: '端点组',
@@ -474,6 +492,8 @@ const messages = {
     floatingComposerHint: 'Enter 发送，Shift+Enter 换行，粘贴或拖拽图片会保存到 .files',
     floatingComposerCurrent: '当前',
     floatingComposerSend: '发送',
+    floatingComposerCollapse: '收起快捷发送',
+    floatingComposerExpand: '展开快捷发送',
     floatingComposerSent: '已发送到 {name}',
     floatingComposerImageReference: '图片({path})',
     floatingComposerImagesAdded: '已添加 {count} 张图片',
@@ -540,17 +560,16 @@ const messages = {
     skillsMoreFiles: '还有 {count} 个文件',
     skillsTruncated: '结果过多，已截断显示。',
     currentVersion: '当前版本',
+    localOnly: '完全本地',
+    localData: '本地存储',
+    localDataSummary: '应用偏好、项目列表、画布布局和导出记录都保存在当前设备。',
+    appNetwork: '应用联网',
+    appNetworkSummary: '应用本身不发起联网请求，不上传会话内容，也不做云同步。',
+    cliNetworkNotice: 'CLI 说明',
+    cliNetworkNoticeSummary: '终端里运行的 Codex、Cursor 或其他命令是否联网，取决于这些工具自身的行为和配置。',
     modelUnset: '未设置模型',
     modelSwitched: '模型已切换为 {model}',
     modelSwitchFailed: '切换模型失败：{message}',
-    latestRelease: '最新发布',
-    updateContent: '更新内容',
-    checkingUpdates: '检查更新中',
-    releaseUnavailable: '暂未获取更新内容',
-    openReleases: '查看发布',
-    refreshRelease: '刷新更新内容',
-    upToDate: '已是最新',
-    updateAvailable: '可更新',
     backupHistory: '历史备份',
     noBackups: '暂无备份',
     restoreBackup: '恢复备份',
@@ -617,6 +636,9 @@ const messages = {
     collapseSidebar: 'Collapse sidebar',
     addProject: 'Add project',
     deleteProject: 'Delete project',
+    pinProject: 'Pin project',
+    unpinProject: 'Unpin project',
+    dragProject: 'Drag to reorder',
     codexConfig: 'Codex config',
     projects: 'Projects',
     projectEmpty: 'Choose a folder to manage projects here.',
@@ -690,6 +712,15 @@ const messages = {
     minimizeSession: 'Minimize to endpoint',
     expandSession: 'Expand session',
     renameSession: 'Rename session',
+    addCanvasFrame: 'Frame',
+    addCanvasFrameArmed: 'Draw frame',
+    canvasFrameHint: 'Drag on empty canvas to create a human-only annotation frame.',
+    moveCanvasFrame: 'Move frame',
+    resizeCanvasFrame: 'Resize frame',
+    renameCanvasFrame: 'Rename frame',
+    deleteCanvasFrame: 'Delete frame',
+    canvasFrameDefaultTitle: 'Workflow note',
+    canvasFrameTitlePlaceholder: 'What these CMDs are doing',
     groupEndpoints: 'Group endpoints',
     ungroupEndpoints: 'Ungroup endpoints',
     endpointGroup: 'Endpoint group',
@@ -706,6 +737,8 @@ const messages = {
     floatingComposerHint: 'Enter to send, Shift+Enter for newline, paste or drop images to save them into .files',
     floatingComposerCurrent: 'Current',
     floatingComposerSend: 'Send',
+    floatingComposerCollapse: 'Collapse quick send',
+    floatingComposerExpand: 'Expand quick send',
     floatingComposerSent: 'Sent to {name}',
     floatingComposerImageReference: 'image({path})',
     floatingComposerImagesAdded: 'Added {count} image(s)',
@@ -772,17 +805,16 @@ const messages = {
     skillsMoreFiles: '{count} more file(s)',
     skillsTruncated: 'Results were truncated.',
     currentVersion: 'Current version',
+    localOnly: 'Local only',
+    localData: 'Local storage',
+    localDataSummary: 'App preferences, project lists, canvas layouts, and exported records stay on this device.',
+    appNetwork: 'App network',
+    appNetworkSummary: 'The app itself makes no network requests, uploads no session content, and does not sync to any cloud service.',
+    cliNetworkNotice: 'CLI notice',
+    cliNetworkNoticeSummary: 'Whether Codex, Cursor, or any other command inside the terminal connects to a network depends on that tool itself.',
     modelUnset: 'Model not set',
     modelSwitched: 'Model switched to {model}',
     modelSwitchFailed: 'Failed to switch model: {message}',
-    latestRelease: 'Latest release',
-    updateContent: 'Changes',
-    checkingUpdates: 'Checking updates',
-    releaseUnavailable: 'Release notes unavailable',
-    openReleases: 'Open releases',
-    refreshRelease: 'Refresh release notes',
-    upToDate: 'Up to date',
-    updateAvailable: 'Update available',
     backupHistory: 'Backups',
     noBackups: 'No backups',
     restoreBackup: 'Restore',
@@ -986,6 +1018,22 @@ function formatUsagePercent(value) {
   return `${Math.round(clamp(value, 0, 1) * 100)}%`;
 }
 
+function getMemoryUsageAlertTone(value) {
+  if (!Number.isFinite(value)) {
+    return 'normal';
+  }
+
+  if (value > memoryUsageCriticalThreshold) {
+    return 'critical';
+  }
+
+  if (value > memoryUsageWarningThreshold) {
+    return 'warning';
+  }
+
+  return 'normal';
+}
+
 function formatBytes(value) {
   if (!Number.isFinite(value)) {
     return '--';
@@ -1123,6 +1171,91 @@ function withWorkspaceCanvasView(workspace, canvasKey, view) {
       ...workspace.projectViews,
       [canvasKey]: nextView
     }
+  };
+}
+
+function normalizeCanvasFrame(frame, index = 0) {
+  const fallbackX = 40 + index * 20;
+  const fallbackY = 40 + index * 20;
+
+  return {
+    id: frame?.id || createLocalId('canvas-frame'),
+    title: typeof frame?.title === 'string' ? frame.title : '',
+    x: Number.isFinite(frame?.x) ? frame.x : fallbackX,
+    y: Number.isFinite(frame?.y) ? frame.y : fallbackY,
+    width: Number.isFinite(frame?.width)
+      ? clamp(frame.width, canvasFrameMinWidth, 3200)
+      : canvasFrameDefaultWidth,
+    height: Number.isFinite(frame?.height)
+      ? clamp(frame.height, canvasFrameMinHeight, 2400)
+      : canvasFrameDefaultHeight
+  };
+}
+
+function normalizeCanvasFrameMap(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(raw).map(([canvasKey, frames]) => [
+      canvasKey,
+      Array.isArray(frames)
+        ? frames.map((frame, index) => normalizeCanvasFrame(frame, index))
+        : []
+    ])
+  );
+}
+
+function getWorkspaceCanvasFrames(workspace, canvasKey = getWorkspaceCanvasKey(workspace)) {
+  return Array.isArray(workspace?.canvasFrames?.[canvasKey]) ? workspace.canvasFrames[canvasKey] : [];
+}
+
+function sameCanvasFrame(left, right) {
+  return Boolean(
+    left &&
+    right &&
+    left.id === right.id &&
+    left.title === right.title &&
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height
+  );
+}
+
+function sameCanvasFrameList(left, right) {
+  if (left === right) {
+    return true;
+  }
+
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((frame, index) => sameCanvasFrame(frame, right[index]));
+}
+
+function withWorkspaceCanvasFrames(workspace, canvasKey, frames) {
+  const currentFrames = getWorkspaceCanvasFrames(workspace, canvasKey);
+  const nextFrames = Array.isArray(frames)
+    ? frames.map((frame, index) => normalizeCanvasFrame(frame, index))
+    : [];
+
+  if (sameCanvasFrameList(currentFrames, nextFrames)) {
+    return workspace;
+  }
+
+  const nextCanvasFrames = { ...(workspace.canvasFrames || {}) };
+  if (nextFrames.length === 0) {
+    delete nextCanvasFrames[canvasKey];
+  } else {
+    nextCanvasFrames[canvasKey] = nextFrames;
+  }
+
+  return {
+    ...workspace,
+    canvasFrames: nextCanvasFrames
   };
 }
 
@@ -1289,78 +1422,6 @@ function normalizeVersionText(value) {
 function formatVersionLabel(value) {
   const normalized = normalizeVersionText(value);
   return normalized ? `v${normalized}` : '--';
-}
-
-function compareVersions(left, right) {
-  const parse = (value) => normalizeVersionText(value)
-    .split(/[.-]/)
-    .map((part) => Number.parseInt(part, 10))
-    .filter((part) => Number.isFinite(part));
-  const leftParts = parse(left);
-  const rightParts = parse(right);
-  const length = Math.max(leftParts.length, rightParts.length, 3);
-
-  for (let index = 0; index < length; index += 1) {
-    const diff = (leftParts[index] || 0) - (rightParts[index] || 0);
-    if (diff !== 0) {
-      return diff;
-    }
-  }
-
-  return 0;
-}
-
-function stripReleaseMarkdown(text) {
-  return String(text || '')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\*([^*]+)\*/g, '$1')
-    .replace(/#+\s*/g, '')
-    .trim();
-}
-
-function getReleaseSummaryLines(body, limit = 5) {
-  if (!body) {
-    return [];
-  }
-
-  const lines = [];
-  for (const rawLine of String(body).split(/\r?\n/)) {
-    const trimmed = rawLine.trim();
-    if (
-      !trimmed ||
-      /^#+\s*\[?v?\d/i.test(trimmed) ||
-      /^full changelog/i.test(trimmed) ||
-      /^contributors/i.test(trimmed)
-    ) {
-      continue;
-    }
-
-    const line = stripReleaseMarkdown(trimmed.replace(/^[-*+]\s+/, '').replace(/^\d+\.\s+/, ''));
-    if (line) {
-      lines.push(line);
-    }
-
-    if (lines.length >= limit) {
-      break;
-    }
-  }
-
-  return lines;
-}
-
-function formatReleaseDate(value, language) {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) {
-    return '';
-  }
-
-  return new Date(timestamp).toLocaleDateString(language === 'en' ? 'en-US' : 'zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  });
 }
 
 function isPanelLive(panel) {
@@ -1616,9 +1677,53 @@ function createEmptyWorkspace() {
     activeProjectId: null,
     canvasMode: 'project',
     sharedView: createDefaultView(),
+    canvasFrames: {},
     projectViews: {},
     projects: []
   };
+}
+
+function normalizeProjectOrder(projects) {
+  const pinnedProjects = [];
+  const regularProjects = [];
+
+  projects.forEach((project) => {
+    if (project?.pinned) {
+      pinnedProjects.push(project);
+      return;
+    }
+
+    regularProjects.push(project);
+  });
+
+  return [...pinnedProjects, ...regularProjects];
+}
+
+function haveSameProjectOrder(left, right) {
+  return left.length === right.length && left.every((project, index) => project.id === right[index]?.id);
+}
+
+function moveProjectInSidebarOrder(projects, draggedProjectId, targetProjectId, position = 'before') {
+  if (!Array.isArray(projects) || draggedProjectId === targetProjectId) {
+    return projects;
+  }
+
+  const nextProjects = projects.slice();
+  const sourceIndex = nextProjects.findIndex((project) => project.id === draggedProjectId);
+  const targetIndex = nextProjects.findIndex((project) => project.id === targetProjectId);
+  if (sourceIndex < 0 || targetIndex < 0) {
+    return projects;
+  }
+
+  const [draggedProject] = nextProjects.splice(sourceIndex, 1);
+  const adjustedTargetIndex = nextProjects.findIndex((project) => project.id === targetProjectId);
+  if (adjustedTargetIndex < 0) {
+    return projects;
+  }
+
+  nextProjects.splice(position === 'after' ? adjustedTargetIndex + 1 : adjustedTargetIndex, 0, draggedProject);
+  const normalizedProjects = normalizeProjectOrder(nextProjects);
+  return haveSameProjectOrder(normalizedProjects, projects) ? projects : normalizedProjects;
 }
 
 function createHistoryProject(historyDir) {
@@ -1651,13 +1756,14 @@ function normalizeWorkspace(raw) {
   }
 
   const projects = Array.isArray(raw.projects)
-    ? raw.projects.map((project) => ({
+    ? normalizeProjectOrder(raw.projects.map((project) => ({
       id: project.id || createLocalId('project'),
       name: project.name || deriveNameFromPath(project.path),
+      pinned: Boolean(project.pinned),
       path: project.path || '',
       createdAt: Number.isFinite(project.createdAt) ? project.createdAt : Date.now(),
       updatedAt: Number.isFinite(project.updatedAt) ? project.updatedAt : Date.now()
-    }))
+    })))
     : [];
   const activeProjectId = raw.activeProjectId === historyProjectId || projects.some((project) => project.id === raw.activeProjectId)
     ? raw.activeProjectId
@@ -1665,6 +1771,7 @@ function normalizeWorkspace(raw) {
   const projectViews = raw.projectViews && typeof raw.projectViews === 'object'
     ? Object.fromEntries(Object.entries(raw.projectViews).map(([key, value]) => [key, normalizeCanvasView(value)]))
     : {};
+  const canvasFrames = normalizeCanvasFrameMap(raw.canvasFrames);
 
   return {
     ...fallback,
@@ -1673,6 +1780,7 @@ function normalizeWorkspace(raw) {
     activeProjectId,
     canvasMode: canvasModes.has(raw.canvasMode) ? raw.canvasMode : fallback.canvasMode,
     sharedView: normalizeCanvasView(raw.sharedView),
+    canvasFrames,
     projectViews,
     projects
   };
@@ -1760,6 +1868,148 @@ function IconButton({ label, children, ...props }) {
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+function CanvasFrame({
+  active,
+  frame,
+  scale,
+  t,
+  onActivate,
+  onDelete,
+  onMove,
+  onResize,
+  onTitleChange,
+  onTitleCommit
+}) {
+  const startDrag = (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    onActivate(frame.id);
+
+    const start = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      x: frame.x,
+      y: frame.y
+    };
+
+    bindPointerSession((moveEvent) => {
+      onMove(frame.id, {
+        x: Math.round(start.x + (moveEvent.clientX - start.clientX) / scale),
+        y: Math.round(start.y + (moveEvent.clientY - start.clientY) / scale)
+      });
+    });
+  };
+
+  const startResize = (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    onActivate(frame.id);
+
+    const start = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      width: frame.width,
+      height: frame.height
+    };
+
+    bindPointerSession((moveEvent) => {
+      onResize(frame.id, {
+        width: Math.round(clamp(start.width + (moveEvent.clientX - start.clientX) / scale, canvasFrameMinWidth, 3200)),
+        height: Math.round(clamp(start.height + (moveEvent.clientY - start.clientY) / scale, canvasFrameMinHeight, 2400))
+      });
+    });
+  };
+
+  const handleTitleKeyDown = (event) => {
+    event.stopPropagation();
+
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.currentTarget.blur();
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.currentTarget.blur();
+      onTitleCommit(frame.id, event.currentTarget.value);
+    }
+  };
+
+  return (
+    <div
+      className={cn('canvas-frame', active && 'is-active')}
+      style={{
+        left: frame.x,
+        top: frame.y,
+        width: frame.width,
+        height: frame.height
+      }}
+    >
+      <div className="canvas-frame-outline" aria-hidden="true" />
+      <div className="canvas-frame-header">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="canvas-frame-drag h-7 w-7 text-muted-foreground"
+          title={t('moveCanvasFrame')}
+          aria-label={t('moveCanvasFrame')}
+          onPointerDown={startDrag}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <GripVertical className="h-4 w-4" />
+        </Button>
+        <Input
+          className="canvas-frame-title"
+          value={frame.title}
+          placeholder={t('canvasFrameTitlePlaceholder')}
+          aria-label={t('renameCanvasFrame')}
+          spellCheck={false}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+            onActivate(frame.id);
+          }}
+          onClick={(event) => event.stopPropagation()}
+          onFocus={() => onActivate(frame.id)}
+          onChange={(event) => onTitleChange(frame.id, event.target.value)}
+          onBlur={(event) => onTitleCommit(frame.id, event.target.value)}
+          onKeyDown={handleTitleKeyDown}
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="canvas-frame-delete h-7 w-7"
+          title={t('deleteCanvasFrame')}
+          aria-label={t('deleteCanvasFrame')}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete(frame.id);
+          }}
+        >
+          <X className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      <div
+        className="canvas-frame-resize"
+        title={t('resizeCanvasFrame')}
+        aria-hidden="true"
+        onPointerDown={startResize}
+      />
+    </div>
   );
 }
 
@@ -3675,6 +3925,17 @@ function TopbarLaunchMenu({
 function SystemStats({ stats, t }) {
   const cpuText = formatUsagePercent(stats?.cpuUsage);
   const memoryText = formatUsagePercent(stats?.memoryUsage);
+  const memoryTone = getMemoryUsageAlertTone(stats?.memoryUsage);
+  const memoryBlockClassName = cn(
+    'flex min-w-[72px] items-center gap-1.5 rounded-md px-1.5 transition-colors',
+    memoryTone === 'warning' && 'bg-amber-500/10 text-amber-700 dark:bg-amber-400/12 dark:text-amber-300',
+    memoryTone === 'critical' && 'bg-red-500/10 text-red-700 dark:bg-red-400/12 dark:text-red-200'
+  );
+  const memoryValueClassName = cn(
+    'font-mono tabular-nums text-foreground',
+    memoryTone === 'warning' && 'text-amber-700 dark:text-amber-300',
+    memoryTone === 'critical' && 'text-red-700 dark:text-red-200'
+  );
   const memoryTitle = stats
     ? `${t('memoryUsage')}: ${formatBytes(stats.usedMemory)} / ${formatBytes(stats.totalMemory)}`
     : t('systemStatsUnavailable');
@@ -3689,10 +3950,10 @@ function SystemStats({ stats, t }) {
         <span className="font-medium">{t('cpuUsage')}</span>
         <span className="font-mono tabular-nums text-foreground">{cpuText}</span>
       </div>
-      <div className="flex min-w-[72px] items-center gap-1.5" title={memoryTitle}>
-        <MemoryStick className="h-3.5 w-3.5 text-primary" />
+      <div className={memoryBlockClassName} title={memoryTitle}>
+        <MemoryStick className={cn('h-3.5 w-3.5 text-primary', memoryTone === 'warning' && 'text-amber-700 dark:text-amber-300', memoryTone === 'critical' && 'text-red-700 dark:text-red-200')} />
         <span className="font-medium">{t('memoryUsage')}</span>
-        <span className="font-mono tabular-nums text-foreground">{memoryText}</span>
+        <span className={memoryValueClassName}>{memoryText}</span>
       </div>
     </div>
   );
@@ -4291,25 +4552,9 @@ function ProjectConfigDialog({ onCreate, onOpenChange, open, t }) {
 
 function ReleaseInfoCard({
   appVersion,
-  language,
-  onOpenReleases,
-  onRefreshRelease,
-  releaseState = { status: 'idle', release: null, error: '' },
   t,
   detail = false
 }) {
-  const release = releaseState.release;
-  const releaseTitle = release?.name || release?.tagName || t('latestRelease');
-  const releaseVersion = release?.tagName || release?.name || '';
-  const releaseDate = formatReleaseDate(release?.publishedAt, language);
-  const summaryLines = getReleaseSummaryLines(release?.body);
-  const hasRelease = Boolean(release);
-  const checking = releaseState.status === 'loading';
-  const hasUpdate = hasRelease && appVersion && compareVersions(releaseVersion, appVersion) > 0;
-  const releaseStatus = checking
-    ? t('checkingUpdates')
-    : hasRelease ? (hasUpdate ? t('updateAvailable') : t('upToDate')) : t('releaseUnavailable');
-
   return (
     <div className={cn('sidebar-release-card', detail && 'is-detail')}>
       <div className="sidebar-release-header">
@@ -4317,60 +4562,24 @@ function ReleaseInfoCard({
           <div className="sidebar-release-kicker">{t('currentVersion')}</div>
           <div className="sidebar-release-version">{formatVersionLabel(appVersion)}</div>
         </div>
-        <Badge variant={hasUpdate ? 'success' : 'outline'} className="sidebar-release-badge">
-          {releaseStatus}
+        <Badge variant="success" className="sidebar-release-badge">
+          {t('localOnly')}
         </Badge>
       </div>
 
       <div className="sidebar-release-block">
-        <div className="sidebar-release-kicker">{t('latestRelease')}</div>
-        <button
-          type="button"
-          className="sidebar-release-link"
-          onClick={() => onOpenReleases(release?.htmlUrl || releasesUrl)}
-        >
-          <span className="min-w-0 truncate">{hasRelease ? releaseTitle : t('releaseUnavailable')}</span>
-          <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-        </button>
-        {releaseDate && <div className="sidebar-release-date">{releaseDate}</div>}
+        <div className="sidebar-release-kicker">{t('localData')}</div>
+        <div className="sidebar-release-empty">{t('localDataSummary')}</div>
       </div>
 
       <div className="sidebar-release-block">
-        <div className="sidebar-release-kicker">{t('updateContent')}</div>
-        {summaryLines.length > 0 ? (
-          <ul className="sidebar-release-notes">
-            {summaryLines.map((line, index) => (
-              <li key={`${index}-${line}`} className="sidebar-release-note">{line}</li>
-            ))}
-          </ul>
-        ) : (
-          <div className={cn('sidebar-release-empty', releaseState.error && 'is-error')}>
-            {releaseState.error || (checking ? t('checkingUpdates') : t('releaseUnavailable'))}
-          </div>
-        )}
+        <div className="sidebar-release-kicker">{t('appNetwork')}</div>
+        <div className="sidebar-release-empty">{t('appNetworkSummary')}</div>
       </div>
 
-      <div className="sidebar-release-actions">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          title={t('refreshRelease')}
-          aria-label={t('refreshRelease')}
-          onClick={() => onRefreshRelease()}
-        >
-          <RefreshCw className={cn('h-3.5 w-3.5', checking && 'animate-spin')} />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          className="h-7 min-w-0 flex-1 justify-start px-2 text-xs"
-          onClick={() => onOpenReleases(release?.htmlUrl || releasesUrl)}
-        >
-          <ExternalLink className="h-3.5 w-3.5" />
-          {t('openReleases')}
-        </Button>
+      <div className="sidebar-release-block">
+        <div className="sidebar-release-kicker">{t('cliNetworkNotice')}</div>
+        <div className="sidebar-release-empty">{t('cliNetworkNoticeSummary')}</div>
       </div>
     </div>
   );
@@ -4378,10 +4587,6 @@ function ReleaseInfoCard({
 
 function ReleaseInfo({
   appVersion,
-  language,
-  onOpenReleases,
-  onRefreshRelease,
-  releaseState = { status: 'idle', release: null, error: '' },
   t,
   compact = false
 }) {
@@ -4411,10 +4616,6 @@ function ReleaseInfo({
           <div className="p-4">
             <ReleaseInfoCard
               appVersion={appVersion}
-              language={language}
-              onOpenReleases={onOpenReleases}
-              onRefreshRelease={onRefreshRelease}
-              releaseState={releaseState}
               t={t}
               detail
             />
@@ -4584,6 +4785,7 @@ function WorkspaceSkillsSection({
 
 function FloatingCommandDock({
   activeId,
+  collapsed,
   inputRef,
   language,
   message,
@@ -4597,6 +4799,7 @@ function FloatingCommandDock({
   onInputDrop,
   onInputPaste,
   onSend,
+  onToggleCollapsed,
   onTargetChange,
   panels,
   targetId,
@@ -4613,13 +4816,13 @@ function FloatingCommandDock({
   return (
     <div className="pointer-events-none absolute bottom-3 left-1/2 z-[7000] w-[calc(100%-20px)] max-w-[980px] -translate-x-1/2 md:bottom-[18px] md:w-[calc(100%-32px)]">
       <Card
-        className="pointer-events-auto shadow-lg"
+        className="pointer-events-auto overflow-hidden shadow-lg"
         onPointerDown={(event) => event.stopPropagation()}
         onWheel={(event) => event.stopPropagation()}
         onDragOver={onInputDragOver}
         onDrop={onInputDrop}
       >
-        <CardHeader className="gap-2 px-3 py-3">
+        <CardHeader className={cn('px-3', collapsed ? 'gap-1 py-2.5' : 'gap-2 py-3')}>
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0 flex flex-1 items-center gap-2">
               <CardTitle className="shrink-0 text-sm">{t('floatingComposerTitle')}</CardTitle>
@@ -4627,127 +4830,144 @@ function FloatingCommandDock({
                 {targetSummary}
               </CardDescription>
             </div>
-            {targetPanel && (
-              <CliProviderBadge
-                className="shrink-0 px-2 py-0 text-[11px]"
-                language={language}
-                provider={getPanelCliProvider(targetPanel)}
-              />
-            )}
+            <div className="flex shrink-0 items-center gap-2">
+              {targetPanel && (
+                <CliProviderBadge
+                  className="shrink-0 px-2 py-0 text-[11px]"
+                  language={language}
+                  provider={getPanelCliProvider(targetPanel)}
+                />
+              )}
+              <IconButton
+                label={t(collapsed ? 'floatingComposerExpand' : 'floatingComposerCollapse')}
+                variant="ghost"
+                className="h-8 w-8 shrink-0"
+                aria-expanded={!collapsed}
+                onClick={onToggleCollapsed}
+              >
+                {collapsed ? <Maximize2 className="h-4 w-4" /> : <Minimize2 className="h-4 w-4" />}
+              </IconButton>
+            </div>
           </div>
-          <div
-            className="flex max-h-32 flex-wrap gap-2 overflow-x-hidden overflow-y-auto pr-1"
-            role="group"
-            aria-label={t('floatingComposerTarget')}
-          >
-            {panels.map((panel) => {
-              const executionState = getPanelExecutionState(panel);
-              const sendDisabled = !canPanelReceiveInput(panel);
-              const current = panel.id === activeId;
-              const targeted = panel.id === targetId;
-              const providerLabel = getCliProviderBadgeLabel(getPanelCliProvider(panel), language);
-              const summary = [
-                panel.title,
-                providerLabel,
-                getExecutionStateLabel(executionState, t),
-                current ? t('floatingComposerCurrent') : ''
-              ].filter(Boolean).join(', ');
+          {!collapsed && (
+            <div
+              className="flex max-h-32 flex-wrap gap-2 overflow-x-hidden overflow-y-auto pr-1"
+              role="group"
+              aria-label={t('floatingComposerTarget')}
+            >
+              {panels.map((panel) => {
+                const executionState = getPanelExecutionState(panel);
+                const sendDisabled = !canPanelReceiveInput(panel);
+                const current = panel.id === activeId;
+                const targeted = panel.id === targetId;
+                const providerLabel = getCliProviderBadgeLabel(getPanelCliProvider(panel), language);
+                const summary = [
+                  panel.title,
+                  providerLabel,
+                  getExecutionStateLabel(executionState, t),
+                  current ? t('floatingComposerCurrent') : ''
+                ].filter(Boolean).join(', ');
 
-              return (
-                <Button
-                  key={panel.id}
-                  type="button"
-                  variant={targeted ? 'primary' : 'outline'}
-                  size="sm"
-                  className={cn(
-                    'h-8 min-w-0 max-w-full basis-[220px] justify-start gap-1.5 px-2.5 text-[11px]',
-                    current && !targeted && 'border-primary/35',
-                    sendDisabled && 'opacity-60'
-                  )}
-                  aria-pressed={targeted}
-                  title={`${summary}\n${panel.cwd}`}
-                  onClick={() => onTargetChange(panel.id)}
-                >
-                  <span className={cn('shrink-0 terminal-endpoint-dot', `is-${executionState}`)} />
-                  <span className={cn(
-                    'min-w-0 truncate whitespace-nowrap',
-                    targeted ? 'text-primary-foreground' : 'text-foreground'
-                  )}>
-                    {summary}
-                  </span>
-                </Button>
-              );
-            })}
-          </div>
+                return (
+                  <Button
+                    key={panel.id}
+                    type="button"
+                    variant={targeted ? 'primary' : 'outline'}
+                    size="sm"
+                    className={cn(
+                      'h-8 min-w-0 max-w-full basis-[220px] justify-start gap-1.5 px-2.5 text-[11px]',
+                      current && !targeted && 'border-primary/35',
+                      sendDisabled && 'opacity-60'
+                    )}
+                    aria-pressed={targeted}
+                    title={`${summary}\n${panel.cwd}`}
+                    onClick={() => onTargetChange(panel.id)}
+                  >
+                    <span className={cn('shrink-0 terminal-endpoint-dot', `is-${executionState}`)} />
+                    <span className={cn(
+                      'min-w-0 truncate whitespace-nowrap',
+                      targeted ? 'text-primary-foreground' : 'text-foreground'
+                    )}>
+                      {summary}
+                    </span>
+                  </Button>
+                );
+              })}
+            </div>
+          )}
         </CardHeader>
 
-        <CardContent className="grid gap-2 px-3 pb-3 pt-0">
-          <div className="relative">
-            <Textarea
-              ref={inputRef}
-              rows={1}
-              spellCheck={false}
-              value={message}
-              placeholder={targetPanel
-                ? t('floatingComposerPlaceholder', { name: targetPanel.title })
-                : t('floatingComposerUnavailable')}
-              className="min-h-[108px] max-h-[260px] resize-none pb-12 pr-24 font-mono text-sm leading-6"
-              onChange={onInputChange}
-              onCompositionEnd={onInputCompositionEnd}
-              onCompositionStart={onInputCompositionStart}
-              onDragOver={onInputDragOver}
-              onDrop={onInputDrop}
-              onKeyDown={onInputKeyDown}
-              onPaste={onInputPaste}
-            />
-            <Button
-              type="button"
-              variant="primary"
-              size="sm"
-              className="absolute bottom-2 right-2 h-8 px-3 shadow-sm"
-              onClick={onSend}
-              disabled={!canSend}
-            >
-              {t('floatingComposerSend')}
-            </Button>
-          </div>
-        </CardContent>
+        {!collapsed && (
+          <>
+            <CardContent className="grid gap-2 px-3 pb-3 pt-0">
+              <div className="relative">
+                <Textarea
+                  ref={inputRef}
+                  rows={1}
+                  spellCheck={false}
+                  value={message}
+                  placeholder={targetPanel
+                    ? t('floatingComposerPlaceholder', { name: targetPanel.title })
+                    : t('floatingComposerUnavailable')}
+                  className="min-h-[108px] max-h-[260px] resize-none pb-12 pr-24 font-mono text-sm leading-6"
+                  onChange={onInputChange}
+                  onCompositionEnd={onInputCompositionEnd}
+                  onCompositionStart={onInputCompositionStart}
+                  onDragOver={onInputDragOver}
+                  onDrop={onInputDrop}
+                  onKeyDown={onInputKeyDown}
+                  onPaste={onInputPaste}
+                />
+                <Button
+                  type="button"
+                  variant="primary"
+                  size="sm"
+                  className="absolute bottom-2 right-2 h-8 px-3 shadow-sm"
+                  onClick={onSend}
+                  disabled={!canSend}
+                >
+                  {t('floatingComposerSend')}
+                </Button>
+              </div>
+            </CardContent>
 
-        <CardFooter className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2">
-          <div className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={targetPanel?.cwd || undefined}>
-            {targetPanel?.cwd
-              ? `${targetPanel.cwd} · ${t('floatingComposerHint')}`
-              : t('floatingComposerUnavailable')}
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-7 gap-1.5 px-2"
-              title={t('exportSession')}
-              aria-label={t('exportSession')}
-              onClick={() => canExport && onExport(targetPanel.id)}
-              disabled={!canExport}
-            >
-              <Download className="h-3.5 w-3.5" />
-              {t('exportSession')}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-7 gap-1.5 px-2"
-              title={t('exportSessionCustom')}
-              aria-label={t('exportSessionCustom')}
-              onClick={() => canExport && onExportCustom(targetPanel.id)}
-              disabled={!canExport}
-            >
-              <FolderOpen className="h-3.5 w-3.5" />
-              {t('exportSessionCustom')}
-            </Button>
-          </div>
-        </CardFooter>
+            <CardFooter className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2">
+              <div className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={targetPanel?.cwd || undefined}>
+                {targetPanel?.cwd
+                  ? `${targetPanel.cwd} · ${t('floatingComposerHint')}`
+                  : t('floatingComposerUnavailable')}
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1.5 px-2"
+                  title={t('exportSession')}
+                  aria-label={t('exportSession')}
+                  onClick={() => canExport && onExport(targetPanel.id)}
+                  disabled={!canExport}
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  {t('exportSession')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1.5 px-2"
+                  title={t('exportSessionCustom')}
+                  aria-label={t('exportSessionCustom')}
+                  onClick={() => canExport && onExportCustom(targetPanel.id)}
+                  disabled={!canExport}
+                >
+                  <FolderOpen className="h-3.5 w-3.5" />
+                  {t('exportSessionCustom')}
+                </Button>
+              </div>
+            </CardFooter>
+          </>
+        )}
       </Card>
     </div>
   );
@@ -4758,7 +4978,6 @@ function WorkspaceSidebar({
   workspace,
   activeProject,
   historyProject,
-  language,
   theme,
   onAddProject,
   onAddCommandLine,
@@ -4766,16 +4985,15 @@ function WorkspaceSidebar({
   onKillAll,
   onAddSession,
   onOpenPath,
-  onOpenReleases,
   onOpenCodexConfig,
   onRefreshSkills,
-  onRefreshRelease,
   onDeleteProject,
+  onReorderProjects,
   onSelectNoProject,
   onSelectProject,
   onThemeChange,
+  onToggleProjectPinned,
   onToggleSkillsCollapsed,
-  releaseState,
   skillsRootPath,
   skillsState,
   t,
@@ -4783,6 +5001,57 @@ function WorkspaceSidebar({
 }) {
   const collapsed = workspace.sidebarCollapsed;
   const userProjects = workspace.projects;
+  const [draggedProjectId, setDraggedProjectId] = useState(null);
+  const [dragTarget, setDragTarget] = useState(null);
+
+  const clearProjectDrag = useCallback(() => {
+    setDraggedProjectId(null);
+    setDragTarget(null);
+  }, []);
+
+  const getProjectDropPosition = useCallback((event) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
+  }, []);
+
+  const handleProjectDragStart = useCallback((event, projectId) => {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', projectId);
+    setDraggedProjectId(projectId);
+    setDragTarget(null);
+  }, []);
+
+  const handleProjectDragOver = useCallback((event, projectId) => {
+    const draggingId = draggedProjectId || event.dataTransfer.getData('text/plain');
+    if (!draggingId || draggingId === projectId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const position = getProjectDropPosition(event);
+    setDragTarget((current) => (
+      current?.projectId === projectId && current.position === position
+        ? current
+        : { projectId, position }
+    ));
+  }, [draggedProjectId, getProjectDropPosition]);
+
+  const handleProjectDrop = useCallback((event, projectId) => {
+    const draggingId = draggedProjectId || event.dataTransfer.getData('text/plain');
+    if (!draggingId || draggingId === projectId) {
+      clearProjectDrag();
+      return;
+    }
+
+    event.preventDefault();
+    onReorderProjects(draggingId, projectId, getProjectDropPosition(event));
+    clearProjectDrag();
+  }, [clearProjectDrag, draggedProjectId, getProjectDropPosition, onReorderProjects]);
+
+  const handleProjectDragEnd = useCallback(() => {
+    clearProjectDrag();
+  }, [clearProjectDrag]);
 
   if (collapsed) {
     return (
@@ -4807,10 +5076,6 @@ function WorkspaceSidebar({
         </IconButton>
         <ReleaseInfo
           appVersion={appVersion}
-          language={language}
-          onOpenReleases={onOpenReleases}
-          onRefreshRelease={onRefreshRelease}
-          releaseState={releaseState}
           t={t}
           compact
         />
@@ -4903,7 +5168,29 @@ function WorkspaceSidebar({
 
             {userProjects.map((project) => (
               <div key={project.id} className="sidebar-project-group">
-                <div className="sidebar-project-row" title={project.path}>
+                <div
+                  className={cn(
+                    'sidebar-project-row',
+                    draggedProjectId === project.id && 'is-dragging',
+                    dragTarget?.projectId === project.id && dragTarget.position === 'before' && 'drag-over-before',
+                    dragTarget?.projectId === project.id && dragTarget.position === 'after' && 'drag-over-after'
+                  )}
+                  title={project.path}
+                  onDragOver={(event) => handleProjectDragOver(event, project.id)}
+                  onDrop={(event) => handleProjectDrop(event, project.id)}
+                >
+                  <button
+                    type="button"
+                    className="sidebar-project-drag"
+                    aria-label={t('dragProject')}
+                    title={t('dragProject')}
+                    disabled={userProjects.length < 2}
+                    draggable={userProjects.length > 1}
+                    onDragStart={(event) => handleProjectDragStart(event, project.id)}
+                    onDragEnd={handleProjectDragEnd}
+                  >
+                    <GripVertical className="h-4 w-4" />
+                  </button>
                   <button
                     type="button"
                     className={cn('sidebar-project', activeProject?.id === project.id && 'active')}
@@ -4912,6 +5199,17 @@ function WorkspaceSidebar({
                     <FolderOpen className="h-4 w-4 shrink-0" />
                     <span className="min-w-0 flex-1 truncate text-left">{project.name}</span>
                   </button>
+                  <IconButton
+                    label={project.pinned ? t('unpinProject') : t('pinProject')}
+                    variant="ghost"
+                    className={cn(
+                      'sidebar-project-pin h-8 w-8 text-muted-foreground hover:text-foreground',
+                      project.pinned && 'is-pinned text-primary'
+                    )}
+                    onClick={() => onToggleProjectPinned(project.id)}
+                  >
+                    <Pin className="h-4 w-4" />
+                  </IconButton>
                   <IconButton
                     label={t('deleteProject')}
                     variant="ghost"
@@ -4944,10 +5242,6 @@ function WorkspaceSidebar({
         <SidebarThemeControl theme={theme} onThemeChange={onThemeChange} t={t} />
         <ReleaseInfo
           appVersion={appVersion}
-          language={language}
-          onOpenReleases={onOpenReleases}
-          onRefreshRelease={onRefreshRelease}
-          releaseState={releaseState}
           t={t}
         />
         <Button className="w-full justify-start" variant="destructive" onClick={onKillAll}>
@@ -4976,6 +5270,8 @@ export default function App() {
   const [endpointGroups, setEndpointGroups] = useState([]);
   const [selectedEndpointIds, setSelectedEndpointIds] = useState(() => new Set());
   const [activeId, setActiveId] = useState(null);
+  const [activeCanvasFrameId, setActiveCanvasFrameId] = useState(null);
+  const [pendingCanvasFrame, setPendingCanvasFrame] = useState(false);
   const [launchCliProviderId, setLaunchCliProviderId] = useState(defaultCliProviderId);
   const [codexOpen, setCodexOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
@@ -5002,11 +5298,11 @@ export default function App() {
   const [appInfo, setAppInfo] = useState({ appVersion: '' });
   const [codexProfileState, setCodexProfileState] = useState(createEmptyCodexProfile);
   const [codexProfileLoading, setCodexProfileLoading] = useState(true);
-  const [releaseState, setReleaseState] = useState({ status: 'idle', release: null, error: '' });
   const [panning, setPanning] = useState(false);
   const [toast, setToast] = useState('');
   const [commandDockValue, setCommandDockValue] = useState('');
   const [commandDockTargetId, setCommandDockTargetId] = useState('');
+  const [commandDockCollapsed, setCommandDockCollapsed] = useState(false);
   const viewportRef = useRef(null);
   const commandDockInputRef = useRef(null);
   const commandDockComposingRef = useRef(false);
@@ -5021,6 +5317,7 @@ export default function App() {
   const viewRef = useRef(view);
   const canvasScopeKeyRef = useRef(getWorkspaceCanvasKey(initialWorkspace));
   const activeIdRef = useRef(null);
+  const activeCanvasFrameIdRef = useRef(null);
   const cwdRef = useRef(cwd);
   const workspaceTreeRequestIdRef = useRef(0);
   const workspaceSkillsRequestIdRef = useRef(0);
@@ -5053,6 +5350,10 @@ export default function App() {
   const visiblePanels = useMemo(
     () => panels.filter((panel) => isPanelVisibleInWorkspace(panel, workspace)),
     [panels, workspace.activeProjectId, workspace.canvasMode]
+  );
+  const visibleCanvasFrames = useMemo(
+    () => getWorkspaceCanvasFrames(workspace),
+    [workspace]
   );
   const visiblePanelIds = useMemo(
     () => new Set(visiblePanels.map((panel) => panel.id)),
@@ -5148,6 +5449,10 @@ export default function App() {
   }, [activeId]);
 
   useEffect(() => {
+    activeCanvasFrameIdRef.current = activeCanvasFrameId;
+  }, [activeCanvasFrameId]);
+
+  useEffect(() => {
     cwdRef.current = cwd;
   }, [cwd]);
 
@@ -5167,6 +5472,16 @@ export default function App() {
       setActiveId(null);
     }
   }, [activeId, visiblePanelIds]);
+
+  useEffect(() => {
+    if (activeCanvasFrameId && !visibleCanvasFrames.some((frame) => frame.id === activeCanvasFrameId)) {
+      setActiveCanvasFrameId(null);
+    }
+  }, [activeCanvasFrameId, visibleCanvasFrames]);
+
+  useEffect(() => {
+    setPendingCanvasFrame(false);
+  }, [workspace.activeProjectId, workspace.canvasMode]);
 
   useEffect(() => {
     const activeGroupIds = new Set(panels.filter((panel) => panel.groupId).map((panel) => panel.groupId));
@@ -5452,6 +5767,14 @@ export default function App() {
     resizeCommandDockInput();
   }, [commandDockValue, resizeCommandDockInput]);
 
+  useEffect(() => {
+    if (!commandDockVisible || commandDockCollapsed) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => resizeCommandDockInput());
+  }, [commandDockCollapsed, commandDockVisible, resizeCommandDockInput]);
+
   const handleCommandDockInputChange = useCallback((event) => {
     setCommandDockValue(event.target.value);
     resizeCommandDockInput(event.target);
@@ -5461,6 +5784,27 @@ export default function App() {
     setCommandDockTargetId(id);
     window.requestAnimationFrame(() => commandDockInputRef.current?.focus());
   }, []);
+
+  const expandCommandDock = useCallback(() => {
+    if (!commandDockCollapsed) {
+      return;
+    }
+
+    setCommandDockCollapsed(false);
+    window.requestAnimationFrame(() => {
+      resizeCommandDockInput();
+      commandDockInputRef.current?.focus();
+    });
+  }, [commandDockCollapsed, resizeCommandDockInput]);
+
+  const toggleCommandDockCollapsed = useCallback(() => {
+    if (commandDockCollapsed) {
+      expandCommandDock();
+      return;
+    }
+
+    setCommandDockCollapsed(true);
+  }, [commandDockCollapsed, expandCommandDock]);
 
   const insertTextIntoCommandDock = useCallback((text) => {
     const normalizedText = String(text || '');
@@ -5661,27 +6005,6 @@ export default function App() {
     }
   }, [showToast, t]);
 
-  const loadLatestRelease = useCallback((force = false) => {
-    setReleaseState((current) => ({ ...current, status: 'loading', error: '' }));
-    bridge.getLatestRelease({ force }).then((snapshot) => {
-      setReleaseState({
-        status: 'loaded',
-        release: snapshot?.release || null,
-        error: ''
-      });
-    }).catch((error) => {
-      setReleaseState((current) => ({
-        ...current,
-        status: 'error',
-        error: error.message
-      }));
-    });
-  }, []);
-
-  const openReleases = useCallback((url = releasesUrl) => {
-    bridge.openExternal(url || releasesUrl).catch((error) => showToast(error.message));
-  }, [showToast]);
-
   const commitWorkspace = useCallback((updater) => {
     const currentCanvasKey = canvasScopeKeyRef.current;
     const currentWithView = withWorkspaceCanvasView(workspaceRef.current, currentCanvasKey, viewRef.current);
@@ -5699,6 +6022,14 @@ export default function App() {
     return nextWorkspace;
   }, []);
 
+  const updateCanvasFramesForKey = useCallback((canvasKey, updater) => {
+    commitWorkspace((currentWorkspace) => {
+      const currentFrames = getWorkspaceCanvasFrames(currentWorkspace, canvasKey);
+      const nextFrames = updater(currentFrames);
+      return withWorkspaceCanvasFrames(currentWorkspace, canvasKey, nextFrames);
+    });
+  }, [commitWorkspace]);
+
   useEffect(() => {
     bridge.getAppInfo().then((info) => {
       setAppInfo(info);
@@ -5714,10 +6045,6 @@ export default function App() {
       showToast(error.message);
     });
   }, [activeProject?.path, showToast, t]);
-
-  useEffect(() => {
-    loadLatestRelease(false);
-  }, [loadLatestRelease]);
 
   useEffect(() => {
     loadCodexProfile({ quiet: true }).catch(() => {});
@@ -5841,6 +6168,27 @@ export default function App() {
     };
   }, [getViewportRect, view]);
 
+  const clientPointToCanvas = useCallback((clientX, clientY, canvasView = viewRef.current) => {
+    const rect = getViewportRect();
+    return {
+      x: (clientX - rect.left - canvasView.x) / canvasView.scale,
+      y: (clientY - rect.top - canvasView.y) / canvasView.scale
+    };
+  }, [getViewportRect]);
+
+  const buildCanvasFrameBounds = useCallback((anchor, point) => {
+    const deltaX = point.x - anchor.x;
+    const deltaY = point.y - anchor.y;
+    const width = Math.max(Math.abs(deltaX), canvasFrameMinWidth);
+    const height = Math.max(Math.abs(deltaY), canvasFrameMinHeight);
+    return {
+      x: Math.round(deltaX >= 0 ? anchor.x : anchor.x - width),
+      y: Math.round(deltaY >= 0 ? anchor.y : anchor.y - height),
+      width: Math.round(width),
+      height: Math.round(height)
+    };
+  }, []);
+
   const getCenteredTerminalSlot = useCallback((targetWorkspace, width = 640, height = 380) => {
     const targetView = getWorkspaceCanvasView(targetWorkspace, viewRef.current);
     const rect = getViewportRect();
@@ -5861,6 +6209,7 @@ export default function App() {
     const panel = panelsRef.current.find((item) => item.id === id);
     nextZIndex.current += 1;
     setActiveId(id);
+    setActiveCanvasFrameId(null);
     setPanels((current) => current.map((panel) => (
       panel.id === id ? { ...panel, zIndex: nextZIndex.current } : panel
     )));
@@ -5868,6 +6217,42 @@ export default function App() {
       window.requestAnimationFrame(() => focusTerminalInstance(id));
     }
   }, [focusTerminalInstance]);
+
+  const activateCanvasFrame = useCallback((id) => {
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    setActiveCanvasFrameId(id);
+    setActiveId(null);
+    updateCanvasFramesForKey(canvasKey, (currentFrames) => {
+      const index = currentFrames.findIndex((frame) => frame.id === id);
+      if (index < 0 || index === currentFrames.length - 1) {
+        return currentFrames;
+      }
+
+      const nextFrames = [...currentFrames];
+      const [frame] = nextFrames.splice(index, 1);
+      nextFrames.push(frame);
+      return nextFrames;
+    });
+  }, [updateCanvasFramesForKey]);
+
+  const updateCanvasFrame = useCallback((id, patch) => {
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    setActiveCanvasFrameId(id);
+    updateCanvasFramesForKey(canvasKey, (currentFrames) => currentFrames.map((frame) => (
+      frame.id === id ? normalizeCanvasFrame({ ...frame, ...patch }) : frame
+    )));
+  }, [updateCanvasFramesForKey]);
+
+  const commitCanvasFrameTitle = useCallback((id, title) => {
+    const nextTitle = String(title || '').trim() || t('canvasFrameDefaultTitle');
+    updateCanvasFrame(id, { title: nextTitle });
+  }, [t, updateCanvasFrame]);
+
+  const deleteCanvasFrame = useCallback((id) => {
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    setActiveCanvasFrameId((current) => (current === id ? null : current));
+    updateCanvasFramesForKey(canvasKey, (currentFrames) => currentFrames.filter((frame) => frame.id !== id));
+  }, [updateCanvasFramesForKey]);
 
   const createTerminal = useCallback(async (slot = {}) => {
     const center = viewportCenterOnCanvas();
@@ -6106,6 +6491,7 @@ export default function App() {
 
   const activateEndpointGroup = useCallback((id) => {
     nextZIndex.current += 1;
+    setActiveCanvasFrameId(null);
     setEndpointGroups((current) => current.map((group) => (
       group.id === id ? { ...group, zIndex: nextZIndex.current } : group
     )));
@@ -6463,6 +6849,7 @@ export default function App() {
     const project = {
       id: createLocalId('project'),
       name: requestedName || deriveNameFromPath(selected),
+      pinned: false,
       path: selected,
       createdAt: now,
       updatedAt: now
@@ -6471,7 +6858,7 @@ export default function App() {
     commitWorkspace((currentWorkspace) => ({
       ...currentWorkspace,
       activeProjectId: project.id,
-      projects: [project, ...currentWorkspace.projects]
+      projects: normalizeProjectOrder([project, ...currentWorkspace.projects])
     }));
     setCwd(project.path);
     showToast(t('addedProject', { name: project.name }));
@@ -6502,6 +6889,47 @@ export default function App() {
     showToast(t(mode === 'shared' ? 'switchedCanvasModeShared' : 'switchedCanvasModeProject'));
   }, [commitWorkspace, showToast, t]);
 
+  const toggleProjectPinned = useCallback((projectId) => {
+    commitWorkspace((currentWorkspace) => {
+      const projectIndex = currentWorkspace.projects.findIndex((item) => item.id === projectId);
+      if (projectIndex < 0) {
+        return currentWorkspace;
+      }
+
+      const nextProjects = currentWorkspace.projects.slice();
+      const [project] = nextProjects.splice(projectIndex, 1);
+      const nextPinned = !project.pinned;
+      const updatedProject = { ...project, pinned: nextPinned, updatedAt: Date.now() };
+
+      if (nextPinned) {
+        nextProjects.unshift(updatedProject);
+      } else {
+        const insertIndex = nextProjects.findIndex((item) => !item.pinned);
+        nextProjects.splice(insertIndex < 0 ? nextProjects.length : insertIndex, 0, updatedProject);
+      }
+
+      return {
+        ...currentWorkspace,
+        projects: normalizeProjectOrder(nextProjects)
+      };
+    });
+  }, [commitWorkspace]);
+
+  const reorderProjects = useCallback((draggedProjectId, targetProjectId, position = 'before') => {
+    commitWorkspace((currentWorkspace) => {
+      const nextProjects = moveProjectInSidebarOrder(
+        currentWorkspace.projects,
+        draggedProjectId,
+        targetProjectId,
+        position
+      );
+
+      return nextProjects === currentWorkspace.projects
+        ? currentWorkspace
+        : { ...currentWorkspace, projects: nextProjects };
+    });
+  }, [commitWorkspace]);
+
   const deleteProject = useCallback((projectId) => {
     if (projectId === historyProjectId) {
       return;
@@ -6526,9 +6954,11 @@ export default function App() {
 
     commitWorkspace((workspaceWithView) => {
       const { [projectId]: _removedView, ...projectViews } = workspaceWithView.projectViews;
+      const { [projectId]: _removedFrames, ...canvasFrames } = workspaceWithView.canvasFrames || {};
       return {
         ...workspaceWithView,
         activeProjectId: nextActiveProject?.id || null,
+        canvasFrames,
         projectViews,
         projects
       };
@@ -6574,8 +7004,41 @@ export default function App() {
       return;
     }
 
+    if (pendingCanvasFrame) {
+      event.preventDefault();
+      setActiveId(null);
+
+      const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+      const anchor = clientPointToCanvas(event.clientX, event.clientY);
+      const frameId = createLocalId('canvas-frame');
+      const initialFrame = {
+        id: frameId,
+        title: t('canvasFrameDefaultTitle'),
+        ...buildCanvasFrameBounds(anchor, anchor)
+      };
+
+      setActiveCanvasFrameId(frameId);
+      updateCanvasFramesForKey(canvasKey, (currentFrames) => [...currentFrames, initialFrame]);
+
+      bindPointerSession((moveEvent) => {
+        const point = clientPointToCanvas(moveEvent.clientX, moveEvent.clientY);
+        updateCanvasFramesForKey(canvasKey, (currentFrames) => currentFrames.map((frame) => (
+          frame.id === frameId
+            ? {
+                ...frame,
+                ...buildCanvasFrameBounds(anchor, point)
+              }
+            : frame
+        )));
+      }, () => {
+        setPendingCanvasFrame(false);
+      });
+      return;
+    }
+
     event.preventDefault();
     setPanning(true);
+    setActiveCanvasFrameId(null);
     const start = {
       clientX: event.clientX,
       clientY: event.clientY,
@@ -6636,6 +7099,12 @@ export default function App() {
         event.target.isContentEditable
       );
 
+      if (event.key === 'Escape' && pendingCanvasFrame) {
+        event.preventDefault();
+        setPendingCanvasFrame(false);
+        return;
+      }
+
       if (event.ctrlKey && event.key.toLowerCase() === 'n') {
         event.preventDefault();
         if (event.shiftKey) {
@@ -6655,6 +7124,16 @@ export default function App() {
       const activePanel = panelsRef.current.find((panel) => panel.id === activeIdRef.current);
       if (
         event.key === 'Delete' &&
+        activeCanvasFrameIdRef.current &&
+        !editable &&
+        !closestElement(event.target, '.terminal-host')
+      ) {
+        deleteCanvasFrame(activeCanvasFrameIdRef.current);
+        return;
+      }
+
+      if (
+        event.key === 'Delete' &&
         activeIdRef.current &&
         activePanel &&
         isPanelVisibleInWorkspace(activePanel, workspaceRef.current) &&
@@ -6667,7 +7146,14 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [closeTerminal, createWorkspaceCommandLine, createWorkspaceSession, openNewSessionPicker]);
+  }, [
+    closeTerminal,
+    createWorkspaceCommandLine,
+    createWorkspaceSession,
+    deleteCanvasFrame,
+    openNewSessionPicker,
+    pendingCanvasFrame
+  ]);
 
   const minorGrid = 48 * view.scale;
   const majorGrid = minorGrid * 4;
@@ -6686,7 +7172,6 @@ export default function App() {
           workspace={workspace}
           activeProject={activeProject}
           historyProject={historyProject}
-          language={language}
           theme={theme}
           onAddProject={openProjectDialog}
           onAddCommandLine={openCommandLineDialog}
@@ -6694,16 +7179,15 @@ export default function App() {
           onCanvasModeChange={changeCanvasMode}
           onKillAll={killAll}
           onOpenPath={openWorkspacePath}
-          onOpenReleases={openReleases}
           onOpenCodexConfig={() => setCodexOpen(true)}
           onRefreshSkills={refreshWorkspaceSkills}
-          onRefreshRelease={() => loadLatestRelease(true)}
           onDeleteProject={deleteProject}
+          onReorderProjects={reorderProjects}
           onSelectNoProject={selectNoProject}
           onSelectProject={selectProject}
           onThemeChange={setTheme}
+          onToggleProjectPinned={toggleProjectPinned}
           onToggleSkillsCollapsed={toggleSkillsCollapsed}
-          releaseState={releaseState}
           skillsRootPath={skillsRootPath}
           skillsState={workspaceSkillsState}
           t={t}
@@ -6790,7 +7274,7 @@ export default function App() {
           <main
             ref={viewportRef}
             id="viewport"
-            className={cn('viewport', panning && 'is-panning')}
+            className={cn('viewport', panning && 'is-panning', pendingCanvasFrame && 'is-creating-frame')}
             tabIndex={0}
             style={{
               backgroundSize: `${majorGrid}px ${majorGrid}px, ${majorGrid}px ${majorGrid}px, ${minorGrid}px ${minorGrid}px, ${minorGrid}px ${minorGrid}px`,
@@ -6800,6 +7284,22 @@ export default function App() {
             onWheel={handleWheel}
           >
             <div className="canvas-tools">
+              <Button
+                id="addCanvasFrame"
+                variant={pendingCanvasFrame ? 'default' : 'outline'}
+                onClick={() => {
+                  setPendingCanvasFrame((current) => {
+                    const next = !current;
+                    if (next) {
+                      showToast(t('canvasFrameHint'));
+                    }
+                    return next;
+                  });
+                }}
+              >
+                <Plus className="h-4 w-4" />
+                {pendingCanvasFrame ? t('addCanvasFrameArmed') : t('addCanvasFrame')}
+              </Button>
               <Button id="groupEndpoints" onClick={groupEndpoints} disabled={groupableEndpointCount < 2}>
                 <Grid2X2 className="h-4 w-4" />
                 {groupableEndpointCount > 0 ? `${t('groupEndpoints')} ${groupableEndpointCount}` : t('groupEndpoints')}
@@ -6814,6 +7314,24 @@ export default function App() {
               className="stage"
               style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
             >
+              <div className="canvas-frame-layer">
+                {visibleCanvasFrames.map((frame) => (
+                  <CanvasFrame
+                    key={frame.id}
+                    active={frame.id === activeCanvasFrameId}
+                    frame={frame}
+                    scale={view.scale}
+                    t={t}
+                    onActivate={activateCanvasFrame}
+                    onDelete={deleteCanvasFrame}
+                    onMove={updateCanvasFrame}
+                    onResize={updateCanvasFrame}
+                    onTitleChange={(id, title) => updateCanvasFrame(id, { title })}
+                    onTitleCommit={commitCanvasFrameTitle}
+                  />
+                ))}
+              </div>
+              <div className="canvas-session-layer">
               {visibleEndpointGroups.map(({ group, panels: groupPanels }) => (
                 <EndpointGroup
                   key={group.id}
@@ -6862,6 +7380,7 @@ export default function App() {
                 />
                 );
               })}
+              </div>
             </div>
 
             {visiblePanels.length === 0 && (
@@ -6895,6 +7414,7 @@ export default function App() {
       {commandDockVisible && (
         <FloatingCommandDock
           activeId={activeId}
+          collapsed={commandDockCollapsed}
           inputRef={commandDockInputRef}
           language={language}
           message={commandDockValue}
@@ -6908,6 +7428,7 @@ export default function App() {
           onInputDrop={handleCommandDockDrop}
           onInputPaste={handleCommandDockPaste}
           onSend={sendCommandDockInput}
+          onToggleCollapsed={toggleCommandDockCollapsed}
           onTargetChange={selectCommandDockTarget}
           panels={commandDockPanels}
           targetId={commandDockTargetId}
@@ -6963,7 +7484,13 @@ export default function App() {
       />
 
       {toast && (
-        <Card id="toast" className={cn('toast', commandDockVisible && 'is-lifted')}>
+        <Card
+          id="toast"
+          className={cn(
+            'toast',
+            commandDockVisible && (commandDockCollapsed ? 'is-lifted-compact' : 'is-lifted')
+          )}
+        >
           <CardContent className="p-0">{toast}</CardContent>
         </Card>
       )}

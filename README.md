@@ -5,7 +5,7 @@
 # CLI in One
 
 <p align="center">
-  Run multiple Codex and shell sessions side by side on one infinite canvas.
+  Run multiple Codex, Cursor, and shell sessions side by side on one infinite canvas.
 </p>
 
 <p align="center">
@@ -51,15 +51,18 @@ If you run several terminal-based tools at once (especially [OpenAI Codex CLI](h
 ### Key Features
 
 - Infinite canvas with pan, zoom, drag, resize, minimize, endpoint grouping, and one-click grid arrangement.
+- Human-only annotation frames that you can draw, rename, move, and resize directly on the canvas.
 - Project-aware session launcher. `New session` opens a chooser for Codex, Cursor, or CMD, then starts in the selected project or directory.
+- Sidebar project management with pinning and drag reordering.
 - Plain local shell sessions for ad-hoc work.
+- Collapsible Quick Send dock that can send text, pasted images, or dropped images into a live session.
 - xterm.js renderer with `node-pty` and Windows ConPTY when available, plus a pipe fallback if the native module is unavailable.
 - Built-in Codex quick config editor for model, provider, auth, approval policy, sandbox mode, wire API, and common toggles.
 - Raw file editor for `~/.codex/auth.json` and `~/.codex/config.toml`, with validation, backups, and atomic writes.
 - Session transcript export to `.txt`.
 - Local project shortcuts, canvas layout, theme, and language persistence.
 - English and Chinese UI, plus light and dark themes.
-- Latest GitHub release panel and simple system status widgets.
+- Local-only version/safety panel plus CPU and RAM status widgets with memory warning states.
 
 ### Tech Stack
 
@@ -95,15 +98,21 @@ npm run dev:renderer
 ### How To Use
 
 1. Start the app and add one or more local project folders from the sidebar.
-2. Click `New session` and choose Codex, Cursor, or CMD, then pick the current directory or a saved project.
-3. Click `New CMD` when you want a normal shell immediately, without the session picker.
-4. Arrange the workspace by dragging panel headers to move terminals, dragging the lower-right corner to resize, using the mouse wheel to pan, using `Ctrl + mouse wheel` to zoom, and clicking `Arrange` to place visible sessions into a grid.
-5. Open `Settings` to switch language and theme, manage Codex quick presets, and edit `~/.codex/auth.json` or `~/.codex/config.toml`.
-6. Use the session actions to restart, close, minimize, or export a transcript.
+2. Pin or drag-reorder projects in the sidebar so the repos you use most stay at the top.
+3. Click `New session` and choose Codex, Cursor, or CMD, then pick the current directory or a saved project.
+4. Click `New CMD` when you want a normal shell immediately, without the session picker.
+5. Arrange the workspace by dragging panel headers to move terminals, dragging the lower-right corner to resize, using the mouse wheel to pan, using `Ctrl + mouse wheel` to zoom, and clicking `Arrange` to place visible sessions into a grid.
+6. Click `Frame`, then drag on empty canvas space to create a workflow note that labels a cluster of terminals or explains what a command group is doing.
+7. Use `Quick Send` for short prompts or image references, and collapse it when you want more canvas space.
+8. Open `Settings` to switch language and theme, manage Codex quick presets, and edit `~/.codex/auth.json` or `~/.codex/config.toml`.
+9. Use the session actions to restart, close, minimize, or export a transcript.
 
 ### Data, Files, and Safety
 
-- App preferences and workspace state are stored locally in browser storage.
+- CLI in One itself is fully local: it does not upload session content, sync data to any cloud service, or make built-in network requests.
+- App preferences, project shortcuts, canvas layouts, quick profiles, and exported files are all stored on your machine.
+- Commands you launch inside the terminal are still your own local CLI processes. Whether Codex, Cursor, git, or any other command connects to a network depends on that tool itself.
+- Workspace state is persisted in local browser storage inside the Electron app.
 - Terminal output stays in memory until you export it.
 - Exported transcripts go to `.history/` by default. In development that folder is under the project directory; in packaged builds it is next to the app executable.
 - Saved Codex quick presets are written to `codex-quick-profiles.json` next to the app.
@@ -168,15 +177,18 @@ CLI in One 是一个本地 Electron 桌面应用，面向习惯在终端里使�
 ### 核心功能
 
 - 无限画布，支持平移、缩放、拖拽、调整大小、最小化为端点、端点分组和一键网格整理。
+- 支持只给人看的说明框，可直接在画布上拖出来，再修改标题、移动和缩放。
 - 面向项目的会话启动器。点击 `新增会话` 后可选择 Codex、Cursor 或 CMD，再选择项目或目录启动。
+- 侧边栏项目支持置顶和拖拽排序。
 - 普通本地 shell 会话，适合临时命令或辅助操作。
+- 支持可折叠的快捷发送面板，可把文本、粘贴图片或拖拽图片发到当前会话。
 - 基于 xterm.js 渲染终端；可用时使用 `node-pty` 和 Windows ConPTY，不可用时自动回退到 pipe 模式。
 - 内置 Codex 快捷配置编辑，可管理 model、provider、auth、approval policy、sandbox mode、wire API 等常用项。
 - 内置原始文件编辑，可直接修改 `~/.codex/auth.json` 和 `~/.codex/config.toml`，并带校验、备份和原子写入。
 - 支持将会话记录导出为 `.txt`。
 - 本地保存项目快捷入口、画布布局、主题和语言偏好。
 - 支持中英文界面，以及浅色和深色主题。
-- 内置 GitHub 最新版本信息和基础系统状态显示。
+- 内置本地安全说明，以及带内存预警状态的 CPU / RAM 显示。
 
 ### 技术栈
 
@@ -212,15 +224,21 @@ npm run dev:renderer
 ### 如何使用
 
 1. 启动应用后，在侧边栏添加一个或多个本地项目目录。
-2. 点击 `新增会话` 后选择 Codex、Cursor 或 CMD，再选择当前目录或已保存项目。
-3. 点击 `新增 CMD` 可以直接新建普通 shell，而不经过会话选择器。
-4. 在画布上整理终端。拖动面板标题栏可移动终端，拖动右下角可调整大小，鼠标滚轮可平移，`Ctrl + 鼠标滚轮` 可缩放，点击 `整理` 可将当前可见终端自动排成网格。
-5. 打开 `设置` 可切换语言和主题，管理 Codex 快捷配置，并直接编辑 `~/.codex/auth.json` 或 `~/.codex/config.toml`。
-6. 使用会话操作按钮可重启、关闭、最小化或导出会话记录。
+2. 常用项目可以在侧边栏置顶，也可以通过拖拽调整顺序。
+3. 点击 `新增会话` 后选择 Codex、Cursor 或 CMD，再选择当前目录或已保存项目。
+4. 点击 `新增 CMD` 可以直接新建普通 shell，而不经过会话选择器。
+5. 在画布上整理终端。拖动面板标题栏可移动终端，拖动右下角可调整大小，鼠标滚轮可平移，`Ctrl + 鼠标滚轮` 可缩放，点击 `整理` 可将当前可见终端自动排成网格。
+6. 点击 `说明框` 后，可在空白画布上拖出一个流程说明框，用来标注一组终端或命令的用途。
+7. 使用 `快捷发送` 给当前会话发短消息或图片引用，不需要时可以先收起，留更多画布空间。
+8. 打开 `设置` 可切换语言和主题，管理 Codex 快捷配置，并直接编辑 `~/.codex/auth.json` 或 `~/.codex/config.toml`。
+9. 使用会话操作按钮可重启、关闭、最小化或导出会话记录。
 
 ### 数据、文件与安全性
 
-- 应用偏好和工作区状态保存在本地浏览器存储中。
+- CLI in One 应用本身完全本地：不上传会话内容、不做云同步，也不内置任何联网请求。
+- 应用偏好、项目快捷入口、画布布局、快捷配置方案和导出文件都保存在当前设备本地。
+- 终端里启动的命令仍然是你自己的本地 CLI 进程。Codex、Cursor、git 或其他命令是否联网，取决于这些工具自身的行为和配置。
+- 工作区状态会保存在 Electron 内部的本地浏览器存储里。
 - 终端输出默认只保留在内存里，只有导出时才会写入文件。
 - 会话导出默认写入 `.history/`。开发环境下位于项目目录中；打包后位于应用可执行文件旁边。
 - Codex 快捷配置方案会保存到应用旁边的 `codex-quick-profiles.json`。
