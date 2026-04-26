@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld('cliBridge', {
   getSystemStats: () => ipcRenderer.invoke('app:system-stats'),
   getLatestRelease: (options) => ipcRenderer.invoke('release:latest', options),
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
+  openWorkspacePath: (targetPath) => ipcRenderer.invoke('workspace:open-path', targetPath),
+  readWorkspaceTree: (options) => ipcRenderer.invoke('workspace:read-tree', options),
+  readWorkspaceSkills: (options) => ipcRenderer.invoke('workspace:read-skills', options),
   chooseDirectory: () => ipcRenderer.invoke('dialog:choose-directory'),
   chooseTerminalExportDirectory: () => ipcRenderer.invoke('dialog:choose-export-directory'),
   readCodexConfig: (kind) => ipcRenderer.invoke('codex-config:read', kind),
@@ -29,6 +32,7 @@ contextBridge.exposeInMainWorld('cliBridge', {
     clipboard.writeText(typeof text === 'string' ? text : '');
     return true;
   },
+  saveCommandDockImage: (payload) => ipcRenderer.invoke('command-dock:save-image', payload),
   createTerminal: (options) => ipcRenderer.invoke('terminal:create', options),
   killTerminal: (id) => ipcRenderer.invoke('terminal:kill', id),
   killAllTerminals: () => ipcRenderer.invoke('terminal:kill-all'),

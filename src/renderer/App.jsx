@@ -4,9 +4,14 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import {
   Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
   Cpu,
   Download,
   ExternalLink,
+  File,
+  Folder,
   FolderOpen,
   FolderPlus,
   GripVertical,
@@ -21,6 +26,8 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -34,7 +41,7 @@ import {
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
@@ -51,22 +58,227 @@ import {
 } from '@/components/ui/dialog';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
+import cliProviderRegistry from '../shared/cli-providers.json';
+import codexIconSvg from '../../static/codex-color.svg?raw';
+import cursorIconSvg from '../../static/cursor.svg?raw';
 
 const bridge = window.cliBridge;
 const settingsKey = 'cli-in-one.settings.v3';
 const workspaceKey = 'cli-in-one.workspace.v1';
 const appLogoUrl = `${import.meta.env.BASE_URL}logo.webp`;
 const releasesUrl = 'https://github.com/whd3131/cli-in-one/releases';
+const cliProviderIconMarkup = {
+  codex: codexIconSvg,
+  'cursor-agent': cursorIconSvg
+};
 const canvasModes = new Set(['shared', 'project']);
 const sharedCanvasKey = '__shared__';
 const noProjectCanvasKey = '__no_project__';
 const historyProjectId = '__history__';
 const endpointWidth = 300;
 const endpointHeight = 44;
+const zoomPresetScales = [0.5, 1, 1.5, 2];
 const systemStatsRefreshMs = 2000;
+const panelIdleThresholdMs = 12000;
+const panelActivityFlushMs = 120;
+const formSelectClassName = 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50';
 
 function createDefaultView() {
   return { x: 80, y: 80, scale: 1 };
+}
+
+const cliProviders = Array.isArray(cliProviderRegistry) ? cliProviderRegistry : [];
+const sessionLauncherProviderOrder = ['codex', 'cursor-agent', 'shell'];
+const cliProviderMap = new Map(
+  cliProviders
+    .filter((provider) => provider && typeof provider.id === 'string' && provider.id.trim())
+    .map((provider) => [provider.id.trim(), provider])
+);
+const defaultCliProviderId = cliProviderMap.has('codex')
+  ? 'codex'
+  : (cliProviders[0]?.id || 'shell');
+
+function getLocalizedCliValue(source, language, fallback = '') {
+  if (source && typeof source === 'object') {
+    return source[language] || source.zh || source.en || fallback;
+  }
+
+  return typeof source === 'string' ? source : fallback;
+}
+
+function getCliProviderById(id) {
+  const normalizedId = String(id || '').trim();
+  return normalizedId ? (cliProviderMap.get(normalizedId) || null) : null;
+}
+
+function doesCommandMatchCliProvider(provider, initialCommand) {
+  if (!provider || typeof provider !== 'object') {
+    return false;
+  }
+
+  const command = String(initialCommand || '').trim();
+  if (!command) {
+    return Boolean(provider.detect?.emptyCommand);
+  }
+
+  const pattern = provider.detect?.pattern;
+  if (typeof pattern !== 'string' || !pattern.trim()) {
+    return false;
+  }
+
+  try {
+    return new RegExp(pattern, 'i').test(command);
+  } catch {
+    return false;
+  }
+}
+
+function detectCliProviderByCommand(initialCommand) {
+  const command = String(initialCommand || '').trim();
+
+  if (!command) {
+    return getCliProviderById('shell');
+  }
+
+  return cliProviders.find((provider) => doesCommandMatchCliProvider(provider, command)) || null;
+}
+
+function resolveCliProvider(providerId, initialCommand) {
+  return (
+    getCliProviderById(providerId)
+    || detectCliProviderByCommand(initialCommand)
+    || getCliProviderById(defaultCliProviderId)
+    || cliProviders[0]
+    || null
+  );
+}
+
+function getCliProviderDisplayName(provider, language) {
+  return getLocalizedCliValue(provider?.displayName, language, provider?.id || 'CLI');
+}
+
+function getCliProviderBadgeLabel(provider, language) {
+  return getLocalizedCliValue(
+    provider?.badgeLabel,
+    language,
+    getCliProviderDisplayName(provider, language)
+  );
+}
+
+function getCliProviderTitleBase(provider, language) {
+  return getLocalizedCliValue(
+    provider?.panelTitle,
+    language,
+    getCliProviderBadgeLabel(provider, language)
+  );
+}
+
+function getCliProviderDescription(provider, language) {
+  return getLocalizedCliValue(provider?.description, language, '');
+}
+
+function CliProviderIcon({ className, provider, providerId }) {
+  const resolvedProviderId = String(providerId || provider?.id || '').trim();
+
+  if (resolvedProviderId === 'shell') {
+    return <SquareTerminal className={className} aria-hidden="true" />;
+  }
+
+  const iconMarkup = cliProviderIconMarkup[resolvedProviderId];
+  if (iconMarkup) {
+    return (
+      <span
+        className={cn(
+          'inline-flex shrink-0 items-center justify-center [&>svg]:block [&>svg]:h-full [&>svg]:w-full',
+          className
+        )}
+        aria-hidden="true"
+        dangerouslySetInnerHTML={{ __html: iconMarkup }}
+      />
+    );
+  }
+
+  return <MessageSquarePlus className={className} aria-hidden="true" />;
+}
+
+function CliProviderBadge({ className, language, provider, variant = 'outline' }) {
+  if (!provider) {
+    return null;
+  }
+
+  return (
+    <Badge variant={variant} className={cn('inline-flex items-center gap-1.5', className)}>
+      <CliProviderIcon provider={provider} className="h-3.5 w-3.5" />
+      <span>{getCliProviderBadgeLabel(provider, language)}</span>
+    </Badge>
+  );
+}
+
+function getCliLaunchCommand(provider, targetType = 'project') {
+  const launchCommand = provider?.launchCommand;
+
+  if (typeof launchCommand === 'string') {
+    return launchCommand;
+  }
+
+  if (!launchCommand || typeof launchCommand !== 'object') {
+    return '';
+  }
+
+  return String(
+    launchCommand[targetType]
+    ?? launchCommand.default
+    ?? ''
+  );
+}
+
+function cliProviderSupportsTarget(provider, targetType) {
+  const targets = Array.isArray(provider?.targets) ? provider.targets : [];
+  return targets.length === 0 ? true : targets.includes(targetType);
+}
+
+function getSessionLauncherProviderRank(provider) {
+  const index = sessionLauncherProviderOrder.indexOf(String(provider?.id || ''));
+  return index === -1 ? sessionLauncherProviderOrder.length : index;
+}
+
+function getSelectableCliProviders(targetTypes = ['project', 'directory']) {
+  const requestedTargetTypes = Array.isArray(targetTypes) ? targetTypes : [targetTypes];
+  return cliProviders
+    .filter((provider) => requestedTargetTypes.some((targetType) => (
+      cliProviderSupportsTarget(provider, targetType)
+    )))
+    .sort((left, right) => (
+      getSessionLauncherProviderRank(left) - getSessionLauncherProviderRank(right)
+    ));
+}
+
+function getInitialCliProviderId(providerId, providers) {
+  const normalizedProviderId = String(providerId || '').trim();
+
+  if (providers.some((provider) => provider.id === normalizedProviderId)) {
+    return normalizedProviderId;
+  }
+
+  if (providers.some((provider) => provider.id === defaultCliProviderId)) {
+    return defaultCliProviderId;
+  }
+
+  return providers[0]?.id || defaultCliProviderId;
+}
+
+function resolveSelectableCliProvider(providerId, providers) {
+  const normalizedProviderId = String(providerId || '').trim();
+  return (
+    providers.find((provider) => provider.id === normalizedProviderId)
+    || providers.find((provider) => provider.id === defaultCliProviderId)
+    || providers[0]
+    || resolveCliProvider(providerId)
+  );
+}
+
+function getPanelCliProvider(panel) {
+  return resolveCliProvider(panel?.cliProviderId, panel?.initialCommand);
 }
 
 const terminalThemes = {
@@ -156,6 +368,15 @@ const sandboxModeOptions = ['', 'read-only', 'workspace-write', 'danger-full-acc
 const reasoningEffortOptions = ['minimal', 'low', 'medium', 'high', 'xhigh'];
 const wireApiOptions = ['responses', 'chat'];
 const quickModelOptions = ['gpt-5.5', 'gpt-5.4'];
+const workspaceSkillPreviewCount = 6;
+const workspaceSkillSources = [
+  { id: 'cursor', directoryName: '.cursor', label: 'Cursor' },
+  { id: 'claude', directoryName: '.claude', label: 'Claude' },
+  { id: 'agent', directoryName: '.agent', label: 'Agent' },
+  { id: 'github', directoryName: '.github', label: 'GitHub' }
+];
+const gridSessionCountMin = 1;
+const gridSessionCountMax = 24;
 
 const messages = {
   zh: {
@@ -176,15 +397,51 @@ const messages = {
     closeAllConfirm: '确认关闭全部会话？所有当前运行状态会被中断。',
     workspace: '工作区',
     noProject: '不绑定项目',
+    launchMenu: '新增',
+    launchMenuAria: '新增会话菜单',
+    launchAtCurrentWorkspace: '当前工作区',
+    launchChooseTarget: '选择目录或项目',
+    launchCurrentDirectory: '当前目录',
+    launchFourSessions: '4 个会话',
+    launchCustomCount: '自定义数量',
     addSession: '新增会话',
+    addCommandLine: '新增 CMD',
+    addProjectDialogTitle: '新增项目',
+    addProjectDialogDescription: '先配置项目目录和名称，确认后再加入侧边栏。',
+    addProjectConfirm: '加入项目',
+    addProjectPath: '项目目录',
+    addProjectName: '项目名称',
+    addProjectNamePlaceholder: '默认使用目录名',
+    addCommandDialogTitle: '新增 CMD',
+    addCommandDialogDescription: '先配置启动目录，确认后再创建 CMD 会话。',
+    addCommandConfirm: '创建 CMD',
+    addCommandDirectoryHint: '会话会在这个目录启动，并加入当前工作区。',
+    dialogPathRequired: '请先选择目录。',
+    addSessionGrid: '批量会话',
+    quickGrid2x2: '2x2',
+    gridSessionDialogTitle: '批量新增会话',
+    gridSessionDialogDescription: '输入要创建的会话数量，系统会自动按网格排布到当前工作区。',
+    gridSessionCount: '会话数量',
+    gridSessionCountHint: '支持 1 到 {max} 个，会自动按接近方阵排布。',
+    gridSessionCreate: '创建会话',
+    gridSessionInvalid: '请输入 1 到 {max} 之间的整数。',
     newSessionSource: '选择会话目录',
-    newSessionSourceDescription: '项目目录启动 Codex，自由窗口启动 cmd。',
+    newSessionSourceDescription: '先选择要启动的 CLI，再选择项目或默认目录。',
+    cliProvider: 'CLI',
+    cliTarget: '启动目标',
+    launchCommand: '启动命令',
     freeWindow: '自由窗口',
     defaultDirectory: '默认目录',
     directory: '目录',
     chooseDirectory: '选择目录',
+    workspaceTree: '文件树',
+    workspaceTreeOpen: '展开文件树',
+    workspaceTreeClose: '收起文件树',
     zoomOut: '缩小',
     zoomIn: '放大',
+    zoomLevel: '缩放比例',
+    zoomPreset: '缩放到 {percent}%',
+    resetView: '重置视图',
     arrange: '整理',
     cpuUsage: 'CPU',
     memoryUsage: '内存',
@@ -193,8 +450,10 @@ const messages = {
     runtimeStarting: '启动中',
     session: '会话',
     sessionFallbackTitle: '会话',
+    commandLine: 'CMD',
+    commandLineFallbackTitle: 'CMD',
     startEmpty: '新增会话开始',
-    startHint: '可从项目目录启动 Codex，或创建自由 cmd 会话。',
+    startHint: '从新增菜单选择 CLI 后，可在当前工作区创建单个或批量会话。',
     movePanel: '移动会话',
     minimizeSession: '缩成端点',
     expandSession: '展开会话',
@@ -204,9 +463,24 @@ const messages = {
     endpointGroup: '端点组',
     groupEndpointsUnavailable: '至少需要两个已收起端点。',
     taskRunning: '进行中',
+    taskIdle: '闲置',
     taskCompleted: '已完成',
     taskError: '异常',
+    floatingComposerTitle: '快捷发送',
+    floatingComposerSubtitle: '发送到：{name}',
+    floatingComposerTarget: '目标会话',
+    floatingComposerUnavailable: '当前画布没有可接收输入的会话。',
+    floatingComposerPlaceholder: '输入内容后发送到 {name}',
+    floatingComposerHint: 'Enter 发送，Shift+Enter 换行，粘贴或拖拽图片会保存到 .files',
+    floatingComposerCurrent: '当前',
+    floatingComposerSend: '发送',
+    floatingComposerSent: '已发送到 {name}',
+    floatingComposerImageReference: '图片({path})',
+    floatingComposerImagesAdded: '已添加 {count} 张图片',
+    floatingComposerImageMissingDir: '未找到可保存图片的目录。',
+    floatingComposerImageSaveFailed: '图片保存失败：{message}',
     sessionRuntime: '运行',
+    sessionContext: '上下文',
     exportSession: '导出会话',
     exportSessionCustom: '导出到指定目录',
     sessionExported: '已导出：{path}',
@@ -250,10 +524,21 @@ const messages = {
     contextWindow1m: '1M 上下文',
     applyQuickConfig: '应用快捷配置',
     reload: '刷新',
+    copy: '复制',
     validate: '校验',
     openFolder: '打开目录',
+    openPathFailed: '打开路径失败：{message}',
     save: '保存',
     loading: '加载中',
+    skills: 'Skills',
+    skillsHint: '自动识别当前工作区里的 .cursor、.claude、.agent、.github。',
+    collapseSkills: '收起 Skills',
+    expandSkills: '展开 Skills',
+    skillsEmpty: '未识别到可管理的 skill 文件。',
+    skillsScopeEmpty: '目录存在，但没有识别到 skill 文件。',
+    skillsLoadFailed: '读取 skills 失败：{message}',
+    skillsMoreFiles: '还有 {count} 个文件',
+    skillsTruncated: '结果过多，已截断显示。',
     currentVersion: '当前版本',
     modelUnset: '未设置模型',
     modelSwitched: '模型已切换为 {model}',
@@ -307,6 +592,21 @@ const messages = {
     quickProfileSaved: '配置方案已保存：{name}',
     quickProfileDeleted: '配置方案已删除：{name}',
     quickProfileSwitched: '已载入配置方案：{name}',
+    workspaceTreeTitle: '当前工作区文件树',
+    workspaceTreeDescription: '查看当前目录结构，已自动跳过 .git、node_modules 等大型目录。',
+    workspaceTreeSummary: '{directories} 个目录，{files} 个文件',
+    workspaceTreeSummaryWithOmitted: '{directories} 个目录，{files} 个文件，省略 {omitted} 项',
+    workspaceTreeLoading: '正在读取文件树…',
+    workspaceTreeUnavailable: '当前没有可查看的工作区目录。',
+    workspaceTreeFailed: '读取文件树失败：{message}',
+    workspaceTreeCopied: '文件树已复制到剪贴板。',
+    workspaceTreeNoData: '还没有读取文件树。',
+    workspaceTreeEmpty: '这个目录目前是空的。',
+    workspaceTreeIgnored: '已跳过',
+    workspaceTreeLink: '链接',
+    workspaceTreeDepthLimit: '已达到深度限制',
+    workspaceTreeOmitted: '省略 {count} 项',
+    workspaceTreeUnreadable: '无法读取：{message}',
     apiKeyPlaceholder: 'sk-...',
     baseUrlPlaceholder: 'https://api.example.com/v1',
     modelPlaceholder: 'gpt-5.1-codex-max'
@@ -329,15 +629,51 @@ const messages = {
     closeAllConfirm: 'Close all sessions? Their current running state will be interrupted.',
     workspace: 'Workspace',
     noProject: 'No project',
+    launchMenu: 'New',
+    launchMenuAria: 'New session menu',
+    launchAtCurrentWorkspace: 'Current workspace',
+    launchChooseTarget: 'Choose directory or project',
+    launchCurrentDirectory: 'Current directory',
+    launchFourSessions: '4 sessions',
+    launchCustomCount: 'Custom count',
     addSession: 'New session',
+    addCommandLine: 'New CMD',
+    addProjectDialogTitle: 'Add project',
+    addProjectDialogDescription: 'Choose the project folder and name before adding it to the sidebar.',
+    addProjectConfirm: 'Add project',
+    addProjectPath: 'Project directory',
+    addProjectName: 'Project name',
+    addProjectNamePlaceholder: 'Defaults to the folder name',
+    addCommandDialogTitle: 'New CMD',
+    addCommandDialogDescription: 'Choose the launch directory before creating the CMD session.',
+    addCommandConfirm: 'Create CMD',
+    addCommandDirectoryHint: 'The session will start in this directory and appear in the current workspace.',
+    dialogPathRequired: 'Choose a directory first.',
+    addSessionGrid: 'Batch sessions',
+    quickGrid2x2: '2x2',
+    gridSessionDialogTitle: 'Create session grid',
+    gridSessionDialogDescription: 'Enter how many sessions to create and they will be arranged as a grid in the current workspace.',
+    gridSessionCount: 'Session count',
+    gridSessionCountHint: 'Supports 1 to {max} sessions and arranges them into a near-square grid automatically.',
+    gridSessionCreate: 'Create sessions',
+    gridSessionInvalid: 'Enter an integer between 1 and {max}.',
     newSessionSource: 'Choose session directory',
-    newSessionSourceDescription: 'Project folders start Codex; free windows start cmd.',
+    newSessionSourceDescription: 'Choose a CLI first, then pick a project or the default directory.',
+    cliProvider: 'CLI',
+    cliTarget: 'Launch target',
+    launchCommand: 'Launch command',
     freeWindow: 'Free window',
     defaultDirectory: 'Default directory',
     directory: 'Directory',
     chooseDirectory: 'Choose directory',
+    workspaceTree: 'File tree',
+    workspaceTreeOpen: 'Open file tree',
+    workspaceTreeClose: 'Close file tree',
     zoomOut: 'Zoom out',
     zoomIn: 'Zoom in',
+    zoomLevel: 'Zoom level',
+    zoomPreset: 'Zoom to {percent}%',
+    resetView: 'Reset view',
     arrange: 'Arrange',
     cpuUsage: 'CPU',
     memoryUsage: 'Memory',
@@ -346,8 +682,10 @@ const messages = {
     runtimeStarting: 'Starting',
     session: 'Session',
     sessionFallbackTitle: 'Session',
+    commandLine: 'CMD',
+    commandLineFallbackTitle: 'CMD',
     startEmpty: 'Start a new session',
-    startHint: 'Start Codex from a project folder, or create a free cmd session.',
+    startHint: 'Use the New menu to choose a CLI and create single or batch sessions in the current workspace.',
     movePanel: 'Move session',
     minimizeSession: 'Minimize to endpoint',
     expandSession: 'Expand session',
@@ -357,9 +695,24 @@ const messages = {
     endpointGroup: 'Endpoint group',
     groupEndpointsUnavailable: 'At least two minimized endpoints are required.',
     taskRunning: 'Running',
+    taskIdle: 'Idle',
     taskCompleted: 'Completed',
     taskError: 'Error',
+    floatingComposerTitle: 'Quick send',
+    floatingComposerSubtitle: 'Send to: {name}',
+    floatingComposerTarget: 'Target session',
+    floatingComposerUnavailable: 'No live session on this canvas can receive input.',
+    floatingComposerPlaceholder: 'Type here and send to {name}',
+    floatingComposerHint: 'Enter to send, Shift+Enter for newline, paste or drop images to save them into .files',
+    floatingComposerCurrent: 'Current',
+    floatingComposerSend: 'Send',
+    floatingComposerSent: 'Sent to {name}',
+    floatingComposerImageReference: 'image({path})',
+    floatingComposerImagesAdded: 'Added {count} image(s)',
+    floatingComposerImageMissingDir: 'No directory is available for saving images.',
+    floatingComposerImageSaveFailed: 'Failed to save image: {message}',
     sessionRuntime: 'Run',
+    sessionContext: 'Context',
     exportSession: 'Export session',
     exportSessionCustom: 'Export to folder',
     sessionExported: 'Exported: {path}',
@@ -403,10 +756,21 @@ const messages = {
     contextWindow1m: '1M context',
     applyQuickConfig: 'Apply quick config',
     reload: 'Reload',
+    copy: 'Copy',
     validate: 'Validate',
     openFolder: 'Open folder',
+    openPathFailed: 'Open path failed: {message}',
     save: 'Save',
     loading: 'Loading',
+    skills: 'Skills',
+    skillsHint: 'Auto-detects .cursor, .claude, .agent, and .github in the current workspace.',
+    collapseSkills: 'Collapse Skills',
+    expandSkills: 'Expand Skills',
+    skillsEmpty: 'No manageable skill files were detected.',
+    skillsScopeEmpty: 'The directory exists, but no skill files were detected.',
+    skillsLoadFailed: 'Failed to read skills: {message}',
+    skillsMoreFiles: '{count} more file(s)',
+    skillsTruncated: 'Results were truncated.',
     currentVersion: 'Current version',
     modelUnset: 'Model not set',
     modelSwitched: 'Model switched to {model}',
@@ -460,6 +824,21 @@ const messages = {
     quickProfileSaved: 'Preset saved: {name}',
     quickProfileDeleted: 'Preset deleted: {name}',
     quickProfileSwitched: 'Loaded preset: {name}',
+    workspaceTreeTitle: 'Current workspace file tree',
+    workspaceTreeDescription: 'View the current directory structure. Large folders like .git and node_modules are skipped automatically.',
+    workspaceTreeSummary: '{directories} directories, {files} files',
+    workspaceTreeSummaryWithOmitted: '{directories} directories, {files} files, {omitted} omitted',
+    workspaceTreeLoading: 'Loading file tree…',
+    workspaceTreeUnavailable: 'There is no workspace directory to inspect.',
+    workspaceTreeFailed: 'Failed to read file tree: {message}',
+    workspaceTreeCopied: 'File tree copied to clipboard.',
+    workspaceTreeNoData: 'File tree has not been loaded yet.',
+    workspaceTreeEmpty: 'This directory is currently empty.',
+    workspaceTreeIgnored: 'Skipped',
+    workspaceTreeLink: 'Link',
+    workspaceTreeDepthLimit: 'Depth limit reached',
+    workspaceTreeOmitted: '{count} omitted',
+    workspaceTreeUnreadable: 'Unreadable: {message}',
     apiKeyPlaceholder: 'sk-...',
     baseUrlPlaceholder: 'https://api.example.com/v1',
     modelPlaceholder: 'gpt-5.1-codex-max'
@@ -554,6 +933,51 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+function bindPointerSession(onPointerMove, onPointerEnd) {
+  let active = true;
+
+  const handlePointerMove = (event) => {
+    if (!active) {
+      return;
+    }
+    onPointerMove(event);
+  };
+
+  const finish = () => {
+    if (!active) {
+      return;
+    }
+
+    active = false;
+    document.removeEventListener('pointermove', handlePointerMove);
+    document.removeEventListener('pointerup', finish);
+    document.removeEventListener('pointercancel', finish);
+    window.removeEventListener('blur', finish);
+    onPointerEnd?.();
+  };
+
+  document.addEventListener('pointermove', handlePointerMove);
+  document.addEventListener('pointerup', finish);
+  document.addEventListener('pointercancel', finish);
+  window.addEventListener('blur', finish);
+
+  return finish;
+}
+
+function parseGridSessionCount(value) {
+  const trimmed = String(value || '').trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || parsed < gridSessionCountMin || parsed > gridSessionCountMax) {
+    return null;
+  }
+
+  return parsed;
+}
+
 function formatUsagePercent(value) {
   if (!Number.isFinite(value)) {
     return '--%';
@@ -578,6 +1002,29 @@ function formatBytes(value) {
 
   const digits = size >= 10 || unitIndex === 0 ? 0 : 1;
   return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function formatWorkspaceTreeSummary(snapshot, t) {
+  if (!snapshot) {
+    return '';
+  }
+
+  if (!snapshot.directoryCount && !snapshot.fileCount) {
+    return t('workspaceTreeEmpty');
+  }
+
+  if (snapshot.omittedCount > 0) {
+    return t('workspaceTreeSummaryWithOmitted', {
+      directories: snapshot.directoryCount,
+      files: snapshot.fileCount,
+      omitted: snapshot.omittedCount
+    });
+  }
+
+  return t('workspaceTreeSummary', {
+    directories: snapshot.directoryCount,
+    files: snapshot.fileCount
+  });
 }
 
 function formatElapsedDuration(startedAt, endedAt) {
@@ -725,6 +1172,66 @@ function pasteClipboardIntoTerminal(term, text = readClipboardText()) {
   return true;
 }
 
+function normalizeTerminalInputPayload(value) {
+  const normalized = String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (!normalized) {
+    return '';
+  }
+
+  const payload = normalized.replace(/\n/g, '\r');
+  return payload.endsWith('\r') ? payload : `${payload}\r`;
+}
+
+function trimTrailingLineBreaks(value) {
+  return String(value || '').replace(/(?:\r\n|\r|\n)+$/g, '');
+}
+
+function isCommandDockSubmitKey(event) {
+  return event.key === 'Enter'
+    || event.code === 'Enter'
+    || event.nativeEvent?.key === 'Enter'
+    || event.nativeEvent?.code === 'Enter'
+    || event.keyCode === 13
+    || event.which === 13;
+}
+
+function normalizePromptFilePath(filePath) {
+  return String(filePath || '').replace(/\\/g, '/');
+}
+
+function isImageFile(file) {
+  if (!file) {
+    return false;
+  }
+
+  const mimeType = String(file.type || '').trim().toLowerCase();
+  if (mimeType.startsWith('image/')) {
+    return true;
+  }
+
+  return /\.(apng|avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(String(file.name || '').trim());
+}
+
+function extractImageFilesFromDataTransfer(dataTransfer) {
+  if (!dataTransfer) {
+    return [];
+  }
+
+  const itemFiles = Array.from(dataTransfer.items || [])
+    .filter((item) => item?.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter((file) => file && isImageFile(file));
+  if (itemFiles.length > 0) {
+    return itemFiles;
+  }
+
+  return Array.from(dataTransfer.files || []).filter((file) => isImageFile(file));
+}
+
+function hasImageFilesInDataTransfer(dataTransfer) {
+  return extractImageFilesFromDataTransfer(dataTransfer).length > 0;
+}
+
 function syncTerminalImeAnchor(term) {
   const textarea = term?.textarea;
   const root = term?.element;
@@ -856,9 +1363,27 @@ function formatReleaseDate(value, language) {
   });
 }
 
-function getPanelExecutionState(panel) {
-  if (panel?.status === 'running' || panel?.status === 'starting') {
-    return 'running';
+function isPanelLive(panel) {
+  return panel?.status === 'running' || panel?.status === 'starting';
+}
+
+function canPanelReceiveInput(panel) {
+  return isPanelLive(panel);
+}
+
+function getPanelLastActivityAt(panel) {
+  if (Number.isFinite(panel?.lastActivityAt)) {
+    return panel.lastActivityAt;
+  }
+
+  return Number.isFinite(panel?.createdAt) ? panel.createdAt : 0;
+}
+
+function getPanelExecutionState(panel, now = Date.now()) {
+  if (isPanelLive(panel)) {
+    return now - getPanelLastActivityAt(panel) >= panelIdleThresholdMs
+      ? 'idle'
+      : 'running';
   }
 
   if (
@@ -876,11 +1401,46 @@ function getExecutionStateLabel(state, t) {
     return t('taskRunning');
   }
 
+  if (state === 'idle') {
+    return t('taskIdle');
+  }
+
   if (state === 'completed') {
     return t('taskCompleted');
   }
 
   return t('taskError');
+}
+
+function isCodexPanel(panel) {
+  return getPanelCliProvider(panel)?.id === 'codex';
+}
+
+function hasPanelModelTag(panel) {
+  return isCodexPanel(panel);
+}
+
+function hasPanelContextTag(panel) {
+  return String(panel?.contextWindowLabel || '').trim().length > 0;
+}
+
+function getSessionHeaderGridClass(panel) {
+  const hasModel = hasPanelModelTag(panel);
+  const hasContext = hasPanelContextTag(panel);
+
+  if (hasModel && hasContext) {
+    return 'grid-cols-[28px_minmax(70px,1fr)_auto_auto_auto_auto_28px_28px_28px]';
+  }
+
+  if (hasModel || hasContext) {
+    return 'grid-cols-[28px_minmax(70px,1fr)_auto_auto_auto_28px_28px_28px]';
+  }
+
+  return 'grid-cols-[28px_minmax(70px,1fr)_auto_auto_28px_28px_28px]';
+}
+
+function getPanelFallbackTitle(panel, language) {
+  return getCliProviderTitleBase(getPanelCliProvider(panel), language);
 }
 
 function SessionStatusTag({ count, panel, state, t }) {
@@ -896,7 +1456,7 @@ function SessionStatusTag({ count, panel, state, t }) {
 
 function SessionRuntimeTag({ panel, now, t }) {
   const startedAt = Number.isFinite(panel?.createdAt) ? panel.createdAt : now;
-  const endedAt = getPanelExecutionState(panel) === 'running'
+  const endedAt = isPanelLive(panel)
     ? now
     : Number.isFinite(panel?.endedAt) ? panel.endedAt : now;
   const elapsed = formatElapsedDuration(startedAt, endedAt);
@@ -917,7 +1477,7 @@ function formatPanelModelLabel(panel, t) {
 }
 
 function SessionModelTag({ panel, t }) {
-  if (!panel?.codexSession) {
+  if (!hasPanelModelTag(panel)) {
     return null;
   }
 
@@ -936,18 +1496,39 @@ function SessionModelTag({ panel, t }) {
   );
 }
 
+function SessionContextTag({ panel, t }) {
+  const label = String(panel?.contextWindowLabel || '').trim();
+  if (!label) {
+    return null;
+  }
+
+  const exactCount = Number.isFinite(panel?.contextWindowTokens)
+    ? ` (${Number(panel.contextWindowTokens).toLocaleString()})`
+    : '';
+
+  return (
+    <span
+      className="inline-flex h-[22px] shrink-0 items-center gap-1 rounded-full border border-border bg-background px-2 text-[11px] font-semibold text-foreground"
+      title={`${t('sessionContext')} ${label}${exactCount}`}
+    >
+      <span className="shrink-0 text-muted-foreground">{t('sessionContext')}</span>
+      <span className="font-mono">{label}</span>
+    </span>
+  );
+}
+
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(settingsKey) || '{}');
     return {
       cwd: saved.cwd || '',
-      theme: saved.theme === 'dark' ? 'dark' : 'light',
+      theme: saved.theme === 'light' ? 'light' : 'dark',
       language: saved.language === 'en' ? 'en' : 'zh',
       view: normalizeCanvasView(saved.view)
     };
   } catch {
     localStorage.removeItem(settingsKey);
-    return { cwd: '', theme: 'light', language: 'zh', view: createDefaultView() };
+    return { cwd: '', theme: 'dark', language: 'zh', view: createDefaultView() };
   }
 }
 
@@ -1031,6 +1612,7 @@ function deriveNameFromPath(value) {
 function createEmptyWorkspace() {
   return {
     sidebarCollapsed: false,
+    skillsCollapsed: false,
     activeProjectId: null,
     canvasMode: 'project',
     sharedView: createDefaultView(),
@@ -1087,6 +1669,7 @@ function normalizeWorkspace(raw) {
   return {
     ...fallback,
     sidebarCollapsed: Boolean(raw.sidebarCollapsed),
+    skillsCollapsed: Boolean(raw.skillsCollapsed),
     activeProjectId,
     canvasMode: canvasModes.has(raw.canvasMode) ? raw.canvasMode : fallback.canvasMode,
     sharedView: normalizeCanvasView(raw.sharedView),
@@ -1102,6 +1685,69 @@ function loadWorkspace() {
     localStorage.removeItem(workspaceKey);
     return createEmptyWorkspace();
   }
+}
+
+function createEmptyWorkspaceSkillsSnapshot(rootPath = '') {
+  return {
+    cwd: String(rootPath || '').trim(),
+    scannedAt: 0,
+    scopes: workspaceSkillSources.map((source) => ({
+      id: source.id,
+      label: source.label,
+      directoryName: source.directoryName,
+      exists: false,
+      error: '',
+      fileCount: 0,
+      files: [],
+      path: '',
+      truncated: false
+    })),
+    totalFiles: 0
+  };
+}
+
+function normalizeWorkspaceSkillsSnapshot(snapshot, fallbackRootPath = '') {
+  const rootPath = String(snapshot?.cwd || fallbackRootPath || '').trim();
+  const scopeMap = new Map(
+    (Array.isArray(snapshot?.scopes) ? snapshot.scopes : [])
+      .filter((scope) => scope && typeof scope.id === 'string')
+      .map((scope) => [scope.id, scope])
+  );
+
+  const scopes = workspaceSkillSources.map((source) => {
+    const current = scopeMap.get(source.id) || {};
+    const files = Array.isArray(current.files)
+      ? current.files
+        .map((file) => ({
+          extension: String(file?.extension || '').trim().toLowerCase(),
+          name: String(file?.name || '').trim(),
+          path: String(file?.path || '').trim(),
+          relativePath: String(file?.relativePath || '').trim()
+        }))
+        .filter((file) => file.path || file.relativePath || file.name)
+      : [];
+
+    return {
+      id: source.id,
+      label: source.label,
+      directoryName: source.directoryName,
+      exists: Boolean(current.exists),
+      error: String(current.error || '').trim(),
+      fileCount: Number.isFinite(current.fileCount) ? current.fileCount : files.length,
+      files,
+      path: String(current.path || '').trim(),
+      truncated: Boolean(current.truncated)
+    };
+  });
+
+  return {
+    cwd: rootPath,
+    scannedAt: Number.isFinite(snapshot?.scannedAt) ? snapshot.scannedAt : 0,
+    scopes,
+    totalFiles: Number.isFinite(snapshot?.totalFiles)
+      ? snapshot.totalFiles
+      : scopes.reduce((sum, scope) => sum + scope.fileCount, 0)
+  };
 }
 
 function IconButton({ label, children, ...props }) {
@@ -1122,6 +1768,7 @@ function EndpointGroup({
   panels,
   runtimeNow,
   scale,
+  commandTargetId,
   selectedIds,
   t,
   onActivate,
@@ -1135,7 +1782,7 @@ function EndpointGroup({
   const statusCounts = panels.reduce((counts, panel) => {
     const state = getPanelExecutionState(panel);
     return { ...counts, [state]: (counts[state] || 0) + 1 };
-  }, { running: 0, completed: 0, error: 0 });
+  }, { running: 0, idle: 0, completed: 0, error: 0 });
   const groupHeight = Math.min(460, 58 + panels.length * 42 + 12);
 
   const startDrag = (event) => {
@@ -1153,20 +1800,12 @@ function EndpointGroup({
       y: group.y
     };
 
-    const onPointerMove = (moveEvent) => {
+    bindPointerSession((moveEvent) => {
       onMove(group.id, {
         x: Math.round(start.x + (moveEvent.clientX - start.clientX) / scale),
         y: Math.round(start.y + (moveEvent.clientY - start.clientY) / scale)
       });
-    };
-
-    const onPointerUp = () => {
-      document.removeEventListener('pointermove', onPointerMove);
-      document.removeEventListener('pointerup', onPointerUp);
-    };
-
-    document.addEventListener('pointermove', onPointerMove);
-    document.addEventListener('pointerup', onPointerUp, { once: true });
+    });
   };
 
   const handleTitleKeyDown = (event, panelId) => {
@@ -1219,6 +1858,7 @@ function EndpointGroup({
         </div>
         <div className="endpoint-group-statuses">
           {statusCounts.running > 0 && <SessionStatusTag count={statusCounts.running} state="running" t={t} />}
+          {statusCounts.idle > 0 && <SessionStatusTag count={statusCounts.idle} state="idle" t={t} />}
           {statusCounts.completed > 0 && <SessionStatusTag count={statusCounts.completed} state="completed" t={t} />}
           {statusCounts.error > 0 && <SessionStatusTag count={statusCounts.error} state="error" t={t} />}
         </div>
@@ -1242,10 +1882,15 @@ function EndpointGroup({
       <div className="endpoint-group-list">
         {panels.map((panel) => {
           const selected = selectedIds.has(panel.id);
+          const commandTargeted = panel.id === commandTargetId;
           return (
             <div
               key={panel.id}
-              className={cn('endpoint-group-row', selected && 'is-selected')}
+              className={cn(
+                'endpoint-group-row',
+                selected && 'is-selected',
+                commandTargeted && 'is-command-target'
+              )}
               role="button"
               tabIndex={0}
               onClick={(event) => handleRowClick(event, panel.id)}
@@ -1302,16 +1947,16 @@ function TerminalPanel({
   theme,
   visible = true,
   selected = false,
+  commandTargeted = false,
   onActivate,
   onClose,
-  onExport,
-  onExportCustom,
   onExpand,
   onMinimize,
   onMove,
   onResize,
   onRestart,
   onSelectToggle,
+  onTerminalInput,
   onTitleChange,
   onTitleCommit,
   registerTerminal
@@ -1322,6 +1967,7 @@ function TerminalPanel({
   const scrollbarTrackRef = useRef(null);
   const [scrollbarTrackHeight, setScrollbarTrackHeight] = useState(0);
   const [scrollbarState, setScrollbarState] = useState({ baseY: 0, rows: 0, viewportY: 0 });
+  const panelProvider = getPanelCliProvider(panel);
 
   const syncInputAnchor = useCallback(() => {
     if (termRef.current) {
@@ -1480,7 +2126,10 @@ function TerminalPanel({
     hostNode?.addEventListener('contextmenu', handleContextMenu);
     terminalTextarea?.addEventListener('focus', handleTextAreaFocus);
 
-    const dataDisposable = term.onData((data) => bridge.writeTerminal(panel.id, data));
+    const dataDisposable = term.onData((data) => {
+      onTerminalInput(panel.id);
+      bridge.writeTerminal(panel.id, data);
+    });
     const resizeDisposable = term.onResize(({ cols, rows }) => bridge.resizeTerminal(panel.id, cols, rows));
     const scrollDisposable = term.onScroll(() => syncScrollbarState());
     const writeParsedDisposable = term.onWriteParsed(() => syncScrollbarState());
@@ -1507,7 +2156,7 @@ function TerminalPanel({
       termRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [fitTerminal, onActivate, panel.cwd, panel.id, registerTerminal, syncScrollbarState]);
+  }, [fitTerminal, onActivate, onTerminalInput, panel.cwd, panel.id, registerTerminal, syncScrollbarState]);
 
   useEffect(() => {
     if (visible && !panel.minimized) {
@@ -1604,14 +2253,7 @@ function TerminalPanel({
 
     applyPointer(event.clientY);
 
-    const onPointerMove = (moveEvent) => applyPointer(moveEvent.clientY);
-    const onPointerUp = () => {
-      document.removeEventListener('pointermove', onPointerMove);
-      document.removeEventListener('pointerup', onPointerUp);
-    };
-
-    document.addEventListener('pointermove', onPointerMove);
-    document.addEventListener('pointerup', onPointerUp, { once: true });
+    bindPointerSession((moveEvent) => applyPointer(moveEvent.clientY));
   }, [onActivate, panel.id, scrollTerminalToRatio, scrollbarMetrics]);
 
   const startScrollbarTrackDrag = useCallback((event) => {
@@ -1642,20 +2284,12 @@ function TerminalPanel({
       y: panel.y
     };
 
-    const onPointerMove = (moveEvent) => {
+    bindPointerSession((moveEvent) => {
       onMove(panel.id, {
         x: Math.round(start.x + (moveEvent.clientX - start.clientX) / scale),
         y: Math.round(start.y + (moveEvent.clientY - start.clientY) / scale)
       });
-    };
-
-    const onPointerUp = () => {
-      document.removeEventListener('pointermove', onPointerMove);
-      document.removeEventListener('pointerup', onPointerUp);
-    };
-
-    document.addEventListener('pointermove', onPointerMove);
-    document.addEventListener('pointerup', onPointerUp, { once: true });
+    });
   };
 
   const startResize = (event) => {
@@ -1673,21 +2307,14 @@ function TerminalPanel({
       height: panel.height
     };
 
-    const onPointerMove = (moveEvent) => {
+    bindPointerSession((moveEvent) => {
       onResize(panel.id, {
         width: Math.round(clamp(start.width + (moveEvent.clientX - start.clientX) / scale, 360, 1800)),
         height: Math.round(clamp(start.height + (moveEvent.clientY - start.clientY) / scale, 220, 1200))
       });
-    };
-
-    const onPointerUp = () => {
+    }, () => {
       fitTerminal();
-      document.removeEventListener('pointermove', onPointerMove);
-      document.removeEventListener('pointerup', onPointerUp);
-    };
-
-    document.addEventListener('pointermove', onPointerMove);
-    document.addEventListener('pointerup', onPointerUp, { once: true });
+    });
   };
 
   const handleTitleKeyDown = (event) => {
@@ -1705,6 +2332,7 @@ function TerminalPanel({
         active && !panel.minimized && 'active',
         panel.minimized && 'is-minimized',
         panel.minimized && selected && 'is-selected',
+        commandTargeted && 'is-command-target',
         !visible && 'is-hidden'
       )}
       data-terminal-id={panel.id}
@@ -1757,7 +2385,7 @@ function TerminalPanel({
             onPointerDown={startDrag}
             onClick={(event) => event.stopPropagation()}
           >
-            <GripVertical className="h-4 w-4" />
+            <CliProviderIcon provider={panelProvider} className="h-4 w-4" />
           </Button>
           <span className={cn('terminal-endpoint-dot', `is-${getPanelExecutionState(panel)}`)} aria-hidden="true" />
           <Input
@@ -1794,15 +2422,13 @@ function TerminalPanel({
         <CardHeader
           className={cn(
             'grid h-9 flex-none cursor-grab items-center gap-1.5 space-y-0 border-b border-[var(--panel-header-border)] bg-[var(--panel-header)] px-1.5 py-1 active:cursor-grabbing',
-            panel.codexSession
-              ? 'grid-cols-[28px_minmax(70px,1fr)_auto_auto_auto_28px_28px_28px_28px_28px]'
-              : 'grid-cols-[28px_minmax(70px,1fr)_auto_auto_28px_28px_28px_28px_28px]'
+            getSessionHeaderGridClass(panel)
           )}
           title={t('movePanel')}
           onPointerDown={startDrag}
         >
           <Button type="button" variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" tabIndex={-1}>
-            <GripVertical className="h-4 w-4" />
+            <CliProviderIcon provider={panelProvider} className="h-4 w-4" />
           </Button>
           <Input
             className="h-6 min-w-0 cursor-text border-transparent bg-transparent px-2 text-sm font-semibold shadow-none focus:border-border focus:bg-background focus-visible:ring-0"
@@ -1816,32 +2442,9 @@ function TerminalPanel({
             onKeyDown={handleTitleKeyDown}
           />
           <SessionModelTag panel={panel} t={t} />
+          <SessionContextTag panel={panel} t={t} />
           <SessionStatusTag panel={panel} t={t} />
           <SessionRuntimeTag panel={panel} now={runtimeNow} t={t} />
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="h-6 w-6 text-xs font-bold"
-            title={t('exportSession')}
-            aria-label={t('exportSession')}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={() => onExport(panel.id)}
-          >
-            <Download className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="h-6 w-6 text-xs font-bold"
-            title={t('exportSessionCustom')}
-            aria-label={t('exportSessionCustom')}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={() => onExportCustom(panel.id)}
-          >
-            <FolderOpen className="h-3.5 w-3.5" />
-          </Button>
           <Button
             type="button"
             variant="outline"
@@ -1915,7 +2518,7 @@ function TerminalPanel({
   );
 }
 
-function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfileChanged, onThemeChange, open, showToast, t, theme }) {
+function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfileChanged, open, showToast, t }) {
   const [activeFile, setActiveFile] = useState('config');
   const [pathText, setPathText] = useState('');
   const [value, setValue] = useState('');
@@ -2393,7 +2996,7 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
 
         <div className="grid min-h-0 grid-rows-[auto_auto_auto_auto_minmax(0,1fr)_auto] gap-2 p-3">
           <div className="grid gap-3 rounded-md border border-border bg-muted/35 p-3">
-            <div className="grid gap-2 md:grid-cols-2">
+            <div className="grid gap-2">
               <div className="grid gap-1.5">
                 <Label className="flex items-center gap-2 text-sm font-medium">
                   <Languages className="h-4 w-4" />
@@ -2405,19 +3008,6 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
                   </Button>
                   <Button type="button" variant={language === 'en' ? 'primary' : 'outline'} onClick={() => onLanguageChange('en')}>
                     {t('english')}
-                  </Button>
-                </div>
-              </div>
-              <div className="grid gap-1.5">
-                <Label className="text-sm font-medium">{t('appearance')}</Label>
-                <div className="flex gap-2">
-                  <Button type="button" variant={theme === 'light' ? 'primary' : 'outline'} onClick={() => onThemeChange('light')}>
-                    <Sun className="h-4 w-4" />
-                    {t('light')}
-                  </Button>
-                  <Button type="button" variant={theme === 'dark' ? 'primary' : 'outline'} onClick={() => onThemeChange('dark')}>
-                    <Moon className="h-4 w-4" />
-                    {t('dark')}
                   </Button>
                 </div>
               </div>
@@ -2733,57 +3323,352 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
   );
 }
 
-function NewSessionDialog({ defaultCwd, onOpenChange, onSelect, open, projects, t }) {
+function CliProviderSelectField({
+  id,
+  language,
+  label,
+  onChange,
+  providerId,
+  providers,
+  showSummary = true,
+  t,
+  targetType = 'directory'
+}) {
+  const selectedCliProvider = resolveSelectableCliProvider(providerId, providers);
+  const launchCommand = selectedCliProvider
+    ? (
+      getCliLaunchCommand(selectedCliProvider, targetType)
+      || getCliLaunchCommand(selectedCliProvider, 'project')
+      || getCliLaunchCommand(selectedCliProvider, 'directory')
+    )
+    : '';
+
+  return (
+    <div className="grid gap-2">
+      {label && (
+        <Label htmlFor={id} className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+          {label}
+        </Label>
+      )}
+      <select
+        id={id}
+        className={formSelectClassName}
+        value={selectedCliProvider?.id || ''}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {providers.map((provider) => {
+          const optionCommand = (
+            getCliLaunchCommand(provider, targetType)
+            || getCliLaunchCommand(provider, 'project')
+            || getCliLaunchCommand(provider, 'directory')
+          );
+          const optionLabel = optionCommand
+            ? `${getCliProviderDisplayName(provider, language)} - ${optionCommand}`
+            : getCliProviderDisplayName(provider, language);
+
+          return (
+            <option key={provider.id} value={provider.id}>
+              {optionLabel}
+            </option>
+          );
+        })}
+      </select>
+      {showSummary && selectedCliProvider && (
+        <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          <CliProviderBadge language={language} provider={selectedCliProvider} />
+          {launchCommand && (
+            <span className="truncate font-mono" title={launchCommand}>
+              {t('launchCommand')}: {launchCommand}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NewSessionDialog({
+  defaultCwd,
+  initialCliProviderId = defaultCliProviderId,
+  language,
+  onOpenChange,
+  onSelect,
+  open,
+  projects,
+  t
+}) {
+  const selectableCliProviders = useMemo(() => getSelectableCliProviders(['project', 'directory']), []);
+  const selectedInitialCliProviderId = getInitialCliProviderId(initialCliProviderId, selectableCliProviders);
+  const [selectedCliProviderId, setSelectedCliProviderId] = useState(
+    () => selectedInitialCliProviderId
+  );
   const freeWindowDirectory = defaultCwd || t('defaultDirectory');
+  const selectedCliProvider = resolveSelectableCliProvider(selectedCliProviderId, selectableCliProviders);
+  const providerDescription = getCliProviderDescription(selectedCliProvider, language);
+  const launchCommand = selectedCliProvider
+    ? (
+      getCliLaunchCommand(selectedCliProvider, 'project')
+      || getCliLaunchCommand(selectedCliProvider, 'directory')
+    )
+    : '';
+
+  useEffect(() => {
+    if (open) {
+      setSelectedCliProviderId(selectedInitialCliProviderId);
+    }
+  }, [open, selectedInitialCliProviderId]);
+
+  useEffect(() => {
+    if (!selectedCliProvider || !getCliProviderById(selectedCliProviderId)) {
+      setSelectedCliProviderId(selectedInitialCliProviderId);
+    }
+  }, [selectedCliProvider, selectedCliProviderId, selectedInitialCliProviderId]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent id="newSessionDialog" className="w-[min(560px,calc(100vw-32px))] p-0">
+      <DialogContent id="newSessionDialog" className="w-[min(640px,calc(100vw-32px))] p-0">
         <DialogHeader>
           <DialogTitle>{t('newSessionSource')}</DialogTitle>
           <DialogDescription>{t('newSessionSourceDescription')}</DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-2 p-4">
-          <Button
-            type="button"
-            variant="outline"
-            className="h-auto w-full justify-start whitespace-normal px-3 py-2 text-left"
-            onClick={() => onSelect({ type: 'free' })}
-          >
-            <SquareTerminal className="h-4 w-4 shrink-0" />
-            <span className="grid min-w-0 flex-1 gap-1">
-              <span className="truncate font-medium">{t('freeWindow')}</span>
-              <span className="truncate text-xs font-normal text-muted-foreground" title={freeWindowDirectory}>
-                {freeWindowDirectory}
-              </span>
-            </span>
-          </Button>
+        <div className="grid gap-4 p-4">
+          <CliProviderSelectField
+            id="newSessionCliProvider"
+            language={language}
+            label={t('cliProvider')}
+            onChange={setSelectedCliProviderId}
+            providerId={selectedCliProviderId}
+            providers={selectableCliProviders}
+            showSummary={false}
+            targetType="project"
+            t={t}
+          />
 
-          {projects.length > 0 && (
-            <div className="grid max-h-[min(420px,calc(100vh-270px))] gap-2 overflow-y-auto pr-1">
-              {projects.map((project) => (
-                <Button
-                  key={project.id}
-                  type="button"
-                  variant="ghost"
-                  className="h-auto w-full justify-start whitespace-normal px-3 py-2 text-left"
-                  onClick={() => onSelect({ type: 'project', projectId: project.id })}
-                >
-                  <FolderOpen className="h-4 w-4 shrink-0" />
-                  <span className="grid min-w-0 flex-1 gap-1">
-                    <span className="truncate font-medium">{project.name}</span>
-                    <span className="truncate text-xs font-normal text-muted-foreground" title={project.path}>
-                      {project.path}
-                    </span>
-                  </span>
-                </Button>
-              ))}
+          {selectedCliProvider && (
+            <div className="grid gap-2 rounded-md border border-border bg-card/70 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold">
+                  {getCliProviderDisplayName(selectedCliProvider, language)}
+                </div>
+                <CliProviderBadge language={language} provider={selectedCliProvider} />
+              </div>
+              {providerDescription && (
+                <div className="text-xs text-muted-foreground">{providerDescription}</div>
+              )}
+              {launchCommand && (
+                <div className="truncate font-mono text-[11px] text-muted-foreground" title={launchCommand}>
+                  {t('launchCommand')}: {launchCommand}
+                </div>
+              )}
             </div>
           )}
+
+          <div className="grid gap-2">
+            <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+              {t('cliTarget')}
+            </div>
+
+            {selectedCliProvider && cliProviderSupportsTarget(selectedCliProvider, 'directory') && (
+              <Button
+                type="button"
+                variant="outline"
+                className="h-auto w-full justify-start whitespace-normal px-3 py-2 text-left"
+                onClick={() => onSelect({
+                  cliProviderId: selectedCliProvider.id,
+                  targetType: 'directory'
+                })}
+              >
+                <SquareTerminal className="h-4 w-4 shrink-0" />
+                <span className="grid min-w-0 flex-1 gap-1">
+                  <span className="truncate font-medium">{t('freeWindow')}</span>
+                  <span className="truncate text-xs font-normal text-muted-foreground" title={freeWindowDirectory}>
+                    {freeWindowDirectory}
+                  </span>
+                </span>
+              </Button>
+            )}
+
+            {selectedCliProvider && cliProviderSupportsTarget(selectedCliProvider, 'project') && projects.length > 0 && (
+              <div className="grid max-h-[min(360px,calc(100vh-360px))] gap-2 overflow-y-auto pr-1">
+                {projects.map((project) => (
+                  <Button
+                    key={project.id}
+                    type="button"
+                    variant="ghost"
+                    className="h-auto w-full justify-start whitespace-normal px-3 py-2 text-left"
+                    onClick={() => onSelect({
+                      cliProviderId: selectedCliProvider.id,
+                      targetType: 'project',
+                      projectId: project.id
+                    })}
+                  >
+                    <FolderOpen className="h-4 w-4 shrink-0" />
+                    <span className="grid min-w-0 flex-1 gap-1">
+                      <span className="truncate font-medium">{project.name}</span>
+                      <span className="truncate text-xs font-normal text-muted-foreground" title={project.path}>
+                        {project.path}
+                      </span>
+                    </span>
+                  </Button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function TopbarLaunchMenu({
+  cliProviderId,
+  language,
+  onAddCommandLine,
+  onAddGrid,
+  onAddSession,
+  onCliProviderChange,
+  onOpenGridSessionDialog,
+  onOpenSessionPicker,
+  t
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const selectableCliProviders = useMemo(() => getSelectableCliProviders(['project', 'directory']), []);
+  const selectedCliProviderId = getInitialCliProviderId(cliProviderId, selectableCliProviders);
+  const selectedCliProvider = resolveSelectableCliProvider(selectedCliProviderId, selectableCliProviders);
+  const selectedLabel = selectedCliProvider
+    ? getCliProviderBadgeLabel(selectedCliProvider, language)
+    : t('cliProvider');
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+
+    const closeOnPointerDown = (event) => {
+      if (!rootRef.current?.contains(event.target)) {
+        setOpen(false);
+      }
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', closeOnPointerDown);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [open]);
+
+  const runAction = useCallback((handler) => {
+    setOpen(false);
+    handler(selectedCliProviderId);
+  }, [selectedCliProviderId]);
+
+  return (
+    <div className="launch-menu" ref={rootRef}>
+      <Button
+        id="launchMenuButton"
+        type="button"
+        variant="primary"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={t('launchMenuAria')}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <Plus className="h-4 w-4" />
+        {t('launchMenu')}
+        <span className="launch-menu-button-provider">
+          {selectedLabel}
+        </span>
+        <ChevronDown className={cn('h-4 w-4 transition-transform', open && 'rotate-180')} />
+      </Button>
+
+      {open && (
+        <div className="launch-menu-panel" role="menu" aria-label={t('launchMenuAria')}>
+          <CliProviderSelectField
+            id="topbarLaunchCliProvider"
+            language={language}
+            label={t('cliProvider')}
+            onChange={onCliProviderChange}
+            providerId={selectedCliProviderId}
+            providers={selectableCliProviders}
+            targetType="project"
+            t={t}
+          />
+
+          <div className="launch-menu-divider" />
+
+          <div className="launch-menu-actions">
+            <button
+              type="button"
+              className="launch-menu-item"
+              role="menuitem"
+              onClick={() => runAction(onAddSession)}
+            >
+              <MessageSquarePlus className="launch-menu-item-icon" />
+              <span className="launch-menu-item-copy">
+                <span className="launch-menu-item-title">{t('addSession')}</span>
+                <span className="launch-menu-item-subtitle">{t('launchAtCurrentWorkspace')}</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="launch-menu-item"
+              role="menuitem"
+              onClick={() => runAction(onOpenSessionPicker)}
+            >
+              <FolderOpen className="launch-menu-item-icon" />
+              <span className="launch-menu-item-copy">
+                <span className="launch-menu-item-title">{t('newSessionSource')}</span>
+                <span className="launch-menu-item-subtitle">{t('launchChooseTarget')}</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="launch-menu-item"
+              role="menuitem"
+              onClick={() => runAction(onAddCommandLine)}
+            >
+              <SquareTerminal className="launch-menu-item-icon" />
+              <span className="launch-menu-item-copy">
+                <span className="launch-menu-item-title">{t('addCommandLine')}</span>
+                <span className="launch-menu-item-subtitle">{t('launchCurrentDirectory')}</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="launch-menu-item"
+              role="menuitem"
+              onClick={() => runAction(onAddGrid)}
+            >
+              <Grid2X2 className="launch-menu-item-icon" />
+              <span className="launch-menu-item-copy">
+                <span className="launch-menu-item-title">{t('quickGrid2x2')}</span>
+                <span className="launch-menu-item-subtitle">{t('launchFourSessions')}</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="launch-menu-item"
+              role="menuitem"
+              onClick={() => runAction(onOpenGridSessionDialog)}
+            >
+              <LayoutGrid className="launch-menu-item-icon" />
+              <span className="launch-menu-item-copy">
+                <span className="launch-menu-item-title">{t('addSessionGrid')}</span>
+                <span className="launch-menu-item-subtitle">{t('launchCustomCount')}</span>
+              </span>
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2810,6 +3695,597 @@ function SystemStats({ stats, t }) {
         <span className="font-mono tabular-nums text-foreground">{memoryText}</span>
       </div>
     </div>
+  );
+}
+
+function SidebarThemeControl({ compact = false, onThemeChange, t, theme }) {
+  const options = [
+    { value: 'light', label: t('light'), Icon: Sun },
+    { value: 'dark', label: t('dark'), Icon: Moon }
+  ];
+
+  if (compact) {
+    return (
+      <div
+        className="grid gap-1 rounded-lg border border-border bg-card/70 p-1"
+        role="group"
+        aria-label={t('appearance')}
+      >
+        {options.map(({ value, label, Icon }) => (
+          <Button
+            key={value}
+            type="button"
+            size="icon"
+            variant={theme === value ? 'primary' : 'ghost'}
+            className="h-8 w-8"
+            title={label}
+            aria-label={label}
+            onClick={() => onThemeChange(value)}
+          >
+            <Icon className="h-4 w-4" />
+          </Button>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-2 rounded-md border border-border bg-card/70 p-2">
+      <div className="px-1 text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+        {t('appearance')}
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {options.map(({ value, label, Icon }) => (
+          <Button
+            key={value}
+            type="button"
+            variant={theme === value ? 'primary' : 'outline'}
+            className="w-full justify-center"
+            onClick={() => onThemeChange(value)}
+          >
+            <Icon className="h-4 w-4" />
+            {label}
+          </Button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function GridSessionDialog({
+  initialCliProviderId = defaultCliProviderId,
+  language,
+  onCreate,
+  onOpenChange,
+  open,
+  t
+}) {
+  const selectableCliProviders = useMemo(() => getSelectableCliProviders(['project', 'directory']), []);
+  const selectedInitialCliProviderId = getInitialCliProviderId(initialCliProviderId, selectableCliProviders);
+  const [count, setCount] = useState('4');
+  const [selectedCliProviderId, setSelectedCliProviderId] = useState(
+    () => selectedInitialCliProviderId
+  );
+  const parsedCount = parseGridSessionCount(count);
+  const valid = parsedCount !== null;
+
+  useEffect(() => {
+    if (open) {
+      setCount('4');
+      setSelectedCliProviderId(selectedInitialCliProviderId);
+    }
+  }, [open, selectedInitialCliProviderId]);
+
+  const submit = useCallback(() => {
+    if (!valid) {
+      return;
+    }
+
+    onCreate(parsedCount, {
+      cliProviderId: selectedCliProviderId
+    });
+  }, [onCreate, parsedCount, selectedCliProviderId, valid]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent id="gridSessionDialog" className="w-[min(420px,calc(100vw-32px))] p-0">
+        <DialogHeader>
+          <DialogTitle>{t('gridSessionDialogTitle')}</DialogTitle>
+          <DialogDescription>{t('gridSessionDialogDescription')}</DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4 p-4">
+          <CliProviderSelectField
+            id="gridSessionCliProvider"
+            language={language}
+            label={t('cliProvider')}
+            onChange={setSelectedCliProviderId}
+            providerId={selectedCliProviderId}
+            providers={selectableCliProviders}
+            targetType="project"
+            t={t}
+          />
+
+          <div className="grid gap-2">
+            <Label htmlFor="gridSessionCount">{t('gridSessionCount')}</Label>
+            <Input
+              id="gridSessionCount"
+              type="number"
+              min={gridSessionCountMin}
+              max={gridSessionCountMax}
+              step={1}
+              value={count}
+              onChange={(event) => setCount(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+            />
+            <div className={cn('text-xs text-muted-foreground', !valid && 'text-destructive')}>
+              {valid
+                ? t('gridSessionCountHint', { max: gridSessionCountMax })
+                : t('gridSessionInvalid', { max: gridSessionCountMax })}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {[4, 6, 9, 12].map((preset) => (
+              <Button
+                key={preset}
+                type="button"
+                variant={count === String(preset) ? 'primary' : 'outline'}
+                size="sm"
+                onClick={() => setCount(String(preset))}
+              >
+                {preset}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            {t('close')}
+          </Button>
+          <Button type="button" variant="primary" onClick={submit} disabled={!valid}>
+            <Grid2X2 className="h-4 w-4" />
+            {t('gridSessionCreate')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function getWorkspaceTreeNodeLabel(node, t) {
+  if (!node) {
+    return '';
+  }
+
+  if (node.type === 'omitted') {
+    return t('workspaceTreeOmitted', { count: node.omittedCount || 0 });
+  }
+
+  if (node.type === 'depth-limit') {
+    return t('workspaceTreeDepthLimit');
+  }
+
+  if (node.type === 'unreadable') {
+    return t('workspaceTreeUnreadable', { message: node.message || 'error' });
+  }
+
+  return node.name || node.relativePath || node.path || '';
+}
+
+function WorkspaceTreeNode({ depth = 0, expandedIds, node, onToggle, t }) {
+  const children = Array.isArray(node?.children) ? node.children : [];
+  const directory = node?.type === 'directory';
+  const notice = node?.type === 'omitted' || node?.type === 'depth-limit' || node?.type === 'unreadable';
+  const canExpand = directory && children.length > 0;
+  const expanded = canExpand && expandedIds.has(node.id);
+  const label = getWorkspaceTreeNodeLabel(node, t);
+  const title = [node?.relativePath || label, node?.path].filter(Boolean).join('\n');
+  const rowClassName = cn(
+    'workspace-tree-row',
+    directory && 'is-directory',
+    notice && 'is-notice',
+    node?.type === 'unreadable' && 'is-error'
+  );
+  const rowStyle = { '--tree-indent': `${depth * 14}px` };
+  const fileIcon = node?.type === 'link' ? ExternalLink : File;
+  const TreeIcon = directory ? (expanded ? FolderOpen : Folder) : fileIcon;
+  const rowChildren = (
+    <>
+      <span className="workspace-tree-expander" aria-hidden="true">
+        {canExpand ? (
+          expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />
+        ) : null}
+      </span>
+      <TreeIcon className="workspace-tree-node-icon h-3.5 w-3.5" />
+      <span className="workspace-tree-node-name">{label}</span>
+      {node?.ignored && <span className="workspace-tree-node-tag">{t('workspaceTreeIgnored')}</span>}
+      {node?.link && <span className="workspace-tree-node-tag">{t('workspaceTreeLink')}</span>}
+    </>
+  );
+
+  return (
+    <li role="treeitem" aria-expanded={canExpand ? expanded : undefined} aria-level={depth + 1}>
+      {canExpand ? (
+        <button
+          type="button"
+          className={rowClassName}
+          style={rowStyle}
+          title={title || undefined}
+          onClick={() => onToggle(node.id)}
+        >
+          {rowChildren}
+        </button>
+      ) : (
+        <div className={rowClassName} style={rowStyle} title={title || undefined}>
+          {rowChildren}
+        </div>
+      )}
+
+      {canExpand && expanded && (
+        <ul className="workspace-tree-children" role="group">
+          {children.map((child) => (
+            <WorkspaceTreeNode
+              key={child.id || `${node.id}:${child.name}`}
+              depth={depth + 1}
+              expandedIds={expandedIds}
+              node={child}
+              onToggle={onToggle}
+              t={t}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+function WorkspaceTreeView({ root, t }) {
+  const [expandedIds, setExpandedIds] = useState(() => new Set());
+
+  useEffect(() => {
+    setExpandedIds(root?.id ? new Set([root.id]) : new Set());
+  }, [root?.id]);
+
+  const toggleNode = useCallback((nodeId) => {
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      if (next.has(nodeId)) {
+        next.delete(nodeId);
+      } else {
+        next.add(nodeId);
+      }
+      return next;
+    });
+  }, []);
+
+  if (!root) {
+    return null;
+  }
+
+  return (
+    <ul className="workspace-tree-list" role="tree">
+      <WorkspaceTreeNode
+        expandedIds={expandedIds}
+        node={root}
+        onToggle={toggleNode}
+        t={t}
+      />
+    </ul>
+  );
+}
+
+function WorkspaceTreeContent({ state, t }) {
+  const snapshot = state.snapshot;
+  const root = snapshot?.root || null;
+
+  if (state.status === 'loading' && !root) {
+    return (
+      <div className="workspace-tree-placeholder">
+        <RefreshCw className="h-4 w-4 animate-spin" />
+        <span>{t('workspaceTreeLoading')}</span>
+      </div>
+    );
+  }
+
+  if (state.status === 'error') {
+    return (
+      <div className="workspace-tree-placeholder is-error">
+        {state.error || t('workspaceTreeNoData')}
+      </div>
+    );
+  }
+
+  if (!root) {
+    return (
+      <div className="workspace-tree-placeholder">
+        {t('workspaceTreeNoData')}
+      </div>
+    );
+  }
+
+  return <WorkspaceTreeView root={root} t={t} />;
+}
+
+function WorkspaceTreeSidebar({
+  currentPath,
+  onClose,
+  onCopy,
+  onOpen,
+  onRefresh,
+  open,
+  state,
+  t
+}) {
+  const snapshot = state.snapshot;
+  const currentTreePath = snapshot?.cwd || state.requestedPath || currentPath || '';
+  const summary = state.status === 'error'
+    ? state.error || t('workspaceTreeNoData')
+    : formatWorkspaceTreeSummary(snapshot, t);
+  const loading = state.status === 'loading';
+
+  return (
+    <aside className={cn('workspace-tree-sidebar', open && 'is-open')} aria-label={t('workspaceTreeTitle')}>
+      {!open && (
+        <div className="workspace-tree-rail">
+          <IconButton
+            id="openWorkspaceTree"
+            label={t('workspaceTreeOpen')}
+            disabled={!currentPath}
+            onClick={onOpen}
+          >
+            <PanelRightOpen className="h-4 w-4" />
+          </IconButton>
+        </div>
+      )}
+
+      {open && (
+        <section className="workspace-tree-panel">
+          <header className="workspace-tree-panel-header">
+            <div className="min-w-0">
+              <div className="workspace-tree-panel-title">
+                <FolderOpen className="h-4 w-4 text-primary" />
+                <span>{t('workspaceTree')}</span>
+              </div>
+              <div className="workspace-tree-path" title={currentTreePath || undefined}>
+                {currentTreePath || t('workspaceTreeUnavailable')}
+              </div>
+            </div>
+            <IconButton label={t('workspaceTreeClose')} variant="ghost" onClick={onClose}>
+              <PanelRightClose className="h-4 w-4" />
+            </IconButton>
+          </header>
+
+          <div className="workspace-tree-panel-meta">
+            <div className={cn('workspace-tree-summary', state.status === 'error' && 'is-error')}>
+              {loading ? t('workspaceTreeLoading') : (summary || t('workspaceTreeNoData'))}
+            </div>
+            <div className="workspace-tree-actions">
+              <IconButton
+                label={t('reload')}
+                variant="ghost"
+                disabled={!currentPath || loading}
+                onClick={onRefresh}
+              >
+                <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
+              </IconButton>
+              <IconButton
+                label={t('copy')}
+                variant="ghost"
+                disabled={!snapshot?.text}
+                onClick={onCopy}
+              >
+                <Copy className="h-4 w-4" />
+              </IconButton>
+            </div>
+          </div>
+
+          <div className="workspace-tree-panel-body">
+            <WorkspaceTreeContent state={state} t={t} />
+          </div>
+        </section>
+      )}
+    </aside>
+  );
+}
+
+function CommandLineConfigDialog({
+  initialCliProviderId = defaultCliProviderId,
+  initialDirectory,
+  language,
+  onCreate,
+  onOpenChange,
+  open,
+  t
+}) {
+  const selectableCliProviders = useMemo(() => getSelectableCliProviders(['directory']), []);
+  const selectedInitialCliProviderId = getInitialCliProviderId(initialCliProviderId, selectableCliProviders);
+  const [directory, setDirectory] = useState('');
+  const [selectedCliProviderId, setSelectedCliProviderId] = useState(
+    () => selectedInitialCliProviderId
+  );
+  const normalizedDirectory = String(directory || '').trim();
+
+  useEffect(() => {
+    if (open) {
+      setDirectory(String(initialDirectory || ''));
+      setSelectedCliProviderId(selectedInitialCliProviderId);
+    }
+  }, [initialDirectory, open, selectedInitialCliProviderId]);
+
+  const browseDirectory = useCallback(async () => {
+    const selected = await bridge.chooseDirectory();
+    if (selected) {
+      setDirectory(selected);
+    }
+  }, []);
+
+  const submit = useCallback(() => {
+    if (!normalizedDirectory) {
+      return;
+    }
+
+    onCreate({
+      cwd: normalizedDirectory,
+      cliProviderId: selectedCliProviderId
+    });
+  }, [normalizedDirectory, onCreate, selectedCliProviderId]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent id="commandLineConfigDialog" className="w-[min(520px,calc(100vw-32px))] p-0">
+        <DialogHeader>
+          <DialogTitle>{t('addCommandDialogTitle')}</DialogTitle>
+          <DialogDescription>{t('addCommandDialogDescription')}</DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4 p-4">
+          <CliProviderSelectField
+            id="commandLineCliProvider"
+            language={language}
+            label={t('cliProvider')}
+            onChange={setSelectedCliProviderId}
+            providerId={selectedCliProviderId}
+            providers={selectableCliProviders}
+            targetType="directory"
+            t={t}
+          />
+
+          <div className="grid gap-2">
+            <Label htmlFor="commandLineDirectoryInput">{t('directory')}</Label>
+            <div className="flex gap-2">
+              <Input
+                id="commandLineDirectoryInput"
+                className="font-mono text-xs"
+                spellCheck={false}
+                value={directory}
+                onChange={(event) => setDirectory(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && normalizedDirectory) {
+                    event.preventDefault();
+                    submit();
+                  }
+                }}
+              />
+              <Button type="button" variant="outline" onClick={browseDirectory}>
+                <FolderOpen className="h-4 w-4" />
+                {t('chooseDirectory')}
+              </Button>
+            </div>
+            <div className={cn('text-xs text-muted-foreground', !normalizedDirectory && 'text-destructive')}>
+              {normalizedDirectory ? t('addCommandDirectoryHint') : t('dialogPathRequired')}
+            </div>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            {t('close')}
+          </Button>
+          <Button type="button" variant="primary" onClick={submit} disabled={!normalizedDirectory}>
+            <SquareTerminal className="h-4 w-4" />
+            {t('addCommandConfirm')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ProjectConfigDialog({ onCreate, onOpenChange, open, t }) {
+  const [directory, setDirectory] = useState('');
+  const [name, setName] = useState('');
+  const normalizedDirectory = String(directory || '').trim();
+  const normalizedName = String(name || '').trim();
+
+  useEffect(() => {
+    if (open) {
+      setDirectory('');
+      setName('');
+    }
+  }, [open]);
+
+  const browseDirectory = useCallback(async () => {
+    const selected = await bridge.chooseDirectory();
+    if (selected) {
+      setDirectory(selected);
+    }
+  }, []);
+
+  const submit = useCallback(() => {
+    if (!normalizedDirectory) {
+      return;
+    }
+
+    onCreate({
+      path: normalizedDirectory,
+      name: normalizedName
+    });
+  }, [normalizedDirectory, normalizedName, onCreate]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent id="projectConfigDialog" className="w-[min(560px,calc(100vw-32px))] p-0">
+        <DialogHeader>
+          <DialogTitle>{t('addProjectDialogTitle')}</DialogTitle>
+          <DialogDescription>{t('addProjectDialogDescription')}</DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4 p-4">
+          <div className="grid gap-2">
+            <Label htmlFor="projectDirectoryInput">{t('addProjectPath')}</Label>
+            <div className="flex gap-2">
+              <Input
+                id="projectDirectoryInput"
+                className="font-mono text-xs"
+                spellCheck={false}
+                value={directory}
+                onChange={(event) => setDirectory(event.target.value)}
+              />
+              <Button type="button" variant="outline" onClick={browseDirectory}>
+                <FolderOpen className="h-4 w-4" />
+                {t('chooseDirectory')}
+              </Button>
+            </div>
+            <div className={cn('text-xs text-muted-foreground', !normalizedDirectory && 'text-destructive')}>
+              {normalizedDirectory || t('dialogPathRequired')}
+            </div>
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="projectNameInput">{t('addProjectName')}</Label>
+            <Input
+              id="projectNameInput"
+              value={name}
+              placeholder={normalizedDirectory ? deriveNameFromPath(normalizedDirectory) : t('addProjectNamePlaceholder')}
+              onChange={(event) => setName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && normalizedDirectory) {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+            />
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            {t('close')}
+          </Button>
+          <Button type="button" variant="primary" onClick={submit} disabled={!normalizedDirectory}>
+            <FolderPlus className="h-4 w-4" />
+            {t('addProjectConfirm')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -2949,23 +4425,359 @@ function ReleaseInfo({
   );
 }
 
+function WorkspaceSkillsSection({
+  collapsed,
+  onOpenPath,
+  onRefresh,
+  onToggleCollapsed,
+  rootPath,
+  skillsState,
+  t
+}) {
+  const scopes = Array.isArray(skillsState?.snapshot?.scopes) ? skillsState.snapshot.scopes : [];
+  const visibleScopes = scopes.filter((scope) => scope.exists || scope.fileCount > 0 || scope.error);
+  const loading = skillsState?.status === 'loading';
+  const loadError = skillsState?.status === 'error' ? skillsState.error : '';
+  const totalFiles = Number.isFinite(skillsState?.snapshot?.totalFiles)
+    ? skillsState.snapshot.totalFiles
+    : visibleScopes.reduce((sum, scope) => sum + (Number.isFinite(scope.fileCount) ? scope.fileCount : 0), 0);
+
+  return (
+    <SidebarSection>
+      <div className="sidebar-section-title">
+        <button
+          type="button"
+          className="sidebar-section-toggle"
+          title={collapsed ? t('expandSkills') : t('collapseSkills')}
+          aria-expanded={!collapsed}
+          aria-controls="sidebarSkillsContent"
+          onClick={onToggleCollapsed}
+        >
+          {collapsed ? (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+          ) : (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+          )}
+          <span className="min-w-0 truncate">{t('skills')}</span>
+          {totalFiles > 0 && (
+            <Badge variant="outline" className="sidebar-skill-count">
+              {totalFiles}
+            </Badge>
+          )}
+        </button>
+        <div className="flex items-center gap-1">
+          <IconButton
+            label={t('reload')}
+            variant="ghost"
+            disabled={!rootPath || loading}
+            onClick={onRefresh}
+          >
+            <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
+          </IconButton>
+          <IconButton
+            label={t('openFolder')}
+            variant="ghost"
+            disabled={!rootPath}
+            onClick={() => onOpenPath(rootPath)}
+          >
+            <FolderOpen className="h-4 w-4" />
+          </IconButton>
+        </div>
+      </div>
+
+      {!collapsed && (
+        <div id="sidebarSkillsContent" className="grid gap-2">
+          <div className="sidebar-skills-root" title={rootPath || undefined}>
+            {rootPath || t('skillsHint')}
+          </div>
+
+          {loading && (
+            <div className="sidebar-empty">{t('loading')}</div>
+          )}
+
+          {!loading && loadError && (
+            <div className="sidebar-release-empty is-error">
+              {t('skillsLoadFailed', { message: loadError })}
+            </div>
+          )}
+
+          {!loading && !loadError && visibleScopes.length === 0 && (
+            <div className="sidebar-empty">{t('skillsEmpty')}</div>
+          )}
+
+          {!loading && !loadError && visibleScopes.length > 0 && (
+            <div className="grid gap-2">
+              {visibleScopes.map((scope) => {
+                const previewFiles = scope.files.slice(0, workspaceSkillPreviewCount);
+                const remainingCount = Math.max(0, scope.fileCount - previewFiles.length);
+
+                return (
+                  <div key={scope.id} className="sidebar-skill-group">
+                    <div className="sidebar-skill-header">
+                      <div className="sidebar-skill-title">
+                        <div className="sidebar-skill-label-group">
+                          <div className="sidebar-skill-label">{scope.label}</div>
+                          <div className="sidebar-skill-folder">{scope.directoryName}</div>
+                        </div>
+                        <Badge variant="outline" className="sidebar-skill-count">
+                          {scope.fileCount}
+                        </Badge>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 shrink-0 px-2 text-[11px]"
+                        onClick={() => onOpenPath(scope.path)}
+                      >
+                        {t('openFolder')}
+                      </Button>
+                    </div>
+
+                    {scope.error ? (
+                      <div className="sidebar-release-empty is-error">{scope.error}</div>
+                    ) : previewFiles.length > 0 ? (
+                      <div className="sidebar-skill-files">
+                        {previewFiles.map((file) => (
+                          <button
+                            key={`${scope.id}:${file.relativePath || file.path}`}
+                            type="button"
+                            className="sidebar-skill-file"
+                            title={`${file.relativePath || file.name}\n${file.path}`}
+                            onClick={() => onOpenPath(file.path)}
+                          >
+                            <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            <span className="grid min-w-0 gap-0.5">
+                              <span className="truncate text-[12px] font-medium">
+                                {file.name || file.relativePath}
+                              </span>
+                              <span className="truncate text-[11px] text-muted-foreground">
+                                {file.relativePath || file.path}
+                              </span>
+                            </span>
+                          </button>
+                        ))}
+
+                        {remainingCount > 0 && (
+                          <div className="sidebar-skill-more">
+                            {t('skillsMoreFiles', { count: remainingCount })}
+                          </div>
+                        )}
+
+                        {scope.truncated && (
+                          <div className="sidebar-skill-more">{t('skillsTruncated')}</div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="sidebar-skill-empty">{t('skillsScopeEmpty')}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </SidebarSection>
+  );
+}
+
+function FloatingCommandDock({
+  activeId,
+  inputRef,
+  language,
+  message,
+  onExport,
+  onExportCustom,
+  onInputChange,
+  onInputCompositionEnd,
+  onInputCompositionStart,
+  onInputDragOver,
+  onInputKeyDown,
+  onInputDrop,
+  onInputPaste,
+  onSend,
+  onTargetChange,
+  panels,
+  targetId,
+  t
+}) {
+  const targetPanel = panels.find((panel) => panel.id === targetId) || null;
+  const targetReady = canPanelReceiveInput(targetPanel);
+  const canExport = Boolean(targetPanel);
+  const canSend = Boolean(targetReady && String(message || '').trim());
+  const targetSummary = targetPanel
+    ? t('floatingComposerSubtitle', { name: targetPanel.title })
+    : t('floatingComposerUnavailable');
+
+  return (
+    <div className="pointer-events-none absolute bottom-3 left-1/2 z-[7000] w-[calc(100%-20px)] max-w-[980px] -translate-x-1/2 md:bottom-[18px] md:w-[calc(100%-32px)]">
+      <Card
+        className="pointer-events-auto shadow-lg"
+        onPointerDown={(event) => event.stopPropagation()}
+        onWheel={(event) => event.stopPropagation()}
+        onDragOver={onInputDragOver}
+        onDrop={onInputDrop}
+      >
+        <CardHeader className="gap-2 px-3 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0 flex flex-1 items-center gap-2">
+              <CardTitle className="shrink-0 text-sm">{t('floatingComposerTitle')}</CardTitle>
+              <CardDescription className="truncate text-xs" title={targetPanel?.cwd || undefined}>
+                {targetSummary}
+              </CardDescription>
+            </div>
+            {targetPanel && (
+              <CliProviderBadge
+                className="shrink-0 px-2 py-0 text-[11px]"
+                language={language}
+                provider={getPanelCliProvider(targetPanel)}
+              />
+            )}
+          </div>
+          <div
+            className="flex max-h-32 flex-wrap gap-2 overflow-x-hidden overflow-y-auto pr-1"
+            role="group"
+            aria-label={t('floatingComposerTarget')}
+          >
+            {panels.map((panel) => {
+              const executionState = getPanelExecutionState(panel);
+              const sendDisabled = !canPanelReceiveInput(panel);
+              const current = panel.id === activeId;
+              const targeted = panel.id === targetId;
+              const providerLabel = getCliProviderBadgeLabel(getPanelCliProvider(panel), language);
+              const summary = [
+                panel.title,
+                providerLabel,
+                getExecutionStateLabel(executionState, t),
+                current ? t('floatingComposerCurrent') : ''
+              ].filter(Boolean).join(', ');
+
+              return (
+                <Button
+                  key={panel.id}
+                  type="button"
+                  variant={targeted ? 'primary' : 'outline'}
+                  size="sm"
+                  className={cn(
+                    'h-8 min-w-0 max-w-full basis-[220px] justify-start gap-1.5 px-2.5 text-[11px]',
+                    current && !targeted && 'border-primary/35',
+                    sendDisabled && 'opacity-60'
+                  )}
+                  aria-pressed={targeted}
+                  title={`${summary}\n${panel.cwd}`}
+                  onClick={() => onTargetChange(panel.id)}
+                >
+                  <span className={cn('shrink-0 terminal-endpoint-dot', `is-${executionState}`)} />
+                  <span className={cn(
+                    'min-w-0 truncate whitespace-nowrap',
+                    targeted ? 'text-primary-foreground' : 'text-foreground'
+                  )}>
+                    {summary}
+                  </span>
+                </Button>
+              );
+            })}
+          </div>
+        </CardHeader>
+
+        <CardContent className="grid gap-2 px-3 pb-3 pt-0">
+          <div className="relative">
+            <Textarea
+              ref={inputRef}
+              rows={1}
+              spellCheck={false}
+              value={message}
+              placeholder={targetPanel
+                ? t('floatingComposerPlaceholder', { name: targetPanel.title })
+                : t('floatingComposerUnavailable')}
+              className="min-h-[108px] max-h-[260px] resize-none pb-12 pr-24 font-mono text-sm leading-6"
+              onChange={onInputChange}
+              onCompositionEnd={onInputCompositionEnd}
+              onCompositionStart={onInputCompositionStart}
+              onDragOver={onInputDragOver}
+              onDrop={onInputDrop}
+              onKeyDown={onInputKeyDown}
+              onPaste={onInputPaste}
+            />
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              className="absolute bottom-2 right-2 h-8 px-3 shadow-sm"
+              onClick={onSend}
+              disabled={!canSend}
+            >
+              {t('floatingComposerSend')}
+            </Button>
+          </div>
+        </CardContent>
+
+        <CardFooter className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2">
+          <div className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={targetPanel?.cwd || undefined}>
+            {targetPanel?.cwd
+              ? `${targetPanel.cwd} · ${t('floatingComposerHint')}`
+              : t('floatingComposerUnavailable')}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 px-2"
+              title={t('exportSession')}
+              aria-label={t('exportSession')}
+              onClick={() => canExport && onExport(targetPanel.id)}
+              disabled={!canExport}
+            >
+              <Download className="h-3.5 w-3.5" />
+              {t('exportSession')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 px-2"
+              title={t('exportSessionCustom')}
+              aria-label={t('exportSessionCustom')}
+              onClick={() => canExport && onExportCustom(targetPanel.id)}
+              disabled={!canExport}
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              {t('exportSessionCustom')}
+            </Button>
+          </div>
+        </CardFooter>
+      </Card>
+    </div>
+  );
+}
+
 function WorkspaceSidebar({
   appVersion,
   workspace,
   activeProject,
   historyProject,
   language,
+  theme,
   onAddProject,
+  onAddCommandLine,
   onCanvasModeChange,
   onKillAll,
   onAddSession,
+  onOpenPath,
   onOpenReleases,
   onOpenCodexConfig,
+  onRefreshSkills,
   onRefreshRelease,
   onDeleteProject,
   onSelectNoProject,
   onSelectProject,
+  onThemeChange,
+  onToggleSkillsCollapsed,
   releaseState,
+  skillsRootPath,
+  skillsState,
   t,
   onToggleCollapsed
 }) {
@@ -2982,10 +4794,14 @@ function WorkspaceSidebar({
         <IconButton label={t('addSession')} onClick={onAddSession}>
           <MessageSquarePlus className="h-4 w-4" />
         </IconButton>
+        <IconButton label={t('addCommandLine')} onClick={onAddCommandLine}>
+          <SquareTerminal className="h-4 w-4" />
+        </IconButton>
         <IconButton label={t('addProject')} onClick={onAddProject}>
           <FolderPlus className="h-4 w-4" />
         </IconButton>
         <div className="sidebar-rail-spacer" />
+        <SidebarThemeControl compact theme={theme} onThemeChange={onThemeChange} t={t} />
         <IconButton label={t('settings')} onClick={onOpenCodexConfig}>
           <Settings2 className="h-4 w-4" />
         </IconButton>
@@ -3021,6 +4837,10 @@ function WorkspaceSidebar({
         <Button className="w-full justify-start" variant="ghost" onClick={onAddSession}>
           <MessageSquarePlus className="h-4 w-4" />
           {t('addSession')}
+        </Button>
+        <Button className="w-full justify-start" variant="ghost" onClick={onAddCommandLine}>
+          <SquareTerminal className="h-4 w-4" />
+          {t('addCommandLine')}
         </Button>
         <Button className="w-full justify-start" variant="ghost" onClick={onAddProject}>
           <FolderPlus className="h-4 w-4" />
@@ -3108,9 +4928,20 @@ function WorkspaceSidebar({
             ))}
           </div>
         </SidebarSection>
+
+        <WorkspaceSkillsSection
+          collapsed={Boolean(workspace.skillsCollapsed)}
+          onOpenPath={onOpenPath}
+          onRefresh={onRefreshSkills}
+          onToggleCollapsed={onToggleSkillsCollapsed}
+          rootPath={skillsRootPath}
+          skillsState={skillsState}
+          t={t}
+        />
       </SidebarContent>
 
       <SidebarFooter>
+        <SidebarThemeControl theme={theme} onThemeChange={onThemeChange} t={t} />
         <ReleaseInfo
           appVersion={appVersion}
           language={language}
@@ -3145,8 +4976,25 @@ export default function App() {
   const [endpointGroups, setEndpointGroups] = useState([]);
   const [selectedEndpointIds, setSelectedEndpointIds] = useState(() => new Set());
   const [activeId, setActiveId] = useState(null);
+  const [launchCliProviderId, setLaunchCliProviderId] = useState(defaultCliProviderId);
   const [codexOpen, setCodexOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [commandDialogOpen, setCommandDialogOpen] = useState(false);
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [gridSessionOpen, setGridSessionOpen] = useState(false);
+  const [workspaceTreeOpen, setWorkspaceTreeOpen] = useState(false);
+  const [workspaceTreeState, setWorkspaceTreeState] = useState({
+    status: 'idle',
+    snapshot: null,
+    error: '',
+    requestedPath: ''
+  });
+  const [workspaceSkillsState, setWorkspaceSkillsState] = useState({
+    status: 'idle',
+    snapshot: createEmptyWorkspaceSkillsSnapshot(''),
+    error: '',
+    requestedPath: ''
+  });
   const [defaultCwd, setDefaultCwd] = useState('');
   const [historyProject, setHistoryProject] = useState(null);
   const [systemStats, setSystemStats] = useState(null);
@@ -3154,11 +5002,17 @@ export default function App() {
   const [appInfo, setAppInfo] = useState({ appVersion: '' });
   const [codexProfileState, setCodexProfileState] = useState(createEmptyCodexProfile);
   const [codexProfileLoading, setCodexProfileLoading] = useState(true);
-  const [modelSwitching, setModelSwitching] = useState('');
   const [releaseState, setReleaseState] = useState({ status: 'idle', release: null, error: '' });
   const [panning, setPanning] = useState(false);
   const [toast, setToast] = useState('');
+  const [commandDockValue, setCommandDockValue] = useState('');
+  const [commandDockTargetId, setCommandDockTargetId] = useState('');
   const viewportRef = useRef(null);
+  const commandDockInputRef = useRef(null);
+  const commandDockComposingRef = useRef(false);
+  const commandDockPendingSubmitRef = useRef(false);
+  const panelActivityQueueRef = useRef(new Map());
+  const panelActivityFlushTimer = useRef(null);
   const terminalInstances = useRef(new Map());
   const panelsRef = useRef([]);
   const endpointGroupsRef = useRef([]);
@@ -3168,6 +5022,8 @@ export default function App() {
   const canvasScopeKeyRef = useRef(getWorkspaceCanvasKey(initialWorkspace));
   const activeIdRef = useRef(null);
   const cwdRef = useRef(cwd);
+  const workspaceTreeRequestIdRef = useRef(0);
+  const workspaceSkillsRequestIdRef = useRef(0);
   const nextZIndex = useRef(10);
   const toastTimer = useRef(null);
   const saveSettingsTimer = useRef(null);
@@ -3188,6 +5044,11 @@ export default function App() {
     () => projectsWithHistory.find((project) => project.id === workspace.activeProjectId) || null,
     [projectsWithHistory, workspace.activeProjectId]
   );
+  const currentWorkspacePath = useMemo(
+    () => String(cwd || activeProject?.path || defaultCwd || '').trim(),
+    [activeProject?.path, cwd, defaultCwd]
+  );
+  const skillsRootPath = currentWorkspacePath;
   const t = useCallback((key, values) => translate(language, key, values), [language]);
   const visiblePanels = useMemo(
     () => panels.filter((panel) => isPanelVisibleInWorkspace(panel, workspace)),
@@ -3220,6 +5081,37 @@ export default function App() {
     const selectedVisibleCount = visibleEndpoints.filter((panel) => selectedEndpointIds.has(panel.id)).length;
     return selectedVisibleCount || visibleEndpoints.length;
   }, [selectedEndpointIds, visiblePanels]);
+  const commandDockPanels = useMemo(() => {
+    const stateRank = {
+      running: 0,
+      idle: 1,
+      completed: 2,
+      error: 3
+    };
+
+    return [...visiblePanels].sort((left, right) => {
+      const leftState = getPanelExecutionState(left, runtimeNow);
+      const rightState = getPanelExecutionState(right, runtimeNow);
+      if (stateRank[leftState] !== stateRank[rightState]) {
+        return stateRank[leftState] - stateRank[rightState];
+      }
+      if ((left.id === activeId) !== (right.id === activeId)) {
+        return left.id === activeId ? -1 : 1;
+      }
+      if (left.minimized !== right.minimized) {
+        return left.minimized ? 1 : -1;
+      }
+      if ((left.createdAt || 0) !== (right.createdAt || 0)) {
+        return (left.createdAt || 0) - (right.createdAt || 0);
+      }
+      return left.title.localeCompare(right.title, language === 'en' ? 'en-US' : 'zh-CN');
+    });
+  }, [activeId, language, runtimeNow, visiblePanels]);
+  const liveCommandDockPanels = useMemo(
+    () => commandDockPanels.filter((panel) => canPanelReceiveInput(panel)),
+    [commandDockPanels]
+  );
+  const commandDockVisible = visiblePanels.length > 0;
 
   useEffect(() => {
     panelsRef.current = panels;
@@ -3295,13 +5187,463 @@ export default function App() {
     });
   }, [visiblePanels]);
 
+  useEffect(() => {
+    setCommandDockTargetId((current) => {
+      if (commandDockPanels.length === 0) {
+        return '';
+      }
+
+      const currentPanel = commandDockPanels.find((panel) => panel.id === current);
+      if (currentPanel) {
+        return current;
+      }
+
+      const activePanel = commandDockPanels.find((panel) => panel.id === activeId);
+      return activePanel?.id || liveCommandDockPanels[0]?.id || commandDockPanels[0]?.id || '';
+    });
+  }, [activeId, commandDockPanels, liveCommandDockPanels]);
+
   const showToast = useCallback((message) => {
     window.clearTimeout(toastTimer.current);
     setToast(message);
     toastTimer.current = window.setTimeout(() => setToast(''), 3200);
   }, []);
 
+  const loadWorkspaceTree = useCallback(async (targetPath) => {
+    const requestedPath = String(targetPath || '').trim();
+
+    if (!requestedPath) {
+      const message = t('workspaceTreeUnavailable');
+      setWorkspaceTreeState({
+        status: 'error',
+        snapshot: null,
+        error: message,
+        requestedPath: ''
+      });
+      showToast(message);
+      return null;
+    }
+
+    const requestId = workspaceTreeRequestIdRef.current + 1;
+    workspaceTreeRequestIdRef.current = requestId;
+
+    setWorkspaceTreeState((current) => ({
+      status: 'loading',
+      snapshot: current.snapshot?.cwd === requestedPath ? current.snapshot : null,
+      error: '',
+      requestedPath
+    }));
+
+    try {
+      const snapshot = await bridge.readWorkspaceTree({ cwd: requestedPath });
+      if (workspaceTreeRequestIdRef.current !== requestId) {
+        return null;
+      }
+
+      setWorkspaceTreeState({
+        status: 'ready',
+        snapshot,
+        error: '',
+        requestedPath: snapshot.cwd
+      });
+      return snapshot;
+    } catch (error) {
+      if (workspaceTreeRequestIdRef.current !== requestId) {
+        return null;
+      }
+
+      const message = error?.message || String(error);
+      setWorkspaceTreeState({
+        status: 'error',
+        snapshot: null,
+        error: message,
+        requestedPath
+      });
+      showToast(t('workspaceTreeFailed', { message }));
+      return null;
+    }
+  }, [showToast, t]);
+
+  const openWorkspaceTree = useCallback(() => {
+    setWorkspaceTreeOpen(true);
+    void loadWorkspaceTree(currentWorkspacePath);
+  }, [currentWorkspacePath, loadWorkspaceTree]);
+
+  const refreshWorkspaceTree = useCallback(() => {
+    void loadWorkspaceTree(currentWorkspacePath);
+  }, [currentWorkspacePath, loadWorkspaceTree]);
+
+  useEffect(() => {
+    if (!workspaceTreeOpen || !currentWorkspacePath) {
+      return;
+    }
+
+    const loadedPath = String(workspaceTreeState.snapshot?.cwd || workspaceTreeState.requestedPath || '').trim();
+    if (workspaceTreeState.status === 'idle' || loadedPath !== currentWorkspacePath) {
+      void loadWorkspaceTree(currentWorkspacePath);
+    }
+  }, [
+    currentWorkspacePath,
+    loadWorkspaceTree,
+    workspaceTreeOpen,
+    workspaceTreeState.requestedPath,
+    workspaceTreeState.snapshot?.cwd,
+    workspaceTreeState.status
+  ]);
+
+  const copyWorkspaceTree = useCallback(() => {
+    const snapshot = workspaceTreeState.snapshot;
+    if (!snapshot?.text) {
+      return;
+    }
+
+    const copied = writeClipboardText(`${snapshot.cwd}\n\n${snapshot.text}`);
+    if (copied) {
+      showToast(t('workspaceTreeCopied'));
+    }
+  }, [showToast, t, workspaceTreeState.snapshot]);
+
+  const loadWorkspaceSkills = useCallback(async (targetPath, options = {}) => {
+    const requestedPath = String(targetPath || '').trim();
+    const quiet = Boolean(options.quiet);
+
+    if (!requestedPath) {
+      setWorkspaceSkillsState({
+        status: 'idle',
+        snapshot: createEmptyWorkspaceSkillsSnapshot(''),
+        error: '',
+        requestedPath: ''
+      });
+      return null;
+    }
+
+    const requestId = workspaceSkillsRequestIdRef.current + 1;
+    workspaceSkillsRequestIdRef.current = requestId;
+
+    setWorkspaceSkillsState((current) => ({
+      status: 'loading',
+      snapshot: current.requestedPath === requestedPath
+        ? current.snapshot
+        : createEmptyWorkspaceSkillsSnapshot(requestedPath),
+      error: '',
+      requestedPath
+    }));
+
+    try {
+      const snapshot = normalizeWorkspaceSkillsSnapshot(
+        await bridge.readWorkspaceSkills({ cwd: requestedPath }),
+        requestedPath
+      );
+      if (workspaceSkillsRequestIdRef.current !== requestId) {
+        return null;
+      }
+
+      setWorkspaceSkillsState({
+        status: 'ready',
+        snapshot,
+        error: '',
+        requestedPath: snapshot.cwd || requestedPath
+      });
+      return snapshot;
+    } catch (error) {
+      if (workspaceSkillsRequestIdRef.current !== requestId) {
+        return null;
+      }
+
+      const message = error?.message || String(error);
+      setWorkspaceSkillsState({
+        status: 'error',
+        snapshot: createEmptyWorkspaceSkillsSnapshot(requestedPath),
+        error: message,
+        requestedPath
+      });
+      if (!quiet) {
+        showToast(t('skillsLoadFailed', { message }));
+      }
+      return null;
+    }
+  }, [showToast, t]);
+
+  const refreshWorkspaceSkills = useCallback(() => {
+    void loadWorkspaceSkills(skillsRootPath);
+  }, [loadWorkspaceSkills, skillsRootPath]);
+
+  const openWorkspacePath = useCallback((targetPath) => {
+    const normalizedPath = String(targetPath || '').trim();
+    if (!normalizedPath) {
+      return;
+    }
+
+    bridge.openWorkspacePath(normalizedPath).catch((error) => {
+      showToast(t('openPathFailed', { message: error.message }));
+    });
+  }, [showToast, t]);
+
+  useEffect(() => {
+    void loadWorkspaceSkills(skillsRootPath, { quiet: true });
+  }, [loadWorkspaceSkills, skillsRootPath]);
+
+  const flushPanelActivity = useCallback(() => {
+    panelActivityFlushTimer.current = null;
+    if (panelActivityQueueRef.current.size === 0) {
+      return;
+    }
+
+    const pending = new Map(panelActivityQueueRef.current);
+    panelActivityQueueRef.current.clear();
+    setPanels((current) => {
+      let changed = false;
+      const next = current.map((panel) => {
+        const timestamp = pending.get(panel.id);
+        if (!Number.isFinite(timestamp)) {
+          return panel;
+        }
+
+        if (timestamp <= getPanelLastActivityAt(panel)) {
+          return panel;
+        }
+
+        changed = true;
+        return {
+          ...panel,
+          lastActivityAt: timestamp
+        };
+      });
+      return changed ? next : current;
+    });
+    setRuntimeNow(Date.now());
+  }, []);
+
+  const touchPanelActivity = useCallback((id, timestamp = Date.now()) => {
+    if (!id) {
+      return;
+    }
+
+    const nextTimestamp = Number.isFinite(timestamp) ? timestamp : Date.now();
+    const previous = panelActivityQueueRef.current.get(id);
+    if (!Number.isFinite(previous) || nextTimestamp > previous) {
+      panelActivityQueueRef.current.set(id, nextTimestamp);
+    }
+
+    if (panelActivityFlushTimer.current !== null) {
+      return;
+    }
+
+    panelActivityFlushTimer.current = window.setTimeout(() => {
+      flushPanelActivity();
+    }, panelActivityFlushMs);
+  }, [flushPanelActivity]);
+
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
+  useEffect(() => () => window.clearTimeout(panelActivityFlushTimer.current), []);
+
+  const resizeCommandDockInput = useCallback((element = commandDockInputRef.current) => {
+    if (!(element instanceof HTMLTextAreaElement)) {
+      return;
+    }
+
+    element.style.height = '0px';
+    const nextHeight = Math.min(Math.max(element.scrollHeight, 108), 260);
+    element.style.height = `${nextHeight}px`;
+    element.style.overflowY = element.scrollHeight > 260 ? 'auto' : 'hidden';
+  }, []);
+
+  useEffect(() => {
+    resizeCommandDockInput();
+  }, [commandDockValue, resizeCommandDockInput]);
+
+  const handleCommandDockInputChange = useCallback((event) => {
+    setCommandDockValue(event.target.value);
+    resizeCommandDockInput(event.target);
+  }, [resizeCommandDockInput]);
+
+  const selectCommandDockTarget = useCallback((id) => {
+    setCommandDockTargetId(id);
+    window.requestAnimationFrame(() => commandDockInputRef.current?.focus());
+  }, []);
+
+  const insertTextIntoCommandDock = useCallback((text) => {
+    const normalizedText = String(text || '');
+    if (!normalizedText) {
+      return;
+    }
+
+    const element = commandDockInputRef.current;
+    const currentValue = typeof element?.value === 'string' ? element.value : commandDockValue;
+    const selectionStart = typeof element?.selectionStart === 'number' ? element.selectionStart : currentValue.length;
+    const selectionEnd = typeof element?.selectionEnd === 'number' ? element.selectionEnd : currentValue.length;
+    const before = currentValue.slice(0, selectionStart);
+    const after = currentValue.slice(selectionEnd);
+    const prefix = before && !/[\s(（\n]$/.test(before) ? '\n' : '';
+    const suffix = after && !/^[\s)\]）\n]/.test(after) ? '\n' : '';
+    const insertion = `${prefix}${normalizedText}${suffix}`;
+    const nextValue = `${before}${insertion}${after}`;
+    const caret = before.length + insertion.length;
+
+    setCommandDockValue(nextValue);
+    window.requestAnimationFrame(() => {
+      resizeCommandDockInput();
+      commandDockInputRef.current?.focus();
+      commandDockInputRef.current?.setSelectionRange(caret, caret);
+    });
+  }, [commandDockValue, resizeCommandDockInput]);
+
+  const saveCommandDockImages = useCallback(async (files) => {
+    const imageFiles = Array.isArray(files) ? files.filter((file) => isImageFile(file)) : [];
+    if (imageFiles.length === 0) {
+      return false;
+    }
+
+    const targetPanel = commandDockPanels.find((panel) => panel.id === commandDockTargetId)
+      || panelsRef.current.find((panel) => panel.id === commandDockTargetId)
+      || panelsRef.current.find((panel) => panel.id === activeIdRef.current)
+      || null;
+    const assetCwd = String(targetPanel?.cwd || cwdRef.current || defaultCwd || '').trim();
+    if (!assetCwd) {
+      showToast(t('floatingComposerImageMissingDir'));
+      return false;
+    }
+
+    try {
+      const references = [];
+      for (const file of imageFiles) {
+        const arrayBuffer = await file.arrayBuffer();
+        const savedImage = await bridge.saveCommandDockImage({
+          cwd: assetCwd,
+          fileName: file.name,
+          mimeType: file.type,
+          bytes: new Uint8Array(arrayBuffer)
+        });
+        references.push(t('floatingComposerImageReference', {
+          path: normalizePromptFilePath(savedImage.path)
+        }));
+      }
+
+      insertTextIntoCommandDock(references.join('\n'));
+      showToast(t('floatingComposerImagesAdded', { count: references.length }));
+      return true;
+    } catch (error) {
+      showToast(t('floatingComposerImageSaveFailed', { message: error.message }));
+      return false;
+    }
+  }, [commandDockPanels, commandDockTargetId, defaultCwd, insertTextIntoCommandDock, showToast, t]);
+
+  const handleCommandDockPaste = useCallback((event) => {
+    const imageFiles = extractImageFilesFromDataTransfer(event.clipboardData);
+    if (imageFiles.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    void saveCommandDockImages(imageFiles);
+  }, [saveCommandDockImages]);
+
+  const handleCommandDockDragOver = useCallback((event) => {
+    if (!hasImageFilesInDataTransfer(event.dataTransfer)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+  }, []);
+
+  const handleCommandDockDrop = useCallback((event) => {
+    const imageFiles = extractImageFilesFromDataTransfer(event.dataTransfer);
+    if (imageFiles.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    void saveCommandDockImages(imageFiles);
+  }, [saveCommandDockImages]);
+
+  const submitCommandDockPayload = useCallback((panelId, value) => {
+    const text = String(value || '');
+    if (!text) {
+      return false;
+    }
+
+    const instance = terminalInstances.current.get(panelId);
+    if (instance?.term) {
+      // Route quick-send through xterm so CLIs that enable bracketed paste
+      // receive a real paste event, then submit with a separate Enter.
+      instance.term.paste(text);
+      instance.term.input('\r', false);
+      return true;
+    }
+
+    bridge.writeTerminal(panelId, normalizeTerminalInputPayload(text));
+    return true;
+  }, []);
+
+  const sendCommandDockInput = useCallback((options = {}) => {
+    const targetPanel = commandDockPanels.find((panel) => panel.id === commandDockTargetId);
+    if (!canPanelReceiveInput(targetPanel)) {
+      return false;
+    }
+
+    const hasExplicitValue = Object.prototype.hasOwnProperty.call(options, 'value');
+    const rawValue = hasExplicitValue
+      ? options.value
+      : commandDockInputRef.current?.value ?? commandDockValue;
+    const shouldTrimTrailingBreaks = options.trimTrailingLineBreaks !== false;
+    const nextValue = shouldTrimTrailingBreaks ? trimTrailingLineBreaks(rawValue) : rawValue;
+    if (!String(nextValue || '').trim()) {
+      return false;
+    }
+
+    touchPanelActivity(targetPanel.id);
+    submitCommandDockPayload(targetPanel.id, nextValue);
+    setCommandDockValue('');
+    showToast(t('floatingComposerSent', { name: targetPanel.title }));
+    window.requestAnimationFrame(() => {
+      resizeCommandDockInput();
+      commandDockInputRef.current?.focus();
+    });
+    return true;
+  }, [commandDockPanels, commandDockTargetId, commandDockValue, resizeCommandDockInput, showToast, submitCommandDockPayload, t, touchPanelActivity]);
+
+  const handleCommandDockCompositionStart = useCallback(() => {
+    commandDockComposingRef.current = true;
+  }, []);
+
+  const handleCommandDockCompositionEnd = useCallback(() => {
+    commandDockComposingRef.current = false;
+    if (!commandDockPendingSubmitRef.current) {
+      return;
+    }
+
+    commandDockPendingSubmitRef.current = false;
+    const committedValue = trimTrailingLineBreaks(commandDockInputRef.current?.value || '');
+    setCommandDockValue(committedValue);
+    window.requestAnimationFrame(() => {
+      sendCommandDockInput({
+        value: committedValue
+      });
+    });
+  }, [sendCommandDockInput]);
+
+  const handleCommandDockKeyDown = useCallback((event) => {
+    if (!isCommandDockSubmitKey(event) || event.shiftKey) {
+      return;
+    }
+
+    const isComposing = commandDockComposingRef.current
+      || event.nativeEvent?.isComposing
+      || event.keyCode === 229
+      || event.which === 229;
+    if (isComposing) {
+      commandDockPendingSubmitRef.current = true;
+      return;
+    }
+
+    commandDockPendingSubmitRef.current = false;
+    event.preventDefault();
+    sendCommandDockInput();
+  }, [sendCommandDockInput]);
 
   const loadCodexProfile = useCallback(async ({ quiet = false } = {}) => {
     try {
@@ -3339,28 +5681,6 @@ export default function App() {
   const openReleases = useCallback((url = releasesUrl) => {
     bridge.openExternal(url || releasesUrl).catch((error) => showToast(error.message));
   }, [showToast]);
-
-  const switchCodexModel = useCallback(async (nextModel) => {
-    const normalizedModel = String(nextModel || '').trim();
-    if (!normalizedModel || normalizedModel === String(codexProfileState.model || '').trim()) {
-      return;
-    }
-
-    setModelSwitching(normalizedModel);
-    try {
-      const snapshot = await bridge.writeCodexProfile({
-        ...codexProfileState,
-        model: normalizedModel
-      });
-      const normalizedProfile = normalizeCodexProfile(snapshot.profile);
-      setCodexProfileState(normalizedProfile);
-      showToast(t('modelSwitched', { model: normalizedProfile.model || normalizedModel }));
-    } catch (error) {
-      showToast(t('modelSwitchFailed', { message: error.message }));
-    } finally {
-      setModelSwitching('');
-    }
-  }, [codexProfileState, showToast, t]);
 
   const commitWorkspace = useCallback((updater) => {
     const currentCanvasKey = canvasScopeKeyRef.current;
@@ -3482,6 +5802,7 @@ export default function App() {
 
   useEffect(() => {
     const offData = bridge.onTerminalData(({ id, data }) => {
+      touchPanelActivity(id);
       terminalInstances.current.get(id)?.term.write(data);
     });
 
@@ -3508,7 +5829,7 @@ export default function App() {
       offData();
       offExit();
     };
-  }, []);
+  }, [touchPanelActivity]);
 
   const getViewportRect = useCallback(() => viewportRef.current.getBoundingClientRect(), []);
 
@@ -3552,7 +5873,6 @@ export default function App() {
     const center = viewportCenterOnCanvas();
     const width = Number.isFinite(slot.width) ? slot.width : 640;
     const height = Number.isFinite(slot.height) ? slot.height : 380;
-    const title = slot.title || `${t('session')} ${getVisiblePanels().length + 1}`;
     const x = Number.isFinite(slot.x) ? slot.x : center.x - width / 2;
     const y = Number.isFinite(slot.y) ? slot.y : center.y - height / 2;
     const projectId = Object.prototype.hasOwnProperty.call(slot, 'projectId')
@@ -3561,30 +5881,40 @@ export default function App() {
     const terminalCwd = Object.prototype.hasOwnProperty.call(slot, 'cwd')
       ? slot.cwd
       : cwdRef.current;
+    const cliProvider = resolveCliProvider(slot.cliProviderId, slot.initialCommand);
+    const cliProviderId = cliProvider?.id || defaultCliProviderId;
+    const targetType = slot.targetType === 'directory' ? 'directory' : 'project';
     const initialCommand = Object.prototype.hasOwnProperty.call(slot, 'initialCommand')
       ? slot.initialCommand
-      : 'codex';
+      : getCliLaunchCommand(cliProvider, targetType);
+    const title = slot.title || `${getCliProviderTitleBase(cliProvider, language)} ${getVisiblePanels().length + 1}`;
 
     const meta = await bridge.createTerminal({
       title,
       cwd: terminalCwd,
       cols: 100,
       rows: 28,
-      initialCommand
+      initialCommand,
+      cliProviderId
     });
 
     nextZIndex.current += 1;
+    const resolvedCliProvider = resolveCliProvider(meta.cliProviderId || cliProviderId, meta.initialCommand || initialCommand);
     const panel = {
       id: meta.id,
       projectId,
       title: meta.title,
       cwd: meta.cwd,
       backend: meta.backend,
-      codexSession: Boolean(meta.codexSession),
+      cliProviderId: resolvedCliProvider?.id || cliProviderId,
+      codexSession: Boolean(meta.codexSession || resolvedCliProvider?.id === 'codex'),
       codexModel: meta.codexModel || '',
       codexProviderName: meta.codexProviderName || '',
+      contextWindowTokens: Number.isFinite(meta.contextWindowTokens) ? meta.contextWindowTokens : null,
+      contextWindowLabel: meta.contextWindowLabel || '',
       initialCommand: meta.initialCommand,
       createdAt: Number.isFinite(meta.createdAt) ? meta.createdAt : Date.now(),
+      lastActivityAt: Number.isFinite(meta.createdAt) ? meta.createdAt : Date.now(),
       x,
       y,
       width,
@@ -3599,7 +5929,54 @@ export default function App() {
     setActiveId(meta.id);
     window.requestAnimationFrame(() => focusTerminalInstance(meta.id));
     return panel;
-  }, [focusTerminalInstance, getVisiblePanels, t, viewportCenterOnCanvas]);
+  }, [focusTerminalInstance, getVisiblePanels, language, viewportCenterOnCanvas]);
+
+  const getCurrentSessionLaunchContext = useCallback(() => {
+    const projectId = workspaceRef.current.activeProjectId || null;
+    const project = findProjectById(
+      workspaceRef.current.projects,
+      historyProjectRef.current,
+      projectId
+    );
+    const sessionCwd = String(cwdRef.current || '').trim()
+      || project?.path
+      || defaultCwd
+      || '';
+
+    return {
+      projectId,
+      cwd: sessionCwd,
+      targetType: projectId ? 'project' : 'directory'
+    };
+  }, [defaultCwd]);
+
+  const createWorkspaceCommandLineFromConfig = useCallback((config = {}) => {
+    const run = async () => {
+      const launchContext = getCurrentSessionLaunchContext();
+      const nextCwd = String(config.cwd || '').trim() || launchContext.cwd;
+      const cliProvider = resolveCliProvider(config.cliProviderId || launchCliProviderId);
+      const cliProviderId = cliProvider?.id || defaultCliProviderId;
+
+      setLaunchCliProviderId(cliProviderId);
+
+      await createTerminal({
+        projectId: Object.prototype.hasOwnProperty.call(config, 'projectId')
+          ? config.projectId
+          : launchContext.projectId,
+        cwd: nextCwd,
+        cliProviderId,
+        targetType: 'directory'
+      });
+    };
+
+    run().catch((error) => showToast(error.message));
+  }, [createTerminal, getCurrentSessionLaunchContext, launchCliProviderId, showToast]);
+
+  const createWorkspaceCommandLine = useCallback((cliProviderId) => {
+    createWorkspaceCommandLineFromConfig(
+      typeof cliProviderId === 'string' ? { cliProviderId } : {}
+    );
+  }, [createWorkspaceCommandLineFromConfig]);
 
   const closeTerminal = useCallback(async (id) => {
     try {
@@ -3633,7 +6010,10 @@ export default function App() {
       title: panel.title,
       projectId: panel.projectId || null,
       cwd: panel.cwd,
-      initialCommand: Object.prototype.hasOwnProperty.call(panel, 'initialCommand') ? panel.initialCommand : 'codex',
+      cliProviderId: panel.cliProviderId,
+      initialCommand: Object.prototype.hasOwnProperty.call(panel, 'initialCommand')
+        ? panel.initialCommand
+        : getCliLaunchCommand(getPanelCliProvider(panel), panel.projectId ? 'project' : 'directory'),
       x: panel.x,
       y: panel.y,
       width: panel.width,
@@ -3719,9 +6099,10 @@ export default function App() {
   }, [focusTerminalInstance]);
 
   const commitPanelTitle = useCallback((id, title) => {
-    const nextTitle = title.trim() || t('sessionFallbackTitle');
+    const panel = panelsRef.current.find((item) => item.id === id);
+    const nextTitle = title.trim() || getPanelFallbackTitle(panel, language);
     updatePanel(id, { title: nextTitle });
-  }, [t, updatePanel]);
+  }, [language, updatePanel]);
 
   const activateEndpointGroup = useCallback((id) => {
     nextZIndex.current += 1;
@@ -3884,40 +6265,126 @@ export default function App() {
     })));
   }, [getVisiblePanels, viewportCenterOnCanvas]);
 
-  const addGrid = useCallback(async () => {
+  const createSessionGrid = useCallback(async (count = 4, config = {}) => {
+    const sessionCount = parseGridSessionCount(count);
+    if (!sessionCount) {
+      return;
+    }
+
+    const cliProvider = resolveCliProvider(config.cliProviderId || launchCliProviderId);
+    const cliProviderId = cliProvider?.id || defaultCliProviderId;
+    const launchContext = getCurrentSessionLaunchContext();
     const center = viewportCenterOnCanvas();
     const width = 620;
     const height = 340;
     const gap = 28;
-    const baseNumber = getVisiblePanels().length;
-    const startX = Math.round(center.x - width - gap / 2);
-    const startY = Math.round(center.y - height - gap / 2);
-    const slots = [
-      { x: startX, y: startY },
-      { x: startX + width + gap, y: startY },
-      { x: startX, y: startY + height + gap },
-      { x: startX + width + gap, y: startY + height + gap }
-    ];
+    const cols = Math.ceil(Math.sqrt(sessionCount));
+    const rows = Math.ceil(sessionCount / cols);
+    const totalWidth = cols * width + (cols - 1) * gap;
+    const totalHeight = rows * height + (rows - 1) * gap;
+    const startX = Math.round(center.x - totalWidth / 2);
+    const startY = Math.round(center.y - totalHeight / 2);
 
-    for (const [index, slot] of slots.entries()) {
+    setLaunchCliProviderId(cliProviderId);
+    if (launchContext.cwd && launchContext.cwd !== cwdRef.current) {
+      setCwd(launchContext.cwd);
+    }
+
+    for (let index = 0; index < sessionCount; index += 1) {
       await createTerminal({
-        ...slot,
+        ...launchContext,
+        x: startX + (index % cols) * (width + gap),
+        y: startY + Math.floor(index / cols) * (height + gap),
         width,
         height,
-        title: `${t('session')} ${baseNumber + index + 1}`
+        cliProviderId
       });
     }
-  }, [createTerminal, getVisiblePanels, t, viewportCenterOnCanvas]);
+  }, [createTerminal, getCurrentSessionLaunchContext, launchCliProviderId, viewportCenterOnCanvas]);
 
-  const openNewSessionDialog = useCallback(() => {
+  const addGrid = useCallback((cliProviderId) => {
+    createSessionGrid(4, typeof cliProviderId === 'string' ? { cliProviderId } : {})
+      .catch((error) => showToast(error.message));
+  }, [createSessionGrid, showToast]);
+
+  const openGridSessionDialog = useCallback((cliProviderId) => {
+    if (typeof cliProviderId === 'string') {
+      const cliProvider = resolveCliProvider(cliProviderId);
+      if (cliProvider?.id) {
+        setLaunchCliProviderId(cliProvider.id);
+      }
+    }
+    setGridSessionOpen(true);
+  }, []);
+
+  const createCustomSessionGrid = useCallback((count, config = {}) => {
+    setGridSessionOpen(false);
+    createSessionGrid(count, config).catch((error) => showToast(error.message));
+  }, [createSessionGrid, showToast]);
+
+  const openNewSessionPicker = useCallback((cliProviderId) => {
+    if (typeof cliProviderId === 'string') {
+      const cliProvider = resolveCliProvider(cliProviderId);
+      if (cliProvider?.id) {
+        setLaunchCliProviderId(cliProvider.id);
+      }
+    }
     setNewSessionOpen(true);
   }, []);
+
+  const openCommandLineDialog = useCallback(() => {
+    setCommandDialogOpen(true);
+  }, []);
+
+  const openProjectDialog = useCallback(() => {
+    setProjectDialogOpen(true);
+  }, []);
+
+  const createCommandLineFromDialog = useCallback((config) => {
+    setCommandDialogOpen(false);
+    createWorkspaceCommandLineFromConfig(config || {});
+  }, [createWorkspaceCommandLineFromConfig]);
+
+  const createWorkspaceSession = useCallback((event, config = {}) => {
+    if (event?.altKey) {
+      openNewSessionPicker();
+      return;
+    }
+
+    const run = async () => {
+      const launchContext = getCurrentSessionLaunchContext();
+      const cliProvider = resolveCliProvider(config.cliProviderId || launchCliProviderId);
+      const cliProviderId = cliProvider?.id || defaultCliProviderId;
+
+      if (!launchContext.projectId && !launchContext.cwd) {
+        openNewSessionPicker();
+        return;
+      }
+
+      if (launchContext.cwd && launchContext.cwd !== cwdRef.current) {
+        setCwd(launchContext.cwd);
+      }
+
+      await createTerminal({
+        ...getCenteredTerminalSlot(workspaceRef.current),
+        ...launchContext,
+        cliProviderId
+      });
+      setLaunchCliProviderId(cliProviderId);
+    };
+
+    run().catch((error) => showToast(error.message));
+  }, [createTerminal, getCenteredTerminalSlot, getCurrentSessionLaunchContext, launchCliProviderId, openNewSessionPicker, showToast]);
 
   const createSessionFromSelection = useCallback((selection) => {
     setNewSessionOpen(false);
 
     const run = async () => {
-      if (selection?.type === 'project') {
+      const cliProvider = resolveCliProvider(selection?.cliProviderId);
+      const cliProviderId = cliProvider?.id || defaultCliProviderId;
+      setLaunchCliProviderId(cliProviderId);
+
+      if (selection?.targetType === 'project') {
         const project = findProjectById(workspaceRef.current.projects, historyProjectRef.current, selection.projectId);
         if (!project) {
           return;
@@ -3932,7 +6399,8 @@ export default function App() {
           ...getCenteredTerminalSlot(nextWorkspace),
           projectId: project.id,
           cwd: project.path,
-          initialCommand: 'codex'
+          cliProviderId,
+          targetType: 'project'
         });
         return;
       }
@@ -3947,7 +6415,8 @@ export default function App() {
         ...getCenteredTerminalSlot(nextWorkspace),
         projectId: null,
         cwd: sessionCwd,
-        initialCommand: ''
+        cliProviderId,
+        targetType: 'directory'
       });
     };
 
@@ -3966,20 +6435,15 @@ export default function App() {
     setActiveId(null);
   }, [t]);
 
-  const chooseDirectory = useCallback(async () => {
-    const selected = await bridge.chooseDirectory();
-    if (selected) {
-      setCwd(selected);
-    }
-  }, []);
-
-  const addProject = useCallback(async () => {
-    const selected = await bridge.chooseDirectory();
+  const createProjectFromDialog = useCallback(async (config = {}) => {
+    setProjectDialogOpen(false);
+    const selected = String(config.path || '').trim();
     if (!selected) {
       return;
     }
 
     const now = Date.now();
+    const requestedName = String(config.name || '').trim();
     const historyProjectItem = historyProjectRef.current;
     if (historyProjectItem && historyProjectItem.path.toLowerCase() === selected.toLowerCase()) {
       commitWorkspace((currentWorkspace) => ({ ...currentWorkspace, activeProjectId: historyProjectItem.id }));
@@ -3998,7 +6462,7 @@ export default function App() {
 
     const project = {
       id: createLocalId('project'),
-      name: deriveNameFromPath(selected),
+      name: requestedName || deriveNameFromPath(selected),
       path: selected,
       createdAt: now,
       updatedAt: now
@@ -4096,6 +6560,11 @@ export default function App() {
     });
   }, [getViewportRect]);
 
+  const zoomViewportCenter = useCallback((nextScale) => {
+    const rect = getViewportRect();
+    zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, nextScale);
+  }, [getViewportRect, zoomAt]);
+
   const startViewportPan = (event) => {
     if (
       event.button !== 0 ||
@@ -4114,22 +6583,15 @@ export default function App() {
       y: view.y
     };
 
-    const onPointerMove = (moveEvent) => {
+    bindPointerSession((moveEvent) => {
       setView((current) => ({
         ...current,
         x: start.x + moveEvent.clientX - start.clientX,
         y: start.y + moveEvent.clientY - start.clientY
       }));
-    };
-
-    const onPointerUp = () => {
+    }, () => {
       setPanning(false);
-      document.removeEventListener('pointermove', onPointerMove);
-      document.removeEventListener('pointerup', onPointerUp);
-    };
-
-    document.addEventListener('pointermove', onPointerMove);
-    document.addEventListener('pointerup', onPointerUp, { once: true });
+    });
   };
 
   const handleWheel = (event) => {
@@ -4160,6 +6622,13 @@ export default function App() {
     }));
   }, [commitWorkspace]);
 
+  const toggleSkillsCollapsed = useCallback(() => {
+    commitWorkspace((currentWorkspace) => ({
+      ...currentWorkspace,
+      skillsCollapsed: !currentWorkspace.skillsCollapsed
+    }));
+  }, [commitWorkspace]);
+
   useEffect(() => {
     const onKeyDown = (event) => {
       const editable = event.target instanceof HTMLElement && (
@@ -4169,7 +6638,13 @@ export default function App() {
 
       if (event.ctrlKey && event.key.toLowerCase() === 'n') {
         event.preventDefault();
-        openNewSessionDialog();
+        if (event.shiftKey) {
+          createWorkspaceCommandLine();
+        } else if (event.altKey) {
+          openNewSessionPicker();
+        } else {
+          createWorkspaceSession();
+        }
       }
 
       if (event.ctrlKey && event.key === '0') {
@@ -4192,14 +6667,16 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [closeTerminal, openNewSessionDialog]);
+  }, [closeTerminal, createWorkspaceCommandLine, createWorkspaceSession, openNewSessionPicker]);
 
   const minorGrid = 48 * view.scale;
   const majorGrid = minorGrid * 4;
-  const currentCodexModel = String(codexProfileState.model || '').trim();
   const activeTitle = workspace.canvasMode === 'shared'
     ? t('sharedWorkspace')
     : activeProject ? `${activeProject.name} ${t('workspace')}` : t('noProject');
+  const currentZoomPercent = Math.round(view.scale * 100);
+  const currentZoomPresetScale = zoomPresetScales.find((scale) => Math.abs(view.scale - scale) < 0.01);
+  const zoomSelectValue = currentZoomPresetScale ? String(currentZoomPresetScale) : 'current';
 
   return (
     <TooltipProvider>
@@ -4210,17 +6687,25 @@ export default function App() {
           activeProject={activeProject}
           historyProject={historyProject}
           language={language}
-          onAddProject={addProject}
-          onAddSession={openNewSessionDialog}
+          theme={theme}
+          onAddProject={openProjectDialog}
+          onAddCommandLine={openCommandLineDialog}
+          onAddSession={openNewSessionPicker}
           onCanvasModeChange={changeCanvasMode}
           onKillAll={killAll}
+          onOpenPath={openWorkspacePath}
           onOpenReleases={openReleases}
           onOpenCodexConfig={() => setCodexOpen(true)}
+          onRefreshSkills={refreshWorkspaceSkills}
           onRefreshRelease={() => loadLatestRelease(true)}
           onDeleteProject={deleteProject}
           onSelectNoProject={selectNoProject}
           onSelectProject={selectProject}
+          onThemeChange={setTheme}
+          onToggleSkillsCollapsed={toggleSkillsCollapsed}
           releaseState={releaseState}
+          skillsRootPath={skillsRootPath}
+          skillsState={workspaceSkillsState}
           t={t}
           onToggleCollapsed={toggleSidebar}
         />
@@ -4230,77 +6715,70 @@ export default function App() {
             <div className="min-w-[160px] max-w-[260px]">
               <div className="truncate text-sm font-semibold">{activeTitle}</div>
               <div className="truncate text-xs text-muted-foreground">
-                {activeProject ? activeProject.path : t('noProject')}
+                {activeProject ? activeProject.path : (cwd || t('noProject'))}
               </div>
             </div>
 
             <Separator orientation="vertical" className="h-8" />
 
             <div className="flex shrink-0 items-center gap-2">
-              <Button id="addTerminal" variant="primary" onClick={openNewSessionDialog}>
-                <Plus className="h-4 w-4" />
-                {t('addSession')}
-              </Button>
-              <Button id="addGrid" onClick={addGrid}>
-                <Grid2X2 className="h-4 w-4" />
-                2x2
-              </Button>
-            </div>
-
-            <Separator orientation="vertical" className="h-8" />
-
-            <div
-              className="flex h-10 shrink-0 items-center gap-2 rounded-lg border border-border bg-card px-2"
-              title={currentCodexModel || t('modelUnset')}
-            >
-              <Label className="shrink-0 text-sm text-muted-foreground">
-                {t('quickModel')}
-              </Label>
-              <QuickModelButtons
-                className="flex-nowrap"
-                currentModel={currentCodexModel}
-                disabled={codexOpen || codexProfileLoading || Boolean(modelSwitching)}
-                onSelect={switchCodexModel}
+              <TopbarLaunchMenu
+                cliProviderId={launchCliProviderId}
+                language={language}
+                onAddCommandLine={createWorkspaceCommandLine}
+                onAddGrid={addGrid}
+                onAddSession={(cliProviderId) => createWorkspaceSession(null, { cliProviderId })}
+                onCliProviderChange={setLaunchCliProviderId}
+                onOpenGridSessionDialog={openGridSessionDialog}
+                onOpenSessionPicker={openNewSessionPicker}
                 t={t}
               />
             </div>
 
-            <Separator orientation="vertical" className="h-8" />
-
-            <div className="flex h-10 min-w-[250px] flex-1 items-center gap-2 rounded-lg border border-border bg-card px-2 pl-3">
-              <Label htmlFor="cwdInput" className="shrink-0 text-sm text-muted-foreground">
-                {t('directory')}
-              </Label>
-              <Input
-                id="cwdInput"
-                className="h-8 min-w-[70px] border-0 bg-transparent px-1 font-mono text-xs shadow-none focus-visible:ring-0"
-                value={cwd}
-                spellCheck={false}
-                onChange={(event) => setCwd(event.target.value)}
-              />
-              <IconButton id="browseDir" label={t('chooseDirectory')} onClick={chooseDirectory}>
-                <FolderOpen className="h-4 w-4" />
-              </IconButton>
-            </div>
-
-            <Separator orientation="vertical" className="h-8" />
+            <Separator orientation="vertical" className="ml-auto h-8" />
 
             <div className="flex shrink-0 items-center gap-1.5">
               <IconButton id="zoomOut" label={t('zoomOut')} onClick={() => {
-                const rect = getViewportRect();
-                zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, view.scale / 1.16);
+                zoomViewportCenter(view.scale / 1.16);
               }}>
                 <Minus className="h-4 w-4" />
               </IconButton>
-              <Button id="resetView" onClick={() => setView(createDefaultView())}>
-                <RotateCcw className="h-4 w-4" />
-                {Math.round(view.scale * 100)}%
-              </Button>
+              <select
+                id="zoomPreset"
+                className="h-9 w-[88px] shrink-0 rounded-md border border-border bg-background px-2 text-sm font-medium tabular-nums text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                value={zoomSelectValue}
+                title={t('zoomLevel')}
+                aria-label={t('zoomLevel')}
+                onChange={(event) => {
+                  const nextScale = Number(event.target.value);
+                  if (Number.isFinite(nextScale)) {
+                    zoomViewportCenter(nextScale);
+                  }
+                }}
+              >
+                {!currentZoomPresetScale && (
+                  <option value="current">{currentZoomPercent}%</option>
+                )}
+                {zoomPresetScales.map((scale) => {
+                  const percent = Math.round(scale * 100);
+
+                  return (
+                    <option
+                      key={scale}
+                      value={String(scale)}
+                    >
+                      {percent}%
+                    </option>
+                  );
+                })}
+              </select>
               <IconButton id="zoomIn" label={t('zoomIn')} onClick={() => {
-                const rect = getViewportRect();
-                zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, view.scale * 1.16);
+                zoomViewportCenter(view.scale * 1.16);
               }}>
                 <ZoomIn className="h-4 w-4" />
+              </IconButton>
+              <IconButton id="resetView" label={t('resetView')} onClick={() => setView(createDefaultView())}>
+                <RotateCcw className="h-4 w-4" />
               </IconButton>
             </div>
 
@@ -4343,6 +6821,7 @@ export default function App() {
                   panels={groupPanels}
                   runtimeNow={runtimeNow}
                   scale={view.scale}
+                  commandTargetId={commandDockTargetId}
                   selectedIds={selectedEndpointIds}
                   t={t}
                   onActivate={activateEndpointGroup}
@@ -4367,16 +6846,16 @@ export default function App() {
                   theme={theme}
                   visible={visible}
                   selected={selectedEndpointIds.has(panel.id)}
+                  commandTargeted={panel.id === commandDockTargetId}
                   onActivate={activatePanel}
                   onClose={closeTerminal}
-                  onExport={(id) => exportTerminal(id)}
-                  onExportCustom={exportTerminalCustom}
                   onExpand={expandPanel}
                   onMinimize={minimizePanel}
                   onMove={updatePanel}
                   onResize={updatePanel}
                   onRestart={restartTerminal}
                   onSelectToggle={toggleEndpointSelection}
+                  onTerminalInput={touchPanelActivity}
                   onTitleChange={(id, title) => updatePanel(id, { title })}
                   onTitleCommit={commitPanelTitle}
                   registerTerminal={registerTerminal}
@@ -4399,23 +6878,57 @@ export default function App() {
               </Card>
             )}
           </main>
+
+          <WorkspaceTreeSidebar
+            currentPath={currentWorkspacePath}
+            onClose={() => setWorkspaceTreeOpen(false)}
+            onCopy={copyWorkspaceTree}
+            onOpen={openWorkspaceTree}
+            onRefresh={refreshWorkspaceTree}
+            open={workspaceTreeOpen}
+            state={workspaceTreeState}
+            t={t}
+          />
         </div>
       </div>
+
+      {commandDockVisible && (
+        <FloatingCommandDock
+          activeId={activeId}
+          inputRef={commandDockInputRef}
+          language={language}
+          message={commandDockValue}
+          onExport={exportTerminal}
+          onExportCustom={exportTerminalCustom}
+          onInputChange={handleCommandDockInputChange}
+          onInputCompositionEnd={handleCommandDockCompositionEnd}
+          onInputCompositionStart={handleCommandDockCompositionStart}
+          onInputDragOver={handleCommandDockDragOver}
+          onInputKeyDown={handleCommandDockKeyDown}
+          onInputDrop={handleCommandDockDrop}
+          onInputPaste={handleCommandDockPaste}
+          onSend={sendCommandDockInput}
+          onTargetChange={selectCommandDockTarget}
+          panels={commandDockPanels}
+          targetId={commandDockTargetId}
+          t={t}
+        />
+      )}
 
       <CodexConfigDialog
         language={language}
         onLanguageChange={setLanguage}
         onOpenChange={setCodexOpen}
         onProfileChanged={setCodexProfileState}
-        onThemeChange={setTheme}
         open={codexOpen}
         showToast={showToast}
         t={t}
-        theme={theme}
       />
 
       <NewSessionDialog
         defaultCwd={defaultCwd}
+        initialCliProviderId={launchCliProviderId}
+        language={language}
         onOpenChange={setNewSessionOpen}
         onSelect={createSessionFromSelection}
         open={newSessionOpen}
@@ -4423,8 +6936,34 @@ export default function App() {
         t={t}
       />
 
+      <CommandLineConfigDialog
+        initialCliProviderId={launchCliProviderId}
+        initialDirectory={currentWorkspacePath}
+        language={language}
+        onCreate={createCommandLineFromDialog}
+        onOpenChange={setCommandDialogOpen}
+        open={commandDialogOpen}
+        t={t}
+      />
+
+      <ProjectConfigDialog
+        onCreate={createProjectFromDialog}
+        onOpenChange={setProjectDialogOpen}
+        open={projectDialogOpen}
+        t={t}
+      />
+
+      <GridSessionDialog
+        initialCliProviderId={launchCliProviderId}
+        language={language}
+        onCreate={createCustomSessionGrid}
+        onOpenChange={setGridSessionOpen}
+        open={gridSessionOpen}
+        t={t}
+      />
+
       {toast && (
-        <Card id="toast" className="toast">
+        <Card id="toast" className={cn('toast', commandDockVisible && 'is-lifted')}>
           <CardContent className="p-0">{toast}</CardContent>
         </Card>
       )}

@@ -1,6 +1,9 @@
 name: Release Artifacts
 
 on:
+  push:
+    tags:
+      - 'v*'
   release:
     types:
       - published
@@ -26,6 +29,8 @@ jobs:
         run: |
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
             "value=${{ inputs.tag }}" >> $env:GITHUB_OUTPUT
+          } elseif ("${{ github.event_name }}" -eq "push") {
+            "value=${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
           } else {
             "value=${{ github.event.release.tag_name }}" >> $env:GITHUB_OUTPUT
           }
@@ -46,6 +51,20 @@ jobs:
 
       - name: Build installers
         run: npm run dist:win
+
+      - name: Ensure GitHub Release exists
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.tag.outputs.value }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title $tag --generate-notes --latest
+            if ($LASTEXITCODE -ne 0) {
+              gh release view $tag
+            }
+          }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload installers to GitHub Release
         shell: pwsh
@@ -82,6 +101,8 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "value=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
             echo "value=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
           fi
@@ -129,6 +150,16 @@ jobs:
           else
             npx electron-builder --mac dmg --${{ matrix.arch }} --publish never
           fi
+
+      - name: Ensure GitHub Release exists
+        shell: bash
+        run: |
+          tag="${{ steps.tag.outputs.value }}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --generate-notes --latest || gh release view "$tag"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload macOS artifacts to GitHub Release
         shell: bash

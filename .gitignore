@@ -3,6 +3,8 @@ dist/
 out/
 release/
 *.log
+.cli-in-one/
+.files/
 .history/
 .tmp-settings-home-*/
 codex-quick-profiles.json

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.0](https://github.com/whd3131/cli-in-one/compare/v0.4.0...v0.5.0) (2026-04-26)
+
+
+### Features
+
+* add multi-provider workspace sessions and command dock
+* add workspace tree, skill discovery, and image attachment support
+* add README sample workspace image
+
 ## [0.4.0](https://github.com/whd3131/cli-in-one/compare/v0.3.0...v0.4.0) (2026-04-26)
 
 

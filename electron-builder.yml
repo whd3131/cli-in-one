@@ -9,6 +9,7 @@ files:
   - package.json
   - src/main.js
   - src/preload.js
+  - src/shared/**/*
   - static/**/*
   - dist/renderer/**/*
 

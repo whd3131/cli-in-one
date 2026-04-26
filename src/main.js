@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const TOML = require('@iarna/toml');
+const cliProviders = require('./shared/cli-providers.json');
 
 let pty = null;
 let ptyLoadError = null;
@@ -21,6 +22,147 @@ const releasesUrl = 'https://github.com/whd3131/cli-in-one/releases';
 const latestReleaseApiUrl = 'https://api.github.com/repos/whd3131/cli-in-one/releases/latest';
 const releaseCacheTtlMs = 10 * 60 * 1000;
 let latestReleaseCache = null;
+const cursorModelCatalogCacheTtlMs = 10 * 60 * 1000;
+let cursorModelCatalogCache = null;
+const APP_STORAGE_DIR_NAME = '.cli-in-one';
+const LEGACY_HISTORY_DIR_NAME = '.history';
+const HISTORY_DIR_NAME = 'history';
+const SETTINGS_HOMES_DIR_NAME = 'settings-homes';
+const TEMP_SETTINGS_HOME_PATTERN = /^\.tmp-settings-home-\d+$/i;
+const CODEX_CONTEXT_WINDOW_TOKENS = 1000000;
+const CODEX_AUTO_COMPACT_TOKEN_LIMIT = 900000;
+const CODEX_APPROVAL_POLICIES = new Set(['untrusted', 'on-request', 'never']);
+const CODEX_SANDBOX_MODES = new Set(['read-only', 'workspace-write', 'danger-full-access']);
+const CODEX_WIRE_APIS = new Set(['responses', 'chat']);
+const CODEX_REASONING_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
+const CODEX_QUICK_PROFILES_FILE_NAME = 'codex-quick-profiles.json';
+const cliProviderList = Array.isArray(cliProviders) ? cliProviders : [];
+const cliProviderMap = new Map(
+  cliProviderList
+    .filter((provider) => provider && typeof provider.id === 'string' && provider.id.trim())
+    .map((provider) => [provider.id.trim(), provider])
+);
+const defaultCliProviderId = cliProviderMap.has('codex')
+  ? 'codex'
+  : (cliProviderList[0]?.id || 'shell');
+const imageExtensionByMimeType = new Map([
+  ['image/apng', '.apng'],
+  ['image/avif', '.avif'],
+  ['image/bmp', '.bmp'],
+  ['image/gif', '.gif'],
+  ['image/jpeg', '.jpg'],
+  ['image/jpg', '.jpg'],
+  ['image/png', '.png'],
+  ['image/svg+xml', '.svg'],
+  ['image/webp', '.webp']
+]);
+const imageExtensions = new Set(imageExtensionByMimeType.values());
+const WORKSPACE_TREE_MAX_DEPTH = 6;
+const WORKSPACE_TREE_MAX_ENTRIES = 2000;
+const WORKSPACE_TREE_MAX_CHILDREN_PER_DIRECTORY = 200;
+const WORKSPACE_SKILL_MAX_DEPTH = 8;
+const WORKSPACE_SKILL_MAX_FILES_PER_SOURCE = 200;
+const workspaceTreeIgnoredDirectoryNames = new Set([
+  '.git',
+  'node_modules',
+  '.next',
+  '.nuxt',
+  '.yarn',
+  '.pnpm-store',
+  '.turbo',
+  '.cache'
+]);
+const workspaceSkillFileExtensions = new Set([
+  '.json',
+  '.jsonc',
+  '.md',
+  '.mdc',
+  '.mdx',
+  '.toml',
+  '.txt',
+  '.yaml',
+  '.yml'
+]);
+const workspaceSkillGithubAllowedDirectoryNames = new Set([
+  'agents',
+  'chatmodes',
+  'instructions',
+  'prompts',
+  'skills'
+]);
+const workspaceSkillGithubAllowedFileNames = new Set([
+  'agent-instructions.md',
+  'agent-instructions.txt',
+  'copilot-instructions.md',
+  'copilot-instructions.txt',
+  'instructions.md',
+  'instructions.txt'
+]);
+const workspaceSkillSources = [
+  { id: 'cursor', directoryName: '.cursor' },
+  { id: 'claude', directoryName: '.claude' },
+  { id: 'agent', directoryName: '.agent' },
+  { id: 'github', directoryName: '.github' }
+];
+
+function getCliProviderById(id) {
+  const normalizedId = typeof id === 'string' ? id.trim() : '';
+  return normalizedId ? (cliProviderMap.get(normalizedId) || null) : null;
+}
+
+function getCliProviderTitleBase(provider) {
+  if (!provider || typeof provider !== 'object') {
+    return 'CLI';
+  }
+
+  if (provider.panelTitle && typeof provider.panelTitle === 'object') {
+    return provider.panelTitle.en || provider.panelTitle.zh || provider.id || 'CLI';
+  }
+
+  return provider.id || 'CLI';
+}
+
+function doesCommandMatchCliProvider(provider, initialCommand) {
+  if (!provider || typeof provider !== 'object') {
+    return false;
+  }
+
+  const command = String(initialCommand || '').trim();
+  if (!command) {
+    return Boolean(provider.detect?.emptyCommand);
+  }
+
+  const pattern = provider.detect?.pattern;
+  if (typeof pattern !== 'string' || !pattern.trim()) {
+    return false;
+  }
+
+  try {
+    return new RegExp(pattern, 'i').test(command);
+  } catch {
+    return false;
+  }
+}
+
+function detectCliProviderByCommand(initialCommand) {
+  const command = String(initialCommand || '').trim();
+
+  if (!command) {
+    return getCliProviderById('shell');
+  }
+
+  return cliProviderList.find((provider) => doesCommandMatchCliProvider(provider, command)) || null;
+}
+
+function resolveCliProvider(requestedCliProviderId, initialCommand) {
+  return (
+    getCliProviderById(requestedCliProviderId)
+    || detectCliProviderByCommand(initialCommand)
+    || getCliProviderById(defaultCliProviderId)
+    || cliProviderList[0]
+    || null
+  );
+}
 
 function getStaticAssetPath(fileName) {
   return path.join(__dirname, '..', 'static', fileName);
@@ -30,8 +172,154 @@ function getAppBaseDir() {
   return app.isPackaged ? path.dirname(app.getPath('exe')) : app.getAppPath();
 }
 
+function getProgramStorageDir() {
+  return path.join(getAppBaseDir(), APP_STORAGE_DIR_NAME);
+}
+
+function getManagedSettingsHomesDir() {
+  return path.join(getProgramStorageDir(), SETTINGS_HOMES_DIR_NAME);
+}
+
+function getLegacyDefaultHistoryDir() {
+  return path.join(getAppBaseDir(), LEGACY_HISTORY_DIR_NAME);
+}
+
 function getDefaultHistoryDir() {
-  return path.join(getAppBaseDir(), '.history');
+  return path.join(getProgramStorageDir(), HISTORY_DIR_NAME);
+}
+
+function getLegacyCodexQuickProfilesPath() {
+  return path.join(getAppBaseDir(), CODEX_QUICK_PROFILES_FILE_NAME);
+}
+
+function getCodexQuickProfilesPath() {
+  return path.join(getProgramStorageDir(), CODEX_QUICK_PROFILES_FILE_NAME);
+}
+
+function getUserHomeDir() {
+  try {
+    return app.getPath('home');
+  } catch {
+    return os.homedir();
+  }
+}
+
+function isPathInside(parentDir, targetPath) {
+  const relative = path.relative(path.resolve(parentDir), path.resolve(targetPath));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function isLegacyTempSettingsHomeDir(dirPath) {
+  return TEMP_SETTINGS_HOME_PATTERN.test(path.basename(path.resolve(dirPath)));
+}
+
+function getCodexHomeDir() {
+  const rawHomeDir = path.resolve(os.homedir());
+  if (!isLegacyTempSettingsHomeDir(rawHomeDir) || !isPathInside(getAppBaseDir(), rawHomeDir)) {
+    return rawHomeDir;
+  }
+
+  return path.join(getManagedSettingsHomesDir(), path.basename(rawHomeDir));
+}
+
+function buildSessionEnv(extraEnv = {}) {
+  const env = {
+    ...process.env,
+    ...extraEnv
+  };
+  const codexHomeDir = getCodexHomeDir();
+
+  if (codexHomeDir === path.resolve(os.homedir())) {
+    return env;
+  }
+
+  env.HOME = codexHomeDir;
+  if (process.platform === 'win32') {
+    const parsedRoot = path.parse(codexHomeDir).root;
+    const drive = parsedRoot.replace(/[\\/]+$/g, '');
+    const homePath = codexHomeDir.slice(Math.max(parsedRoot.length - 1, 0));
+    env.USERPROFILE = codexHomeDir;
+    env.HOMEDRIVE = drive;
+    env.HOMEPATH = homePath.startsWith('\\') || homePath.startsWith('/')
+      ? homePath
+      : `\\${homePath}`;
+  }
+
+  return env;
+}
+
+async function runShellCommand(commandLine, options = {}) {
+  const shell = process.platform === 'win32'
+    ? (process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe')
+    : '/bin/sh';
+  const args = process.platform === 'win32'
+    ? ['/d', '/s', '/c', commandLine]
+    : ['-lc', commandLine];
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn(shell, args, {
+      cwd: options.cwd || getUserHomeDir(),
+      env: buildSessionEnv(options.env),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
+    });
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout.on('data', (buffer) => {
+      stdout += buffer.toString('utf8');
+    });
+
+    proc.stderr.on('data', (buffer) => {
+      stderr += buffer.toString('utf8');
+    });
+
+    proc.on('error', reject);
+    proc.on('exit', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      reject(new Error((stderr || stdout || `Command failed with exit code ${code}.`).trim()));
+    });
+  });
+}
+
+async function readCursorCliConfig() {
+  try {
+    const content = await fs.promises.readFile(getCursorCliConfigPath(), 'utf8');
+    const parsed = JSON.parse(content);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function getCursorModelCatalog() {
+  const now = Date.now();
+  if (
+    cursorModelCatalogCache
+    && now - cursorModelCatalogCache.fetchedAt < cursorModelCatalogCacheTtlMs
+  ) {
+    return cursorModelCatalogCache.models;
+  }
+
+  try {
+    const { stdout } = await runShellCommand('agent models');
+    const models = parseCursorModelCatalog(stdout);
+    cursorModelCatalogCache = {
+      fetchedAt: now,
+      models
+    };
+    return models;
+  } catch {
+    return cursorModelCatalogCache?.models || new Map();
+  }
 }
 
 function getDefaultShell() {
@@ -87,7 +375,7 @@ function getSystemStats() {
 }
 
 function getCodexConfigDir() {
-  return path.join(os.homedir(), '.codex');
+  return path.join(getCodexHomeDir(), '.codex');
 }
 
 function getCodexConfigPath() {
@@ -98,20 +386,12 @@ function getCodexAuthPath() {
   return path.join(getCodexConfigDir(), 'auth.json');
 }
 
-const CODEX_CONTEXT_WINDOW_TOKENS = 1000000;
-const CODEX_AUTO_COMPACT_TOKEN_LIMIT = 900000;
-const CODEX_APPROVAL_POLICIES = new Set(['untrusted', 'on-request', 'never']);
-const CODEX_SANDBOX_MODES = new Set(['read-only', 'workspace-write', 'danger-full-access']);
-const CODEX_WIRE_APIS = new Set(['responses', 'chat']);
-const CODEX_REASONING_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
-const CODEX_QUICK_PROFILES_FILE_NAME = 'codex-quick-profiles.json';
-
-function getProgramStorageDir() {
-  return app.isPackaged ? path.dirname(app.getPath('exe')) : path.resolve(__dirname, '..');
+function getCursorConfigDir() {
+  return path.join(getUserHomeDir(), '.cursor');
 }
 
-function getCodexQuickProfilesPath() {
-  return path.join(getProgramStorageDir(), CODEX_QUICK_PROFILES_FILE_NAME);
+function getCursorCliConfigPath() {
+  return path.join(getCursorConfigDir(), 'cli-config.json');
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -124,7 +404,7 @@ function clampNumber(value, min, max, fallback) {
 
 function resolveCwd(cwd) {
   if (typeof cwd !== 'string' || cwd.trim() === '') {
-    return os.homedir();
+    return getUserHomeDir();
   }
 
   const resolved = path.resolve(cwd);
@@ -133,10 +413,740 @@ function resolveCwd(cwd) {
       return resolved;
     }
   } catch {
-    return os.homedir();
+    return getUserHomeDir();
   }
 
-  return os.homedir();
+  return getUserHomeDir();
+}
+
+function tokenizeCommandLine(commandLine) {
+  const input = String(commandLine || '').trim();
+  if (!input) {
+    return [];
+  }
+
+  const tokens = [];
+  let current = '';
+  let quote = '';
+  let escaped = false;
+
+  for (const char of input) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+
+    if (quote === '"' && char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = '';
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === '\'') {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (escaped) {
+    current += '\\';
+  }
+
+  if (current) {
+    tokens.push(current);
+  }
+
+  return tokens;
+}
+
+function getCommandOptionValues(commandLine, optionNames) {
+  const options = new Set(Array.isArray(optionNames) ? optionNames : []);
+  if (options.size === 0) {
+    return [];
+  }
+
+  const tokens = tokenizeCommandLine(commandLine);
+  const values = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+
+    if (options.has(token)) {
+      const next = tokens[index + 1];
+      if (typeof next === 'string' && next.length > 0) {
+        values.push(next);
+        index += 1;
+      }
+      continue;
+    }
+
+    for (const optionName of options) {
+      if (token.startsWith(`${optionName}=`)) {
+        values.push(token.slice(optionName.length + 1));
+        break;
+      }
+    }
+  }
+
+  return values;
+}
+
+function getLastCommandOptionValue(commandLine, optionNames) {
+  const values = getCommandOptionValues(commandLine, optionNames);
+  return values.length > 0 ? values[values.length - 1] : '';
+}
+
+function parsePositiveInteger(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return Math.trunc(parsed);
+}
+
+function parseTomlScalar(value) {
+  const content = String(value || '').trim();
+  if (!content) {
+    return undefined;
+  }
+
+  try {
+    return TOML.parse(`value = ${content}`).value;
+  } catch {
+    return content;
+  }
+}
+
+function extractCodexConfigOverrideValue(commandLine, key) {
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKey) {
+    return undefined;
+  }
+
+  const overrides = getCommandOptionValues(commandLine, ['-c', '--config']);
+  for (let index = overrides.length - 1; index >= 0; index -= 1) {
+    const override = String(overrides[index] || '').trim();
+    const separatorIndex = override.indexOf('=');
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const currentKey = override.slice(0, separatorIndex).trim();
+    if (currentKey !== normalizedKey) {
+      continue;
+    }
+
+    return parseTomlScalar(override.slice(separatorIndex + 1));
+  }
+
+  return undefined;
+}
+
+function parseContextWindowTokens(value) {
+  return parsePositiveInteger(value);
+}
+
+function formatTokenCountLabel(value) {
+  const count = parsePositiveInteger(value);
+  if (!count) {
+    return '';
+  }
+
+  if (count >= 1000000) {
+    const millions = count / 1000000;
+    return `${Number.isInteger(millions) ? millions : Number(millions.toFixed(1))}M`;
+  }
+
+  if (count >= 1000) {
+    const thousands = count / 1000;
+    return `${Number.isInteger(thousands) ? thousands : Number(thousands.toFixed(1))}K`;
+  }
+
+  return String(count);
+}
+
+function parseContextWindowTokensFromText(value) {
+  const text = asString(value).trim();
+  if (!text) {
+    return null;
+  }
+
+  const compactMatch = /\b(\d+(?:\.\d+)?)\s*([KkMm])\b/.exec(text);
+  if (compactMatch) {
+    const amount = Number(compactMatch[1]);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return null;
+    }
+
+    const multiplier = compactMatch[2].toLowerCase() === 'm' ? 1000000 : 1000;
+    return Math.trunc(amount * multiplier);
+  }
+
+  const rawMatch = /\b(\d{4,})\b/.exec(text);
+  if (!rawMatch) {
+    return null;
+  }
+
+  return parsePositiveInteger(rawMatch[1]);
+}
+
+function parseCursorModelCatalog(content) {
+  const models = new Map();
+
+  for (const line of String(content || '').split(/\r?\n/)) {
+    const match = /^\s*([A-Za-z0-9._-]+)\s+-\s+(.+?)\s*$/.exec(line);
+    if (!match) {
+      continue;
+    }
+
+    const [, id, label] = match;
+    const contextWindowTokens = parseContextWindowTokensFromText(label);
+    models.set(id, {
+      id,
+      label,
+      contextWindowTokens,
+      contextWindowLabel: formatTokenCountLabel(contextWindowTokens)
+    });
+  }
+
+  return models;
+}
+
+function resolveExistingDirectoryOrThrow(dirPath) {
+  const normalizedPath = asString(dirPath).trim();
+  if (!normalizedPath) {
+    throw new Error('当前没有可读取的工作区目录。');
+  }
+
+  const resolvedPath = path.resolve(normalizedPath);
+  let stats = null;
+
+  try {
+    stats = fs.statSync(resolvedPath);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      throw new Error('当前工作区目录不存在。');
+    }
+    throw error;
+  }
+
+  if (!stats.isDirectory()) {
+    throw new Error('当前工作区路径不是目录。');
+  }
+
+  return resolvedPath;
+}
+
+function shouldIgnoreWorkspaceTreeDirectory(name) {
+  return workspaceTreeIgnoredDirectoryNames.has(String(name || '').trim().toLowerCase());
+}
+
+function compareWorkspaceTreeEntries(left, right) {
+  const leftIsDirectory = left.isDirectory();
+  const rightIsDirectory = right.isDirectory();
+
+  if (leftIsDirectory !== rightIsDirectory) {
+    return leftIsDirectory ? -1 : 1;
+  }
+
+  return left.name.localeCompare(right.name, undefined, {
+    numeric: true,
+    sensitivity: 'base'
+  });
+}
+
+function formatWorkspaceTreeMoreLabel(count) {
+  return `... [${count} more omitted]`;
+}
+
+function normalizeWorkspaceSkillRelativePath(relativePath) {
+  return String(relativePath || '').split(path.sep).join('/');
+}
+
+function shouldTraverseWorkspaceSkillDirectory(sourceId, relativePath) {
+  if (sourceId !== 'github') {
+    return true;
+  }
+
+  const normalizedPath = normalizeWorkspaceSkillRelativePath(relativePath);
+  if (!normalizedPath) {
+    return true;
+  }
+
+  const firstSegment = normalizedPath.split('/')[0]?.toLowerCase() || '';
+  return workspaceSkillGithubAllowedDirectoryNames.has(firstSegment);
+}
+
+function shouldIncludeWorkspaceSkillFile(sourceId, relativePath) {
+  const normalizedPath = normalizeWorkspaceSkillRelativePath(relativePath);
+  if (!normalizedPath) {
+    return false;
+  }
+
+  const baseName = path.basename(normalizedPath).toLowerCase();
+  const extension = path.extname(baseName).toLowerCase();
+  if (!workspaceSkillFileExtensions.has(extension)) {
+    return false;
+  }
+
+  if (sourceId !== 'github') {
+    return true;
+  }
+
+  if (workspaceSkillGithubAllowedFileNames.has(baseName)) {
+    return true;
+  }
+
+  const firstSegment = normalizedPath.split('/')[0]?.toLowerCase() || '';
+  return workspaceSkillGithubAllowedDirectoryNames.has(firstSegment);
+}
+
+async function readWorkspaceSkillSourceSnapshot(rootPath, source) {
+  const sourcePath = path.join(rootPath, source.directoryName);
+  let sourceStats = null;
+
+  try {
+    sourceStats = await fs.promises.stat(sourcePath);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return {
+        id: source.id,
+        directoryName: source.directoryName,
+        exists: false,
+        fileCount: 0,
+        files: [],
+        path: sourcePath,
+        truncated: false
+      };
+    }
+
+    return {
+      id: source.id,
+      directoryName: source.directoryName,
+      exists: false,
+      error: error.message,
+      fileCount: 0,
+      files: [],
+      path: sourcePath,
+      truncated: false
+    };
+  }
+
+  if (!sourceStats.isDirectory()) {
+    return {
+      id: source.id,
+      directoryName: source.directoryName,
+      exists: false,
+      fileCount: 0,
+      files: [],
+      path: sourcePath,
+      truncated: false
+    };
+  }
+
+  const files = [];
+  let truncated = false;
+
+  const walk = async (directoryPath, relativeDirectoryPath, depth) => {
+    if (depth > WORKSPACE_SKILL_MAX_DEPTH || files.length >= WORKSPACE_SKILL_MAX_FILES_PER_SOURCE) {
+      truncated = true;
+      return;
+    }
+
+    let entries = [];
+    entries = await fs.promises.readdir(directoryPath, { withFileTypes: true });
+    entries.sort(compareWorkspaceTreeEntries);
+
+    for (const entry of entries) {
+      if (files.length >= WORKSPACE_SKILL_MAX_FILES_PER_SOURCE) {
+        truncated = true;
+        return;
+      }
+
+      const nextRelativePath = relativeDirectoryPath
+        ? path.join(relativeDirectoryPath, entry.name)
+        : entry.name;
+
+      if (entry.isDirectory()) {
+        if (!shouldTraverseWorkspaceSkillDirectory(source.id, nextRelativePath)) {
+          continue;
+        }
+
+        await walk(path.join(directoryPath, entry.name), nextRelativePath, depth + 1);
+        continue;
+      }
+
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      if (!shouldIncludeWorkspaceSkillFile(source.id, nextRelativePath)) {
+        continue;
+      }
+
+      files.push({
+        extension: path.extname(entry.name).toLowerCase(),
+        name: entry.name,
+        path: path.join(directoryPath, entry.name),
+        relativePath: normalizeWorkspaceSkillRelativePath(nextRelativePath)
+      });
+    }
+  };
+
+  try {
+    await walk(sourcePath, '', 1);
+  } catch (error) {
+    return {
+      id: source.id,
+      directoryName: source.directoryName,
+      exists: true,
+      error: error.message,
+      fileCount: 0,
+      files: [],
+      path: sourcePath,
+      truncated: false
+    };
+  }
+
+  files.sort((left, right) => left.relativePath.localeCompare(right.relativePath, undefined, {
+    numeric: true,
+    sensitivity: 'base'
+  }));
+
+  return {
+    id: source.id,
+    directoryName: source.directoryName,
+    exists: true,
+    fileCount: files.length,
+    files,
+    path: sourcePath,
+    truncated
+  };
+}
+
+async function readWorkspaceTreeSnapshot(options = {}) {
+  const cwd = resolveExistingDirectoryOrThrow(options.cwd);
+  const lines = [];
+  const state = {
+    directoryCount: 0,
+    fileCount: 0,
+    entryCount: 0,
+    omittedCount: 0,
+    truncated: false
+  };
+  const rootLabel = path.basename(cwd) || cwd;
+  const rootNode = {
+    id: cwd,
+    name: rootLabel,
+    path: cwd,
+    relativePath: '',
+    type: 'directory',
+    children: []
+  };
+
+  const appendTreeLine = (prefix, isLast, label) => {
+    lines.push(`${prefix}${isLast ? '└── ' : '├── '}${label}`);
+  };
+
+  const appendNoticeNode = (parentNode, notice) => {
+    parentNode.children.push({
+      id: `${parentNode.path || cwd}:${notice.type}:${parentNode.children.length}`,
+      type: notice.type,
+      name: notice.name,
+      message: notice.message || '',
+      omittedCount: notice.omittedCount || 0,
+      children: []
+    });
+  };
+
+  const normalizeRelativeWorkspaceTreePath = (relativePath) => (
+    String(relativePath || '').split(path.sep).join('/')
+  );
+
+  const walk = async (directoryPath, prefix, depth, parentNode, relativeDirectoryPath = '') => {
+    let entries = [];
+
+    try {
+      entries = await fs.promises.readdir(directoryPath, { withFileTypes: true });
+    } catch (error) {
+      const message = error.code || error.message || 'error';
+      appendTreeLine(prefix, true, `[unreadable: ${message}]`);
+      appendNoticeNode(parentNode, {
+        type: 'unreadable',
+        name: `[unreadable: ${message}]`,
+        message
+      });
+      return false;
+    }
+
+    entries.sort(compareWorkspaceTreeEntries);
+
+    const omittedChildrenCount = Math.max(
+      0,
+      entries.length - WORKSPACE_TREE_MAX_CHILDREN_PER_DIRECTORY
+    );
+    const visibleEntries = omittedChildrenCount > 0
+      ? entries.slice(0, WORKSPACE_TREE_MAX_CHILDREN_PER_DIRECTORY)
+      : entries;
+
+    if (omittedChildrenCount > 0) {
+      state.omittedCount += omittedChildrenCount;
+      state.truncated = true;
+    }
+
+    for (let index = 0; index < visibleEntries.length; index += 1) {
+      if (state.entryCount >= WORKSPACE_TREE_MAX_ENTRIES) {
+        const remainingVisibleCount = visibleEntries.length - index;
+        const remainingCount = remainingVisibleCount + omittedChildrenCount;
+        if (remainingCount > 0) {
+          const label = formatWorkspaceTreeMoreLabel(remainingCount);
+          appendTreeLine(prefix, true, label);
+          appendNoticeNode(parentNode, {
+            type: 'omitted',
+            name: label,
+            omittedCount: remainingCount
+          });
+          state.omittedCount += remainingVisibleCount;
+        }
+        state.truncated = true;
+        return true;
+      }
+
+      const entry = visibleEntries[index];
+      const isLastVisible = index === visibleEntries.length - 1;
+      const isLast = isLastVisible && omittedChildrenCount === 0;
+      const nextPrefix = `${prefix}${isLast ? '    ' : '│   '}`;
+      const entryPath = path.join(directoryPath, entry.name);
+      const relativePath = relativeDirectoryPath
+        ? path.join(relativeDirectoryPath, entry.name)
+        : entry.name;
+      const entryIsDirectory = entry.isDirectory();
+      const entryIsLink = entry.isSymbolicLink();
+      const labelParts = [entry.name];
+
+      if (entryIsDirectory) {
+        labelParts.push('/');
+      }
+      if (entryIsLink) {
+        labelParts.push(' [link]');
+      }
+      if (entryIsDirectory && shouldIgnoreWorkspaceTreeDirectory(entry.name)) {
+        labelParts.push(' [ignored]');
+      }
+
+      appendTreeLine(prefix, isLast, labelParts.join(''));
+      state.entryCount += 1;
+
+      const entryNode = {
+        id: entryPath,
+        name: entry.name,
+        path: entryPath,
+        relativePath: normalizeRelativeWorkspaceTreePath(relativePath),
+        type: entryIsDirectory ? 'directory' : entryIsLink ? 'link' : 'file',
+        ignored: entryIsDirectory && shouldIgnoreWorkspaceTreeDirectory(entry.name),
+        link: entryIsLink,
+        children: []
+      };
+      parentNode.children.push(entryNode);
+
+      if (entryIsDirectory) {
+        state.directoryCount += 1;
+
+        if (shouldIgnoreWorkspaceTreeDirectory(entry.name) || entryIsLink) {
+          continue;
+        }
+
+        if (depth + 1 > WORKSPACE_TREE_MAX_DEPTH) {
+          const label = '... [depth limit]';
+          appendTreeLine(nextPrefix, true, label);
+          appendNoticeNode(entryNode, {
+            type: 'depth-limit',
+            name: label
+          });
+          state.omittedCount += 1;
+          state.truncated = true;
+          continue;
+        }
+
+        const shouldStop = await walk(entryPath, nextPrefix, depth + 1, entryNode, relativePath);
+        if (shouldStop) {
+          return true;
+        }
+        continue;
+      }
+
+      state.fileCount += 1;
+    }
+
+    if (omittedChildrenCount > 0) {
+      const label = formatWorkspaceTreeMoreLabel(omittedChildrenCount);
+      appendTreeLine(prefix, true, label);
+      appendNoticeNode(parentNode, {
+        type: 'omitted',
+        name: label,
+        omittedCount: omittedChildrenCount
+      });
+    }
+
+    return false;
+  };
+
+  lines.push(rootLabel.endsWith(path.sep) ? rootLabel : `${rootLabel}${path.sep}`);
+  await walk(cwd, '', 1, rootNode);
+
+  return {
+    cwd,
+    root: rootNode,
+    text: lines.join('\n'),
+    directoryCount: state.directoryCount,
+    fileCount: state.fileCount,
+    omittedCount: state.omittedCount,
+    truncated: state.truncated,
+    maxDepth: WORKSPACE_TREE_MAX_DEPTH,
+    maxEntries: WORKSPACE_TREE_MAX_ENTRIES
+  };
+}
+
+async function readWorkspaceSkillsSnapshot(options = {}) {
+  const cwd = resolveExistingDirectoryOrThrow(options.cwd);
+  const scopes = [];
+  let totalFiles = 0;
+
+  for (const source of workspaceSkillSources) {
+    const snapshot = await readWorkspaceSkillSourceSnapshot(cwd, source);
+    scopes.push(snapshot);
+    totalFiles += snapshot.fileCount || 0;
+  }
+
+  return {
+    cwd,
+    scannedAt: Date.now(),
+    scopes,
+    totalFiles
+  };
+}
+
+async function openLocalPath(targetPath) {
+  const normalizedPath = asString(targetPath).trim();
+  if (!normalizedPath) {
+    throw new Error('没有可打开的路径。');
+  }
+
+  const resolvedPath = path.resolve(normalizedPath);
+  const result = await electronShell.openPath(resolvedPath);
+  if (result) {
+    throw new Error(result);
+  }
+
+  return true;
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.promises.access(targetPath, fs.constants.F_OK);
+    return true;
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+async function movePathIfMissing(sourcePath, targetPath) {
+  if (!await pathExists(sourcePath) || await pathExists(targetPath)) {
+    return false;
+  }
+
+  await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.promises.rename(sourcePath, targetPath);
+  return true;
+}
+
+async function migrateLegacyTempSettingsHomes() {
+  const appBaseDir = getAppBaseDir();
+  let entries = [];
+
+  try {
+    entries = await fs.promises.readdir(appBaseDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  await Promise.all(entries.map(async (entry) => {
+    if (!entry.isDirectory() || !TEMP_SETTINGS_HOME_PATTERN.test(entry.name)) {
+      return;
+    }
+
+    const legacyHomeDir = path.join(appBaseDir, entry.name);
+    if (!isPathInside(appBaseDir, legacyHomeDir)) {
+      return;
+    }
+
+    const legacyConfigDir = path.join(legacyHomeDir, '.codex');
+    const managedConfigDir = path.join(getManagedSettingsHomesDir(), entry.name, '.codex');
+    await movePathIfMissing(legacyConfigDir, managedConfigDir).catch(() => {});
+  }));
+}
+
+async function pruneEmptyLegacyTempSettingsHomes() {
+  const appBaseDir = getAppBaseDir();
+  let entries = [];
+
+  try {
+    entries = await fs.promises.readdir(appBaseDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  await Promise.all(entries.map(async (entry) => {
+    if (!entry.isDirectory() || !TEMP_SETTINGS_HOME_PATTERN.test(entry.name)) {
+      return;
+    }
+
+    const fullPath = path.join(appBaseDir, entry.name);
+    if (!isPathInside(appBaseDir, fullPath)) {
+      return;
+    }
+
+    try {
+      const children = await fs.promises.readdir(fullPath);
+      if (children.length === 0) {
+        await fs.promises.rmdir(fullPath);
+      }
+    } catch {
+      // Ignore non-empty or concurrently-used legacy temp homes.
+    }
+  }));
+}
+
+async function prepareProgramStorage() {
+  await fs.promises.mkdir(getProgramStorageDir(), { recursive: true }).catch(() => {});
+  await movePathIfMissing(getLegacyDefaultHistoryDir(), getDefaultHistoryDir()).catch(() => {});
+  await movePathIfMissing(getLegacyCodexQuickProfilesPath(), getCodexQuickProfilesPath()).catch(() => {});
+  await migrateLegacyTempSettingsHomes();
+  await pruneEmptyLegacyTempSettingsHomes();
 }
 
 function sendToRenderer(webContents, channel, payload) {
@@ -287,6 +1297,7 @@ function buildTerminalTranscriptText(session) {
     `CWD: ${session.cwd}`,
     `Shell: ${session.shell}`,
     `Backend: ${session.backend}`,
+    `CLI: ${session.cliProviderId || 'shell'}`,
     `Started: ${startedAt.toLocaleString()}`,
     `Exported: ${exportedAt.toLocaleString()}`,
     `Status: ${status}`,
@@ -325,36 +1336,160 @@ async function exportTerminalSession(id, options = {}) {
   };
 }
 
-function isCodexInitialCommand(value) {
-  const command = asString(value).trim();
-  return /(?:^|[\\/])codex(?:\.(?:cmd|exe|bat))?(?:\s|$)/i.test(command);
+function normalizeBinaryPayload(value) {
+  if (!value) {
+    return Buffer.alloc(0);
+  }
+
+  if (Buffer.isBuffer(value)) {
+    return value;
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return Buffer.from(value);
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
+
+  if (Array.isArray(value)) {
+    return Buffer.from(value);
+  }
+
+  throw new Error('图片内容无效。');
 }
 
-async function resolveSessionCodexMeta(initialCommand) {
-  if (!isCodexInitialCommand(initialCommand)) {
-    return {
-      codexSession: false,
-      codexModel: '',
-      codexProviderName: ''
-    };
+function inferImageExtension(fileName, mimeType) {
+  const normalizedMimeType = typeof mimeType === 'string' ? mimeType.trim().toLowerCase() : '';
+  const originalExtension = typeof fileName === 'string'
+    ? path.extname(fileName).trim().toLowerCase()
+    : '';
+
+  if (imageExtensions.has(originalExtension)) {
+    return originalExtension;
   }
 
-  try {
-    const snapshot = await getCodexProfileSnapshot();
-    const profile = snapshot?.profile || {};
-
-    return {
-      codexSession: true,
-      codexModel: asString(profile.model).trim(),
-      codexProviderName: asString(profile.providerName, profile.providerKey).trim()
-    };
-  } catch {
-    return {
-      codexSession: true,
-      codexModel: '',
-      codexProviderName: ''
-    };
+  if (imageExtensionByMimeType.has(normalizedMimeType)) {
+    return imageExtensionByMimeType.get(normalizedMimeType);
   }
+
+  return '.png';
+}
+
+async function saveCommandDockImageAsset(options = {}) {
+  const cwd = resolveCwd(options.cwd);
+  const buffer = normalizeBinaryPayload(options.bytes);
+  if (buffer.length === 0) {
+    throw new Error('图片内容为空。');
+  }
+
+  const rawFileName = asString(options.fileName).trim();
+  const mimeType = asString(options.mimeType).trim().toLowerCase();
+  const extension = inferImageExtension(rawFileName, mimeType);
+  const baseName = sanitizeFileNamePart(
+    rawFileName ? path.basename(rawFileName, path.extname(rawFileName)) : 'image',
+    'image'
+  );
+  const assetDir = path.join(cwd, '.files');
+  await fs.promises.mkdir(assetDir, { recursive: true });
+
+  const filePath = await getUniqueFilePath(
+    assetDir,
+    `${formatFileTimestamp()}-${baseName}`,
+    extension
+  );
+
+  await fs.promises.writeFile(filePath, buffer);
+  const stats = await fs.promises.stat(filePath);
+
+  return {
+    path: filePath,
+    dir: assetDir,
+    name: path.basename(filePath),
+    size: stats.size
+  };
+}
+
+function resolveCodexContextWindowTokens(config, initialCommand) {
+  const overrideValue = extractCodexConfigOverrideValue(initialCommand, 'model_context_window');
+  if (typeof overrideValue !== 'undefined') {
+    return parseContextWindowTokens(overrideValue);
+  }
+
+  return parseContextWindowTokens(config?.model_context_window);
+}
+
+async function resolveCursorSessionMeta(initialCommand) {
+  const config = await readCursorCliConfig();
+  const modelFromCommand = asString(getLastCommandOptionValue(initialCommand, ['-m', '--model'])).trim();
+  const configuredModel = asString(config?.selectedModel?.modelId || config?.model?.modelId).trim();
+  const modelId = modelFromCommand || configuredModel;
+  const fallbackDisplayName = asString(
+    config?.model?.displayNameShort || config?.model?.displayName || modelId
+  ).trim();
+  let contextWindowTokens = parseContextWindowTokensFromText(fallbackDisplayName);
+  let contextWindowLabel = formatTokenCountLabel(contextWindowTokens);
+
+  if (modelId) {
+    const catalog = await getCursorModelCatalog();
+    const modelMeta = catalog.get(modelId);
+    if (modelMeta?.contextWindowTokens) {
+      contextWindowTokens = modelMeta.contextWindowTokens;
+      contextWindowLabel = modelMeta.contextWindowLabel;
+    }
+  }
+
+  return {
+    contextWindowTokens,
+    contextWindowLabel
+  };
+}
+
+async function resolveSessionCliMeta(requestedCliProviderId, initialCommand) {
+  const cliProvider = resolveCliProvider(requestedCliProviderId, initialCommand);
+  const cliProviderId = cliProvider?.id || defaultCliProviderId;
+  const baseMeta = {
+    cliProviderId,
+    codexSession: cliProviderId === 'codex',
+    codexModel: '',
+    codexProviderName: '',
+    contextWindowTokens: null,
+    contextWindowLabel: ''
+  };
+
+  if (cliProviderId === 'codex') {
+    try {
+      const snapshot = await getCodexProfileSnapshot();
+      const profile = snapshot?.profile || {};
+      const config = parseCodexToml(snapshot?.config?.content || '');
+      const commandModel = asString(getLastCommandOptionValue(initialCommand, ['-m', '--model'])).trim();
+      const contextWindowTokens = resolveCodexContextWindowTokens(config, initialCommand);
+
+      return {
+        ...baseMeta,
+        codexModel: commandModel || asString(profile.model).trim(),
+        codexProviderName: asString(profile.providerName, profile.providerKey).trim(),
+        contextWindowTokens,
+        contextWindowLabel: formatTokenCountLabel(contextWindowTokens)
+      };
+    } catch {
+      return baseMeta;
+    }
+  }
+
+  if (cliProviderId === 'cursor-agent') {
+    try {
+      return {
+        ...baseMeta,
+        ...(await resolveCursorSessionMeta(initialCommand))
+      };
+    } catch {
+      return baseMeta;
+    }
+  }
+
+  return baseMeta;
 }
 
 async function createTerminalSession(webContents, options = {}) {
@@ -364,13 +1499,17 @@ async function createTerminalSession(webContents, options = {}) {
   const cwd = resolveCwd(options.cwd);
   const shell = getDefaultShell();
   const args = Array.isArray(options.args) ? options.args : getDefaultShellArgs();
+  const requestedCliProviderId = typeof options.cliProviderId === 'string'
+    ? options.cliProviderId.trim()
+    : '';
   const initialCommand = typeof options.initialCommand === 'string' && options.initialCommand.trim()
     ? options.initialCommand.trim()
     : '';
+  const cliProvider = resolveCliProvider(requestedCliProviderId, initialCommand);
   const title = typeof options.title === 'string' && options.title.trim()
     ? options.title.trim()
-    : `会话 ${sessions.size + 1}`;
-  const codexMeta = await resolveSessionCodexMeta(initialCommand);
+    : `${getCliProviderTitleBase(cliProvider)} ${sessions.size + 1}`;
+  const cliMeta = await resolveSessionCliMeta(requestedCliProviderId, initialCommand);
 
   const meta = {
     id,
@@ -385,7 +1524,7 @@ async function createTerminalSession(webContents, options = {}) {
     exited: false,
     exitCode: null,
     signal: null,
-    ...codexMeta
+    ...cliMeta
   };
 
   if (pty) {
@@ -394,11 +1533,10 @@ async function createTerminalSession(webContents, options = {}) {
       cols,
       rows,
       cwd,
-      env: {
-        ...process.env,
+      env: buildSessionEnv({
         COLORTERM: 'truecolor',
         TERM: 'xterm-256color'
-      }
+      })
     });
 
     const session = {
@@ -430,7 +1568,7 @@ async function createTerminalSession(webContents, options = {}) {
   } else {
     const proc = spawn(shell, args, {
       cwd,
-      env: process.env,
+      env: buildSessionEnv(),
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe']
     });
@@ -1374,7 +2512,9 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await prepareProgramStorage();
+
   ipcMain.handle('app:info', async () => {
     const historyDir = getDefaultHistoryDir();
     await fs.promises.mkdir(historyDir, { recursive: true }).catch(() => {});
@@ -1382,8 +2522,9 @@ app.whenReady().then(() => {
     return {
       appVersion: app.getVersion(),
       defaultShell: getDefaultShell(),
+      codexHomeDir: getCodexHomeDir(),
       historyDir,
-      homeDir: os.homedir(),
+      homeDir: getUserHomeDir(),
       ptyEnabled: Boolean(pty),
       ptyError: ptyLoadError ? ptyLoadError.message : null,
       platform: process.platform
@@ -1399,6 +2540,18 @@ app.whenReady().then(() => {
   ipcMain.handle('app:open-external', async (_event, url) => {
     await electronShell.openExternal(normalizeAllowedExternalUrl(url));
     return true;
+  });
+
+  ipcMain.handle('workspace:open-path', (_event, targetPath) => {
+    return openLocalPath(targetPath);
+  });
+
+  ipcMain.handle('workspace:read-tree', (_event, options = {}) => {
+    return readWorkspaceTreeSnapshot(options || {});
+  });
+
+  ipcMain.handle('workspace:read-skills', (_event, options = {}) => {
+    return readWorkspaceSkillsSnapshot(options || {});
   });
 
   ipcMain.handle('codex-config:read', (_event, kind = 'config') => {
@@ -1484,6 +2637,10 @@ app.whenReady().then(() => {
     }
 
     return result.filePaths[0];
+  });
+
+  ipcMain.handle('command-dock:save-image', (_event, payload) => {
+    return saveCommandDockImageAsset(payload || {});
   });
 
   ipcMain.handle('terminal:create', (event, options) => {

@@ -1,0 +1,92 @@
+[
+  {
+    "id": "shell",
+    "displayName": {
+      "zh": "CMD",
+      "en": "CMD"
+    },
+    "badgeLabel": {
+      "zh": "CMD",
+      "en": "Shell"
+    },
+    "panelTitle": {
+      "zh": "CMD",
+      "en": "Shell"
+    },
+    "description": {
+      "zh": "只启动本地 shell，不预执行任何 CLI 命令。",
+      "en": "Launch the local shell without pre-running any CLI command."
+    },
+    "launchCommand": {
+      "project": "",
+      "directory": ""
+    },
+    "targets": [
+      "project",
+      "directory"
+    ],
+    "detect": {
+      "emptyCommand": true
+    }
+  },
+  {
+    "id": "codex",
+    "displayName": {
+      "zh": "Codex CLI",
+      "en": "Codex CLI"
+    },
+    "badgeLabel": {
+      "zh": "Codex",
+      "en": "Codex"
+    },
+    "panelTitle": {
+      "zh": "Codex",
+      "en": "Codex"
+    },
+    "description": {
+      "zh": "在所选目录启动 codex。",
+      "en": "Start codex in the selected directory."
+    },
+    "launchCommand": {
+      "project": "codex",
+      "directory": "codex"
+    },
+    "targets": [
+      "project",
+      "directory"
+    ],
+    "detect": {
+      "pattern": "(?:^|[\\\\/])codex(?:\\.(?:cmd|exe|bat))?(?:\\s|$)"
+    }
+  },
+  {
+    "id": "cursor-agent",
+    "displayName": {
+      "zh": "Cursor CLI",
+      "en": "Cursor CLI"
+    },
+    "badgeLabel": {
+      "zh": "Cursor",
+      "en": "Cursor"
+    },
+    "panelTitle": {
+      "zh": "Cursor",
+      "en": "Cursor"
+    },
+    "description": {
+      "zh": "在所选目录启动 Cursor CLI：agent .",
+      "en": "Start Cursor CLI in the selected directory with agent ."
+    },
+    "launchCommand": {
+      "project": "agent .",
+      "directory": "agent ."
+    },
+    "targets": [
+      "project",
+      "directory"
+    ],
+    "detect": {
+      "pattern": "(?:^|[\\\\/])agent(?:\\.(?:cmd|exe|bat))?(?:\\s|$)"
+    }
+  }
+]
