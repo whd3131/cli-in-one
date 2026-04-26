@@ -100,9 +100,34 @@ jobs:
         run: npm ci
 
       - name: Build macOS artifacts
+        shell: bash
         run: |
+          cleanup_dmg_mounts() {
+            hdiutil info | awk '/\/Volumes\/CLI in One/ { print $1 }' | while read -r device; do
+              hdiutil detach "$device" -force || true
+            done
+          }
+
           npm run build:renderer
-          npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never
+          npx electron-builder --mac zip --${{ matrix.arch }} --publish never
+
+          if [ "${{ matrix.arch }}" = "x64" ]; then
+            dmg_built=false
+            for attempt in 1 2 3; do
+              if npx electron-builder --mac dmg --${{ matrix.arch }} --publish never; then
+                dmg_built=true
+                break
+              fi
+              cleanup_dmg_mounts
+              sleep 10
+            done
+
+            if [ "$dmg_built" != "true" ]; then
+              echo "x64 DMG build failed after retries; continuing with ZIP artifacts." >&2
+            fi
+          else
+            npx electron-builder --mac dmg --${{ matrix.arch }} --publish never
+          fi
 
       - name: Upload macOS artifacts to GitHub Release
         shell: bash
