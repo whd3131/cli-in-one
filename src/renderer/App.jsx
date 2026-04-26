@@ -3,13 +3,22 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import {
+  Archive,
+  ChevronLeft,
+  ChevronRight,
   Check,
+  Clock3,
   FolderOpen,
+  FolderPlus,
   GripVertical,
   Grid2X2,
+  History,
   LayoutGrid,
+  MessageSquarePlus,
   Minus,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -27,6 +36,7 @@ import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
+import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarSection } from '@/components/ui/sidebar';
 import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
@@ -41,7 +51,10 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { cn } from '@/lib/utils';
 
 const bridge = window.cliBridge;
-const settingsKey = 'cli-in-one.settings.v2';
+const settingsKey = 'cli-in-one.settings.v3';
+const workspaceKey = 'cli-in-one.workspace.v1';
+const conversationIdleDelayMs = 10 * 60 * 1000;
+const maxTranscriptChars = 140000;
 
 const terminalThemes = {
   dark: {
@@ -120,18 +133,16 @@ function closestElement(target, selector) {
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(settingsKey) || '{}');
-    const preferredTheme = window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
     return {
       cwd: saved.cwd || '',
-      theme: saved.theme === 'light' || saved.theme === 'dark' ? saved.theme : preferredTheme,
+      theme: saved.theme === 'dark' ? 'dark' : 'light',
       view: saved.view && Number.isFinite(saved.view.x) && Number.isFinite(saved.view.y) && Number.isFinite(saved.view.scale)
         ? { x: saved.view.x, y: saved.view.y, scale: clamp(saved.view.scale, 0.35, 2.5) }
         : { x: 80, y: 80, scale: 1 }
     };
   } catch {
     localStorage.removeItem(settingsKey);
-    const preferredTheme = window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    return { cwd: '', theme: preferredTheme, view: { x: 80, y: 80, scale: 1 } };
+    return { cwd: '', theme: 'light', view: { x: 80, y: 80, scale: 1 } };
   }
 }
 
@@ -149,6 +160,148 @@ function formatTime(ms) {
     minute: '2-digit',
     second: '2-digit'
   });
+}
+
+function formatRelativeTime(ms) {
+  if (!Number.isFinite(ms)) {
+    return '';
+  }
+
+  const diff = Math.max(0, Date.now() - ms);
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+
+  if (diff < minute) {
+    return '刚刚';
+  }
+  if (diff < hour) {
+    return `${Math.floor(diff / minute)} 分`;
+  }
+  if (diff < day) {
+    return `${Math.floor(diff / hour)} 小时`;
+  }
+  return `${Math.floor(diff / day)} 天`;
+}
+
+function createLocalId(prefix) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function trimTranscript(text) {
+  if (typeof text !== 'string' || text.length <= maxTranscriptChars) {
+    return text || '';
+  }
+  return text.slice(text.length - maxTranscriptChars);
+}
+
+function deriveNameFromPath(value) {
+  if (!value) {
+    return '未命名项目';
+  }
+
+  const parts = String(value).split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) || value;
+}
+
+function createEmptyWorkspace() {
+  return {
+    sidebarCollapsed: false,
+    activeProjectId: null,
+    activeConversationId: null,
+    projects: [],
+    temporaryConversations: []
+  };
+}
+
+function normalizeWorkspace(raw) {
+  const fallback = createEmptyWorkspace();
+  if (!raw || typeof raw !== 'object') {
+    return fallback;
+  }
+
+  const projects = Array.isArray(raw.projects)
+    ? raw.projects.map((project) => ({
+      id: project.id || createLocalId('project'),
+      name: project.name || deriveNameFromPath(project.path),
+      path: project.path || '',
+      createdAt: Number.isFinite(project.createdAt) ? project.createdAt : Date.now(),
+      updatedAt: Number.isFinite(project.updatedAt) ? project.updatedAt : Date.now(),
+      conversations: Array.isArray(project.conversations) ? project.conversations : []
+    }))
+    : [];
+
+  return {
+    ...fallback,
+    sidebarCollapsed: Boolean(raw.sidebarCollapsed),
+    activeProjectId: raw.activeProjectId || null,
+    activeConversationId: raw.activeConversationId || null,
+    projects,
+    temporaryConversations: Array.isArray(raw.temporaryConversations) ? raw.temporaryConversations : []
+  };
+}
+
+function loadWorkspace() {
+  try {
+    return normalizeWorkspace(JSON.parse(localStorage.getItem(workspaceKey) || '{}'));
+  } catch {
+    localStorage.removeItem(workspaceKey);
+    return createEmptyWorkspace();
+  }
+}
+
+function findConversation(workspace, conversationId) {
+  if (!conversationId) {
+    return null;
+  }
+
+  for (const project of workspace.projects) {
+    const match = project.conversations.find((conversation) => conversation.id === conversationId);
+    if (match) {
+      return { ...match, project };
+    }
+  }
+
+  const temporary = workspace.temporaryConversations.find((conversation) => conversation.id === conversationId);
+  return temporary ? { ...temporary, project: null } : null;
+}
+
+function upsertConversationInWorkspace(workspace, conversation) {
+  const next = {
+    ...workspace,
+    projects: workspace.projects.map((project) => ({
+      ...project,
+      conversations: [...project.conversations]
+    })),
+    temporaryConversations: [...workspace.temporaryConversations]
+  };
+
+  if (conversation.projectId) {
+    next.projects = next.projects.map((project) => {
+      if (project.id !== conversation.projectId) {
+        return project;
+      }
+
+      const existingIndex = project.conversations.findIndex((item) => item.id === conversation.id);
+      const conversations = existingIndex >= 0
+        ? project.conversations.map((item) => (item.id === conversation.id ? { ...item, ...conversation } : item))
+        : [conversation, ...project.conversations];
+
+      return {
+        ...project,
+        updatedAt: conversation.updatedAt || Date.now(),
+        conversations: conversations.slice(0, 30)
+      };
+    });
+    return next;
+  }
+
+  const existingIndex = next.temporaryConversations.findIndex((item) => item.id === conversation.id);
+  next.temporaryConversations = existingIndex >= 0
+    ? next.temporaryConversations.map((item) => (item.id === conversation.id ? { ...item, ...conversation } : item))
+    : [conversation, ...next.temporaryConversations];
+  next.temporaryConversations = next.temporaryConversations.slice(0, 50);
+  return next;
 }
 
 function IconButton({ label, children, ...props }) {
@@ -175,6 +328,7 @@ function TerminalPanel({
   onResize,
   onRestart,
   onTitleChange,
+  onTerminalInput,
   registerTerminal
 }) {
   const hostRef = useRef(null);
@@ -221,7 +375,10 @@ function TerminalPanel({
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    const dataDisposable = term.onData((data) => bridge.writeTerminal(panel.id, data));
+    const dataDisposable = term.onData((data) => {
+      bridge.writeTerminal(panel.id, data);
+      onTerminalInput(panel.id, data);
+    });
     const resizeDisposable = term.onResize(({ cols, rows }) => bridge.resizeTerminal(panel.id, cols, rows));
     const unregister = registerTerminal(panel.id, { term, fitAddon, fit: fitTerminal });
 
@@ -236,7 +393,7 @@ function TerminalPanel({
       termRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [fitTerminal, panel.cwd, panel.id, registerTerminal]);
+  }, [fitTerminal, onTerminalInput, panel.cwd, panel.id, registerTerminal]);
 
   useEffect(() => {
     fitTerminal();
@@ -353,7 +510,7 @@ function TerminalPanel({
           variant={panel.status === 'exit' ? 'destructive' : 'success'}
           className="h-[22px] font-mono text-[11px]"
         >
-          {panel.status === 'exit' ? 'exit' : 'cmd'}
+          {panel.status === 'exit' ? 'exit' : 'codex'}
         </Badge>
         <Button
           type="button"
@@ -594,12 +751,169 @@ function CodexConfigDialog({ open, onOpenChange, showToast }) {
   );
 }
 
+function WorkspaceSidebar({
+  workspace,
+  activeProject,
+  activeConversationId,
+  appInfo,
+  onAddProject,
+  onNewConversation,
+  onOpenCodexConfig,
+  onOpenConversationFolder,
+  onSelectConversation,
+  onSelectProject,
+  onStartTemporaryConversation,
+  onToggleCollapsed
+}) {
+  const collapsed = workspace.sidebarCollapsed;
+  const temporary = workspace.temporaryConversations;
+
+  if (collapsed) {
+    return (
+      <Sidebar collapsed>
+        <IconButton label="展开侧边栏" onClick={onToggleCollapsed}>
+          <PanelLeftOpen className="h-4 w-4" />
+        </IconButton>
+        <IconButton label="新对话" onClick={() => onNewConversation()}>
+          <MessageSquarePlus className="h-4 w-4" />
+        </IconButton>
+        <IconButton label="新增项目" onClick={onAddProject}>
+          <FolderPlus className="h-4 w-4" />
+        </IconButton>
+        <IconButton label="临时对话" onClick={onStartTemporaryConversation}>
+          <Archive className="h-4 w-4" />
+        </IconButton>
+        <div className="sidebar-rail-spacer" />
+        <IconButton label="Codex 配置" onClick={onOpenCodexConfig}>
+          <Settings2 className="h-4 w-4" />
+        </IconButton>
+      </Sidebar>
+    );
+  }
+
+  return (
+    <Sidebar>
+      <SidebarHeader>
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="brand-mark" />
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold">CLI in One</div>
+            <div className="truncate text-xs text-muted-foreground">本地项目与会话</div>
+          </div>
+        </div>
+        <IconButton label="收起侧边栏" onClick={onToggleCollapsed}>
+          <PanelLeftClose className="h-4 w-4" />
+        </IconButton>
+      </SidebarHeader>
+
+      <div className="sidebar-actions">
+        <Button className="w-full justify-start" variant="ghost" onClick={() => onNewConversation()}>
+          <MessageSquarePlus className="h-4 w-4" />
+          新对话
+        </Button>
+        <Button className="w-full justify-start" variant="ghost" onClick={onStartTemporaryConversation}>
+          <Archive className="h-4 w-4" />
+          临时对话
+        </Button>
+      </div>
+
+      <SidebarContent>
+        <SidebarSection>
+          <div className="sidebar-section-title">
+            <span>项目</span>
+            <div className="flex items-center gap-1">
+              <IconButton label="新增项目" onClick={onAddProject}>
+                <FolderPlus className="h-4 w-4" />
+              </IconButton>
+            </div>
+          </div>
+
+          {workspace.projects.length === 0 && (
+            <div className="sidebar-empty">选择一个目录后会在这里管理项目会话。</div>
+          )}
+
+          <div className="space-y-2">
+            {workspace.projects.map((project) => (
+              <div key={project.id} className="sidebar-project-group">
+                <button
+                  type="button"
+                  className={cn('sidebar-project', activeProject?.id === project.id && 'active')}
+                  onClick={() => onSelectProject(project.id)}
+                >
+                  <FolderOpen className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate text-left">{project.name}</span>
+                  <span className="shrink-0 text-[11px] text-muted-foreground">{project.conversations.length}</span>
+                </button>
+
+                {project.conversations.slice(0, 6).map((conversation) => (
+                  <button
+                    key={conversation.id}
+                    type="button"
+                    className={cn('sidebar-history', activeConversationId === conversation.id && 'active')}
+                    title={conversation.preview || conversation.title}
+                    onClick={() => onSelectConversation(conversation)}
+                  >
+                    <History className="h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate text-left">{conversation.title}</span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground">{formatRelativeTime(conversation.updatedAt)}</span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        </SidebarSection>
+
+        <SidebarSection>
+          <div className="sidebar-section-title">
+            <span>临时对话</span>
+            <Clock3 className="h-3.5 w-3.5 text-muted-foreground" />
+          </div>
+
+          {temporary.length === 0 && (
+            <div className="sidebar-empty">不绑定项目的对话会显示在这里。</div>
+          )}
+
+          {temporary.slice(0, 10).map((conversation) => (
+            <button
+              key={conversation.id}
+              type="button"
+              className={cn('sidebar-history top-level', activeConversationId === conversation.id && 'active')}
+              title={conversation.preview || conversation.title}
+              onClick={() => onSelectConversation(conversation)}
+            >
+              <History className="h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 flex-1 truncate text-left">{conversation.title}</span>
+              <span className="shrink-0 text-[11px] text-muted-foreground">{formatRelativeTime(conversation.updatedAt)}</span>
+            </button>
+          ))}
+        </SidebarSection>
+      </SidebarContent>
+
+      <SidebarFooter>
+        <Button className="w-full justify-start" variant="ghost" onClick={onOpenConversationFolder}>
+          <FolderOpen className="h-4 w-4" />
+          会话记录目录
+        </Button>
+        <Button className="w-full justify-start" variant="ghost" onClick={onOpenCodexConfig}>
+          <Settings2 className="h-4 w-4" />
+          设置
+        </Button>
+        <div className="truncate px-2 text-[11px] text-muted-foreground" title={appInfo?.conversationDir || ''}>
+          {appInfo?.conversationDir || '会话目录初始化中'}
+        </div>
+      </SidebarFooter>
+    </Sidebar>
+  );
+}
+
 export default function App() {
   const initialSettings = useMemo(loadSettings, []);
+  const initialWorkspace = useMemo(loadWorkspace, []);
   const [appInfo, setAppInfo] = useState(null);
   const [cwd, setCwd] = useState(initialSettings.cwd);
   const [theme, setTheme] = useState(initialSettings.theme);
   const [view, setView] = useState(initialSettings.view);
+  const [workspace, setWorkspace] = useState(initialWorkspace);
   const [panels, setPanels] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [codexOpen, setCodexOpen] = useState(false);
@@ -607,19 +921,53 @@ export default function App() {
   const [toast, setToast] = useState('');
   const viewportRef = useRef(null);
   const terminalInstances = useRef(new Map());
+  const transcriptsRef = useRef(new Map());
   const panelsRef = useRef([]);
+  const workspaceRef = useRef(workspace);
   const activeIdRef = useRef(null);
+  const cwdRef = useRef(cwd);
+  const viewRef = useRef(view);
+  const appInfoRef = useRef(appInfo);
   const nextZIndex = useRef(10);
   const toastTimer = useRef(null);
   const saveSettingsTimer = useRef(null);
+  const saveWorkspaceTimer = useRef(null);
+  const idleSaveTimer = useRef(null);
+  const lastActivityAt = useRef(Date.now());
+  const snapshotSaving = useRef(false);
+
+  const activeProject = useMemo(
+    () => workspace.projects.find((project) => project.id === workspace.activeProjectId) || null,
+    [workspace.activeProjectId, workspace.projects]
+  );
+  const activeConversation = useMemo(
+    () => findConversation(workspace, workspace.activeConversationId),
+    [workspace]
+  );
 
   useEffect(() => {
     panelsRef.current = panels;
   }, [panels]);
 
   useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
+
+  useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+
+  useEffect(() => {
+    cwdRef.current = cwd;
+  }, [cwd]);
+
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
+
+  useEffect(() => {
+    appInfoRef.current = appInfo;
+  }, [appInfo]);
 
   const showToast = useCallback((message) => {
     window.clearTimeout(toastTimer.current);
@@ -632,8 +980,8 @@ export default function App() {
   useEffect(() => {
     bridge.getAppInfo().then((info) => {
       setAppInfo(info);
-      if (!cwd) {
-        setCwd(info.homeDir || '');
+      if (!cwdRef.current) {
+        setCwd(activeProject?.path || info.homeDir || '');
       }
       if (!info.ptyEnabled) {
         showToast('当前使用管道模式；安装 node-pty 成功后会自动切换到 ConPTY。');
@@ -641,7 +989,7 @@ export default function App() {
     }).catch((error) => {
       showToast(error.message);
     });
-  }, [cwd, showToast]);
+  }, [activeProject?.path, showToast]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -656,6 +1004,105 @@ export default function App() {
 
   useEffect(() => () => window.clearTimeout(saveSettingsTimer.current), []);
 
+  useEffect(() => {
+    window.clearTimeout(saveWorkspaceTimer.current);
+    saveWorkspaceTimer.current = window.setTimeout(() => {
+      localStorage.setItem(workspaceKey, JSON.stringify(workspace));
+    }, 220);
+  }, [workspace]);
+
+  useEffect(() => () => window.clearTimeout(saveWorkspaceTimer.current), []);
+
+  const updateConversationRecord = useCallback((conversation) => {
+    const next = {
+      ...upsertConversationInWorkspace(workspaceRef.current, conversation),
+      activeProjectId: conversation.projectId || null,
+      activeConversationId: conversation.id
+    };
+    workspaceRef.current = next;
+    setWorkspace(next);
+  }, []);
+
+  const buildConversationSnapshot = useCallback((reason) => {
+    const currentWorkspace = workspaceRef.current;
+    const active = findConversation(currentWorkspace, currentWorkspace.activeConversationId);
+    if (!active) {
+      return null;
+    }
+
+    const now = Date.now();
+    const panelSnapshots = panelsRef.current.map((panel) => ({
+      id: panel.id,
+      title: panel.title,
+      cwd: panel.cwd,
+      backend: panel.backend,
+      status: panel.status,
+      x: panel.x,
+      y: panel.y,
+      width: panel.width,
+      height: panel.height,
+      transcript: transcriptsRef.current.get(panel.id) || ''
+    }));
+    const lastTranscript = panelSnapshots
+      .map((panel) => panel.transcript.trim().split(/\r?\n/).filter(Boolean).at(-1))
+      .find(Boolean);
+
+    return {
+      id: active.id,
+      title: active.title,
+      projectId: active.project?.id || active.projectId || null,
+      projectName: active.project?.name || active.projectName || null,
+      cwd: cwdRef.current,
+      createdAt: active.createdAt || now,
+      updatedAt: now,
+      reason,
+      inactivityMs: Math.max(0, now - lastActivityAt.current),
+      view: viewRef.current,
+      panelCount: panelSnapshots.length,
+      panels: panelSnapshots,
+      preview: lastTranscript || (panelSnapshots.length ? `${panelSnapshots.length} 个会话窗口` : '空会话'),
+      platform: appInfoRef.current?.platform || navigator.platform
+    };
+  }, []);
+
+  const saveActiveConversationSnapshot = useCallback(async (reason = 'idle') => {
+    if (snapshotSaving.current) {
+      return;
+    }
+
+    const snapshot = buildConversationSnapshot(reason);
+    if (!snapshot) {
+      return;
+    }
+
+    snapshotSaving.current = true;
+    try {
+      const result = await bridge.saveConversationSnapshot(snapshot);
+      updateConversationRecord({
+        ...snapshot,
+        snapshotPath: result.path,
+        savedAt: result.savedAt
+      });
+      showToast(`已缓存会话记录：${snapshot.title}`);
+    } catch (error) {
+      showToast(`缓存会话记录失败：${error.message}`);
+    } finally {
+      snapshotSaving.current = false;
+    }
+  }, [buildConversationSnapshot, showToast, updateConversationRecord]);
+
+  const markActivity = useCallback(() => {
+    lastActivityAt.current = Date.now();
+    window.clearTimeout(idleSaveTimer.current);
+    if (workspaceRef.current.activeConversationId) {
+      idleSaveTimer.current = window.setTimeout(() => {
+        saveActiveConversationSnapshot('idle').catch((error) => showToast(error.message));
+      }, conversationIdleDelayMs);
+    }
+  }, [saveActiveConversationSnapshot, showToast]);
+
+  useEffect(() => () => window.clearTimeout(idleSaveTimer.current), []);
+
   const registerTerminal = useCallback((id, instance) => {
     terminalInstances.current.set(id, instance);
     return () => terminalInstances.current.delete(id);
@@ -664,6 +1111,8 @@ export default function App() {
   useEffect(() => {
     const offData = bridge.onTerminalData(({ id, data }) => {
       terminalInstances.current.get(id)?.term.write(data);
+      transcriptsRef.current.set(id, trimTranscript(`${transcriptsRef.current.get(id) || ''}${data}`));
+      markActivity();
     });
 
     const offExit = bridge.onTerminalExit(({ id, exitCode, signal }) => {
@@ -675,13 +1124,14 @@ export default function App() {
       setPanels((current) => current.map((panel) => (
         panel.id === id ? { ...panel, status: 'exit' } : panel
       )));
+      markActivity();
     });
 
     return () => {
       offData();
       offExit();
     };
-  }, []);
+  }, [markActivity]);
 
   const getViewportRect = useCallback(() => viewportRef.current.getBoundingClientRect(), []);
 
@@ -702,23 +1152,74 @@ export default function App() {
     window.requestAnimationFrame(() => terminalInstances.current.get(id)?.term.focus());
   }, []);
 
+  const createConversationRecord = useCallback((project = null) => {
+    const now = Date.now();
+    const projectLabel = project ? project.name : '临时';
+    return {
+      id: createLocalId('conversation'),
+      title: `${projectLabel}对话 ${new Date(now).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`,
+      projectId: project?.id || null,
+      projectName: project?.name || null,
+      cwd: project?.path || cwdRef.current || appInfoRef.current?.homeDir || '',
+      createdAt: now,
+      updatedAt: now,
+      panelCount: 0,
+      panels: [],
+      preview: '尚未缓存历史记录',
+      view: { x: 80, y: 80, scale: 1 }
+    };
+  }, []);
+
+  const startNewConversation = useCallback(async (projectId = workspaceRef.current.activeProjectId, options = {}) => {
+    const currentWorkspace = workspaceRef.current;
+    const project = options.temporary ? null : currentWorkspace.projects.find((item) => item.id === projectId) || null;
+
+    if (panelsRef.current.length > 0 && !window.confirm('开始新对话会关闭当前画布中的运行会话，确认继续？')) {
+      return null;
+    }
+
+    await bridge.killAllTerminals();
+    transcriptsRef.current.clear();
+    setPanels([]);
+    setActiveId(null);
+    const record = createConversationRecord(project);
+    setView(record.view);
+    setCwd(record.cwd || appInfoRef.current?.homeDir || '');
+    updateConversationRecord(record);
+    markActivity();
+    showToast(project ? `已创建 ${project.name} 的新对话` : '已创建临时对话');
+    return record;
+  }, [createConversationRecord, markActivity, showToast, updateConversationRecord]);
+
   const createTerminal = useCallback(async (slot = {}) => {
     const center = viewportCenterOnCanvas();
     const width = Number.isFinite(slot.width) ? slot.width : 640;
     const height = Number.isFinite(slot.height) ? slot.height : 380;
-    const title = slot.title || `cmd ${panelsRef.current.length + 1}`;
+    const title = slot.title || `会话 ${panelsRef.current.length + 1}`;
     const x = Number.isFinite(slot.x) ? slot.x : center.x - width / 2;
     const y = Number.isFinite(slot.y) ? slot.y : center.y - height / 2;
+
+    let conversationId = workspaceRef.current.activeConversationId;
+    if (!conversationId) {
+      const record = await startNewConversation(null, { temporary: true });
+      if (!record) {
+        return null;
+      }
+      conversationId = record.id;
+    }
+
     const meta = await bridge.createTerminal({
       title,
-      cwd: slot.cwd || cwd,
+      cwd: slot.cwd || cwdRef.current,
       cols: 100,
-      rows: 28
+      rows: 28,
+      initialCommand: slot.initialCommand || 'codex'
     });
 
     nextZIndex.current += 1;
     const panel = {
       id: meta.id,
+      conversationId,
       title: meta.title,
       cwd: meta.cwd,
       backend: meta.backend,
@@ -730,11 +1231,13 @@ export default function App() {
       status: 'running'
     };
 
+    transcriptsRef.current.set(meta.id, '');
     setPanels((current) => [...current, panel]);
     setActiveId(meta.id);
+    markActivity();
     window.requestAnimationFrame(() => terminalInstances.current.get(meta.id)?.term.focus());
     return panel;
-  }, [cwd, viewportCenterOnCanvas]);
+  }, [markActivity, startNewConversation, viewportCenterOnCanvas]);
 
   const closeTerminal = useCallback(async (id) => {
     try {
@@ -743,11 +1246,13 @@ export default function App() {
       // It may already be gone.
     }
 
+    transcriptsRef.current.delete(id);
     setPanels((current) => current.filter((panel) => panel.id !== id));
     if (activeIdRef.current === id) {
       setActiveId(null);
     }
-  }, []);
+    markActivity();
+  }, [markActivity]);
 
   const restartTerminal = useCallback(async (id) => {
     const panel = panelsRef.current.find((item) => item.id === id);
@@ -770,7 +1275,13 @@ export default function App() {
     setPanels((current) => current.map((panel) => (
       panel.id === id ? { ...panel, ...patch } : panel
     )));
-  }, []);
+    markActivity();
+  }, [markActivity]);
+
+  const handleTerminalInput = useCallback((id, data) => {
+    transcriptsRef.current.set(id, trimTranscript(`${transcriptsRef.current.get(id) || ''}${data}`));
+    markActivity();
+  }, [markActivity]);
 
   const arrangeGrid = useCallback(() => {
     const records = panelsRef.current;
@@ -796,7 +1307,8 @@ export default function App() {
       width,
       height
     })));
-  }, [viewportCenterOnCanvas]);
+    markActivity();
+  }, [markActivity, viewportCenterOnCanvas]);
 
   const addGrid = useCallback(async () => {
     const center = viewportCenterOnCanvas();
@@ -818,23 +1330,114 @@ export default function App() {
         ...slot,
         width,
         height,
-        title: `cmd ${baseNumber + index + 1}`
+        title: `会话 ${baseNumber + index + 1}`
       });
     }
   }, [createTerminal, viewportCenterOnCanvas]);
 
   const killAll = useCallback(async () => {
     await bridge.killAllTerminals();
+    transcriptsRef.current.clear();
     setPanels([]);
     setActiveId(null);
-  }, []);
+    markActivity();
+  }, [markActivity]);
 
   const chooseDirectory = useCallback(async () => {
     const selected = await bridge.chooseDirectory();
     if (selected) {
       setCwd(selected);
+      markActivity();
     }
-  }, []);
+  }, [markActivity]);
+
+  const addProject = useCallback(async () => {
+    const selected = await bridge.chooseDirectory();
+    if (!selected) {
+      return;
+    }
+
+    const now = Date.now();
+    const existing = workspaceRef.current.projects.find((project) => project.path.toLowerCase() === selected.toLowerCase());
+    if (existing) {
+      const nextWorkspace = { ...workspaceRef.current, activeProjectId: existing.id, activeConversationId: null };
+      workspaceRef.current = nextWorkspace;
+      setWorkspace(nextWorkspace);
+      setCwd(existing.path);
+      showToast(`已切换到项目：${existing.name}`);
+      return;
+    }
+
+    const project = {
+      id: createLocalId('project'),
+      name: deriveNameFromPath(selected),
+      path: selected,
+      createdAt: now,
+      updatedAt: now,
+      conversations: []
+    };
+
+    const nextWorkspace = {
+      ...workspaceRef.current,
+      activeProjectId: project.id,
+      activeConversationId: null,
+      projects: [project, ...workspaceRef.current.projects]
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    setCwd(project.path);
+    showToast(`已新增项目：${project.name}`);
+  }, [showToast]);
+
+  const selectProject = useCallback((projectId) => {
+    const project = workspaceRef.current.projects.find((item) => item.id === projectId);
+    if (!project) {
+      return;
+    }
+    const nextWorkspace = { ...workspaceRef.current, activeProjectId: project.id, activeConversationId: null };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    setCwd(project.path);
+    showToast(`当前项目：${project.name}`);
+  }, [showToast]);
+
+  const selectConversation = useCallback(async (conversation) => {
+    if (!conversation) {
+      return;
+    }
+
+    if (panelsRef.current.length > 0 && !window.confirm('打开历史记录会关闭当前画布中的运行会话，确认继续？')) {
+      return;
+    }
+
+    await bridge.killAllTerminals();
+    transcriptsRef.current.clear();
+    setPanels([]);
+    setActiveId(null);
+    const nextWorkspace = {
+      ...workspaceRef.current,
+      activeProjectId: conversation.projectId || null,
+      activeConversationId: conversation.id
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    setCwd(conversation.cwd || appInfoRef.current?.homeDir || '');
+    setView(conversation.view || { x: 80, y: 80, scale: 1 });
+
+    const savedPanels = Array.isArray(conversation.panels) ? conversation.panels : [];
+    for (const [index, panel] of savedPanels.entries()) {
+      await createTerminal({
+        title: panel.title || `会话 ${index + 1}`,
+        cwd: panel.cwd || conversation.cwd,
+        x: Number.isFinite(panel.x) ? panel.x : 80 + index * 42,
+        y: Number.isFinite(panel.y) ? panel.y : 80 + index * 42,
+        width: Number.isFinite(panel.width) ? panel.width : 640,
+        height: Number.isFinite(panel.height) ? panel.height : 380
+      });
+    }
+
+    showToast(`已打开历史：${conversation.title}`);
+  }, [createTerminal, showToast]);
 
   const zoomAt = useCallback((clientX, clientY, nextScale) => {
     const rect = getViewportRect();
@@ -850,7 +1453,8 @@ export default function App() {
         y: clientY - rect.top - before.y * scale
       };
     });
-  }, [getViewportRect]);
+    markActivity();
+  }, [getViewportRect, markActivity]);
 
   const startViewportPan = (event) => {
     if (event.button !== 0 || closestElement(event.target, '.terminal-panel')) {
@@ -876,6 +1480,7 @@ export default function App() {
 
     const onPointerUp = () => {
       setPanning(false);
+      markActivity();
       document.removeEventListener('pointermove', onPointerMove);
       document.removeEventListener('pointerup', onPointerUp);
     };
@@ -896,7 +1501,21 @@ export default function App() {
       x: current.x - event.deltaX,
       y: current.y - event.deltaY
     }));
+    markActivity();
   };
+
+  const toggleSidebar = useCallback(() => {
+    const nextWorkspace = {
+      ...workspaceRef.current,
+      sidebarCollapsed: !workspaceRef.current.sidebarCollapsed
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+  }, []);
+
+  const openConversationFolder = useCallback(() => {
+    bridge.openConversationFolder().catch((error) => showToast(`打开会话记录目录失败：${error.message}`));
+  }, [showToast]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -926,149 +1545,171 @@ export default function App() {
 
   const minorGrid = 48 * view.scale;
   const majorGrid = minorGrid * 4;
+  const activeTitle = activeConversation?.title || (activeProject ? `${activeProject.name} 工作区` : '临时对话');
 
   return (
     <TooltipProvider>
-      <div className="app-shell">
-        <header className="topbar">
-          <div className="flex min-w-[148px] items-center gap-2.5 font-bold tracking-normal">
-            <span className="brand-mark" />
-            <span>CLI in One</span>
-          </div>
+      <div className={cn('app-shell', workspace.sidebarCollapsed && 'sidebar-is-collapsed')}>
+        <WorkspaceSidebar
+          workspace={workspace}
+          activeProject={activeProject}
+          activeConversationId={workspace.activeConversationId}
+          appInfo={appInfo}
+          onAddProject={addProject}
+          onNewConversation={() => startNewConversation().catch((error) => showToast(error.message))}
+          onOpenCodexConfig={() => setCodexOpen(true)}
+          onOpenConversationFolder={openConversationFolder}
+          onSelectConversation={(conversation) => selectConversation(conversation).catch((error) => showToast(error.message))}
+          onSelectProject={selectProject}
+          onStartTemporaryConversation={() => startNewConversation(null, { temporary: true }).catch((error) => showToast(error.message))}
+          onToggleCollapsed={toggleSidebar}
+        />
 
-          <IconButton
-            id="toggleTheme"
-            label={theme === 'dark' ? '切换浅色模式' : '切换深色模式'}
-            onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
-          >
-            {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </IconButton>
+        <div className="main-shell">
+          <header className="topbar">
+            <div className="min-w-[160px] max-w-[260px]">
+              <div className="truncate text-sm font-semibold">{activeTitle}</div>
+              <div className="truncate text-xs text-muted-foreground">
+                {activeProject ? activeProject.path : '不绑定项目'}
+              </div>
+            </div>
 
-          <Separator orientation="vertical" className="h-8" />
+            <Separator orientation="vertical" className="h-8" />
 
-          <div className="flex shrink-0 items-center gap-2">
-            <Button id="addTerminal" variant="primary" onClick={() => createTerminal().catch((error) => showToast(error.message))}>
-              <Plus className="h-4 w-4" />
-              CMD
-            </Button>
-            <Button id="addGrid" onClick={addGrid}>
-              <Grid2X2 className="h-4 w-4" />
-              2x2
-            </Button>
-          </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button id="addTerminal" variant="primary" onClick={() => createTerminal().catch((error) => showToast(error.message))}>
+                <Plus className="h-4 w-4" />
+                新增会话
+              </Button>
+              <Button id="addGrid" onClick={addGrid}>
+                <Grid2X2 className="h-4 w-4" />
+                2x2
+              </Button>
+            </div>
 
-          <Separator orientation="vertical" className="h-8" />
+            <Separator orientation="vertical" className="h-8" />
 
-          <div className="flex h-10 min-w-[270px] flex-1 items-center gap-2 rounded-lg border border-border bg-card px-2 pl-3">
-            <Label htmlFor="cwdInput" className="shrink-0 text-sm text-muted-foreground">
-              目录
-            </Label>
-            <Input
-              id="cwdInput"
-              className="h-8 min-w-[70px] border-0 bg-transparent px-1 font-mono text-xs shadow-none focus-visible:ring-0"
-              value={cwd}
-              spellCheck={false}
-              onChange={(event) => setCwd(event.target.value)}
-            />
-            <IconButton id="browseDir" label="选择目录" onClick={chooseDirectory}>
-              <FolderOpen className="h-4 w-4" />
-            </IconButton>
-          </div>
-
-          <Separator orientation="vertical" className="h-8" />
-
-          <div className="flex shrink-0 items-center gap-1.5">
-            <IconButton id="zoomOut" label="缩小" onClick={() => {
-              const rect = getViewportRect();
-              zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, view.scale / 1.16);
-            }}>
-              <Minus className="h-4 w-4" />
-            </IconButton>
-            <Button id="resetView" onClick={() => setView({ x: 80, y: 80, scale: 1 })}>
-              <RotateCcw className="h-4 w-4" />
-              {Math.round(view.scale * 100)}%
-            </Button>
-            <IconButton id="zoomIn" label="放大" onClick={() => {
-              const rect = getViewportRect();
-              zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, view.scale * 1.16);
-            }}>
-              <ZoomIn className="h-4 w-4" />
-            </IconButton>
-          </div>
-
-          <Separator orientation="vertical" className="h-8" />
-
-          <div className="flex shrink-0 items-center gap-2">
-            <Button id="arrangeGrid" onClick={arrangeGrid}>
-              <LayoutGrid className="h-4 w-4" />
-              整理
-            </Button>
-            <Button id="openCodexConfig" onClick={() => setCodexOpen(true)}>
-              <Settings2 className="h-4 w-4" />
-              Codex
-            </Button>
-            <Button id="killAll" variant="destructive" onClick={killAll}>
-              <Trash2 className="h-4 w-4" />
-              全部关闭
-            </Button>
-          </div>
-
-          <Badge
-            id="runtimeStatus"
-            variant={appInfo?.ptyEnabled ? 'success' : 'outline'}
-            className="runtime-status min-w-[128px] justify-center truncate font-normal"
-            title={appInfo?.ptyError || appInfo?.defaultShell || ''}
-          >
-            {appInfo ? (appInfo.ptyEnabled ? 'ConPTY 已启用' : '管道模式') : '启动中'}
-          </Badge>
-        </header>
-
-        <main
-          ref={viewportRef}
-          id="viewport"
-          className={cn('viewport', panning && 'is-panning')}
-          tabIndex={0}
-          style={{
-            backgroundSize: `${majorGrid}px ${majorGrid}px, ${majorGrid}px ${majorGrid}px, ${minorGrid}px ${minorGrid}px, ${minorGrid}px ${minorGrid}px`,
-            backgroundPosition: `${view.x}px ${view.y}px`
-          }}
-          onPointerDown={startViewportPan}
-          onWheel={handleWheel}
-        >
-          <div
-            id="stage"
-            className="stage"
-            style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
-          >
-            {panels.map((panel) => (
-              <TerminalPanel
-                key={panel.id}
-                panel={panel}
-                active={panel.id === activeId}
-                scale={view.scale}
-                theme={theme}
-                onActivate={activatePanel}
-                onClose={closeTerminal}
-                onMove={updatePanel}
-                onResize={updatePanel}
-                onRestart={restartTerminal}
-                onTitleChange={(id, title) => updatePanel(id, { title: title.trim() || 'cmd' })}
-                registerTerminal={registerTerminal}
+            <div className="flex h-10 min-w-[250px] flex-1 items-center gap-2 rounded-lg border border-border bg-card px-2 pl-3">
+              <Label htmlFor="cwdInput" className="shrink-0 text-sm text-muted-foreground">
+                目录
+              </Label>
+              <Input
+                id="cwdInput"
+                className="h-8 min-w-[70px] border-0 bg-transparent px-1 font-mono text-xs shadow-none focus-visible:ring-0"
+                value={cwd}
+                spellCheck={false}
+                onChange={(event) => {
+                  setCwd(event.target.value);
+                  markActivity();
+                }}
               />
-            ))}
-          </div>
+              <IconButton id="browseDir" label="选择目录" onClick={chooseDirectory}>
+                <FolderOpen className="h-4 w-4" />
+              </IconButton>
+            </div>
 
-          {panels.length === 0 && (
-            <Card id="emptyState" className="pointer-events-none absolute left-1/2 top-1/2 w-[min(380px,calc(100%-48px))] -translate-x-1/2 -translate-y-1/2 border-border/70 bg-card/72 text-center shadow-2xl backdrop-blur">
-              <CardContent className="p-5">
-                <div className="flex items-center justify-center gap-2 text-xl font-bold text-foreground">
-                  <SquareTerminal className="h-6 w-6 text-emerald-300" />
-                  添加 CMD 开始
-                </div>
-              </CardContent>
-            </Card>
-          )}
-        </main>
+            <Separator orientation="vertical" className="h-8" />
+
+            <div className="flex shrink-0 items-center gap-1.5">
+              <IconButton id="zoomOut" label="缩小" onClick={() => {
+                const rect = getViewportRect();
+                zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, view.scale / 1.16);
+              }}>
+                <Minus className="h-4 w-4" />
+              </IconButton>
+              <Button id="resetView" onClick={() => setView({ x: 80, y: 80, scale: 1 })}>
+                <RotateCcw className="h-4 w-4" />
+                {Math.round(view.scale * 100)}%
+              </Button>
+              <IconButton id="zoomIn" label="放大" onClick={() => {
+                const rect = getViewportRect();
+                zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, view.scale * 1.16);
+              }}>
+                <ZoomIn className="h-4 w-4" />
+              </IconButton>
+            </div>
+
+            <Separator orientation="vertical" className="h-8" />
+
+            <div className="flex shrink-0 items-center gap-2">
+              <Button id="arrangeGrid" onClick={arrangeGrid}>
+                <LayoutGrid className="h-4 w-4" />
+                整理
+              </Button>
+              <IconButton
+                id="toggleTheme"
+                label={theme === 'dark' ? '切换浅色模式' : '切换深色模式'}
+                onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
+              >
+                {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </IconButton>
+              <Button id="killAll" variant="destructive" onClick={killAll}>
+                <Trash2 className="h-4 w-4" />
+                全部关闭
+              </Button>
+            </div>
+
+            <Badge
+              id="runtimeStatus"
+              variant={appInfo?.ptyEnabled ? 'success' : 'outline'}
+              className="runtime-status min-w-[116px] justify-center truncate font-normal"
+              title={appInfo?.ptyError || appInfo?.defaultShell || ''}
+            >
+              {appInfo ? (appInfo.ptyEnabled ? 'ConPTY' : '管道模式') : '启动中'}
+            </Badge>
+          </header>
+
+          <main
+            ref={viewportRef}
+            id="viewport"
+            className={cn('viewport', panning && 'is-panning')}
+            tabIndex={0}
+            style={{
+              backgroundSize: `${majorGrid}px ${majorGrid}px, ${majorGrid}px ${majorGrid}px, ${minorGrid}px ${minorGrid}px, ${minorGrid}px ${minorGrid}px`,
+              backgroundPosition: `${view.x}px ${view.y}px`
+            }}
+            onPointerDown={startViewportPan}
+            onWheel={handleWheel}
+          >
+            <div
+              id="stage"
+              className="stage"
+              style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
+            >
+              {panels.map((panel) => (
+                <TerminalPanel
+                  key={panel.id}
+                  panel={panel}
+                  active={panel.id === activeId}
+                  scale={view.scale}
+                  theme={theme}
+                  onActivate={activatePanel}
+                  onClose={closeTerminal}
+                  onMove={updatePanel}
+                  onResize={updatePanel}
+                  onRestart={restartTerminal}
+                  onTerminalInput={handleTerminalInput}
+                  onTitleChange={(id, title) => updatePanel(id, { title: title.trim() || '会话' })}
+                  registerTerminal={registerTerminal}
+                />
+              ))}
+            </div>
+
+            {panels.length === 0 && (
+              <Card id="emptyState" className="pointer-events-none absolute left-1/2 top-1/2 w-[min(420px,calc(100%-48px))] -translate-x-1/2 -translate-y-1/2 border-border/70 bg-card/80 text-center shadow-2xl backdrop-blur">
+                <CardContent className="p-5">
+                  <div className="flex items-center justify-center gap-2 text-xl font-bold text-foreground">
+                    <SquareTerminal className="h-6 w-6 text-primary" />
+                    新增会话开始
+                  </div>
+                  <div className="mt-2 text-sm text-muted-foreground">
+                    新会话会自动在当前目录启动 codex。
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </main>
+        </div>
       </div>
 
       <CodexConfigDialog open={codexOpen} onOpenChange={setCodexOpen} showToast={showToast} />

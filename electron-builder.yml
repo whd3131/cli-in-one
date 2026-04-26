@@ -35,3 +35,18 @@ nsis:
 
 portable:
   artifactName: cli-in-one-${version}-windows-${arch}-portable.${ext}
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+
+dmg:
+  artifactName: cli-in-one-${version}-mac-${arch}.${ext}

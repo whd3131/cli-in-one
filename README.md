@@ -26,9 +26,10 @@ npm run dev:renderer
 npm run build
 npm run pack
 npm run dist:win
+npm run dist:mac
 ```
 
-`npm run pack` creates an unpacked Electron app for local inspection. `npm run dist:win` creates Windows release artifacts in `release/`.
+`npm run pack` creates an unpacked Electron app for local inspection. `npm run dist:win` creates Windows release artifacts in `release/`. `npm run dist:mac` creates macOS artifacts when run on macOS.
 
 ## What it does
 
@@ -63,6 +64,7 @@ This repository is ready for GitHub open-source publishing:
 - `CI` runs on pull requests and pushes to `main`.
 - `Release` uses Release Please to create version/changelog pull requests from Conventional Commits.
 - Merging the Release Please pull request creates a GitHub Release and uploads Windows installer artifacts.
+- The same release workflow also builds macOS DMG/ZIP artifacts on `macos-latest`.
 - `Release Artifacts` can rebuild and upload files for an existing tag.
 - Dependabot checks npm and GitHub Actions dependencies weekly.
 

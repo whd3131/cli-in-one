@@ -19,7 +19,23 @@ const sessions = new Map();
 let mainWindow = null;
 
 function getDefaultShell() {
-  return process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
+  if (process.platform === 'win32') {
+    return process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
+  }
+
+  if (process.platform === 'darwin') {
+    return process.env.SHELL || '/bin/zsh';
+  }
+
+  return process.env.SHELL || '/bin/bash';
+}
+
+function getDefaultShellArgs() {
+  if (process.platform === 'win32') {
+    return ['/K', 'chcp 65001 >NUL'];
+  }
+
+  return [];
 }
 
 function getCodexConfigDir() {
@@ -32,6 +48,10 @@ function getCodexConfigPath() {
 
 function getCodexAuthPath() {
   return path.join(getCodexConfigDir(), 'auth.json');
+}
+
+function getConversationStorageDir() {
+  return path.join(app.getPath('userData'), '.conversation');
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -71,10 +91,13 @@ function createTerminalSession(webContents, options = {}) {
   const rows = clampNumber(options.rows, 5, 200, 28);
   const cwd = resolveCwd(options.cwd);
   const shell = getDefaultShell();
-  const args = Array.isArray(options.args) ? options.args : ['/K', 'chcp 65001 >NUL'];
+  const args = Array.isArray(options.args) ? options.args : getDefaultShellArgs();
+  const initialCommand = typeof options.initialCommand === 'string' && options.initialCommand.trim()
+    ? options.initialCommand.trim()
+    : '';
   const title = typeof options.title === 'string' && options.title.trim()
     ? options.title.trim()
-    : `cmd ${sessions.size + 1}`;
+    : `会话 ${sessions.size + 1}`;
 
   const meta = {
     id,
@@ -82,6 +105,7 @@ function createTerminalSession(webContents, options = {}) {
     cwd,
     shell,
     backend: pty ? 'conpty' : 'pipe',
+    initialCommand,
     createdAt: Date.now()
   };
 
@@ -159,7 +183,38 @@ function createTerminalSession(webContents, options = {}) {
     });
   }
 
+  if (initialCommand) {
+    setTimeout(() => {
+      const session = sessions.get(id);
+      if (session) {
+        writeToSessionProcess(session, `${initialCommand}\r`);
+      }
+    }, process.platform === 'win32' ? 450 : 300);
+  }
+
   return meta;
+}
+
+function writeToSessionProcess(session, data) {
+  if (!session || typeof data !== 'string') {
+    return false;
+  }
+
+  try {
+    if (session.backend === 'conpty') {
+      session.process.write(data);
+      return true;
+    }
+
+    if (session.process.stdin && session.process.stdin.writable) {
+      session.process.stdin.write(data);
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
 }
 
 function killSession(id) {
@@ -328,6 +383,83 @@ async function writeCodexFileText(kind, content) {
   };
 }
 
+function sanitizeFilePart(value, fallback = 'conversation') {
+  const text = String(value || fallback)
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+
+  return (text || fallback).slice(0, 80);
+}
+
+function normalizeConversationSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    throw new Error('会话快照必须是对象。');
+  }
+
+  const id = typeof snapshot.id === 'string' && snapshot.id.trim()
+    ? snapshot.id.trim()
+    : crypto.randomUUID();
+  const title = typeof snapshot.title === 'string' && snapshot.title.trim()
+    ? snapshot.title.trim()
+    : '未命名会话';
+
+  return {
+    ...snapshot,
+    id,
+    title,
+    savedAt: Date.now(),
+    appVersion: app.getVersion()
+  };
+}
+
+async function saveConversationSnapshot(snapshot) {
+  const normalized = normalizeConversationSnapshot(snapshot);
+  const dir = getConversationStorageDir();
+  const timestamp = formatBackupTimestamp(new Date(normalized.savedAt));
+  const fileName = `${timestamp}-${sanitizeFilePart(normalized.projectName || 'temporary')}-${sanitizeFilePart(normalized.title)}-${sanitizeFilePart(normalized.id)}.json`;
+  const finalPath = path.join(dir, fileName);
+  const tempPath = path.join(dir, `${fileName}.${process.pid}.tmp`);
+  const content = `${JSON.stringify(normalized, null, 2)}\n`;
+
+  await fs.promises.mkdir(dir, { recursive: true });
+  await fs.promises.writeFile(tempPath, content, 'utf8');
+  await fs.promises.rename(tempPath, finalPath);
+  const stats = await fs.promises.stat(finalPath);
+
+  return {
+    dir,
+    path: finalPath,
+    savedAt: normalized.savedAt,
+    size: stats.size
+  };
+}
+
+async function listConversationSnapshots() {
+  const dir = getConversationStorageDir();
+  await fs.promises.mkdir(dir, { recursive: true });
+  const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  const files = await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .map(async (entry) => {
+      const filePath = path.join(dir, entry.name);
+      const stats = await fs.promises.stat(filePath);
+      return {
+        name: entry.name,
+        path: filePath,
+        size: stats.size,
+        modifiedAt: stats.mtimeMs
+      };
+    }));
+
+  return {
+    dir,
+    files: files.sort((a, b) => b.modifiedAt - a.modifiedAt)
+  };
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1480,
@@ -361,6 +493,7 @@ app.whenReady().then(() => {
   ipcMain.handle('app:info', () => ({
     appVersion: app.getVersion(),
     defaultShell: getDefaultShell(),
+    conversationDir: getConversationStorageDir(),
     homeDir: os.homedir(),
     ptyEnabled: Boolean(pty),
     ptyError: ptyLoadError ? ptyLoadError.message : null,
@@ -386,6 +519,24 @@ app.whenReady().then(() => {
 
   ipcMain.handle('codex-config:open-folder', async () => {
     const dir = getCodexConfigDir();
+    await fs.promises.mkdir(dir, { recursive: true });
+    const result = await electronShell.openPath(dir);
+    if (result) {
+      throw new Error(result);
+    }
+    return true;
+  });
+
+  ipcMain.handle('conversation:save-snapshot', (_event, snapshot) => {
+    return saveConversationSnapshot(snapshot);
+  });
+
+  ipcMain.handle('conversation:list-snapshots', () => {
+    return listConversationSnapshots();
+  });
+
+  ipcMain.handle('conversation:open-folder', async () => {
+    const dir = getConversationStorageDir();
     await fs.promises.mkdir(dir, { recursive: true });
     const result = await electronShell.openPath(dir);
     if (result) {
@@ -426,15 +577,7 @@ app.whenReady().then(() => {
       return;
     }
 
-    try {
-      if (session.backend === 'conpty') {
-        session.process.write(payload.data);
-      } else if (session.process.stdin && session.process.stdin.writable) {
-        session.process.stdin.write(payload.data);
-      }
-    } catch {
-      // The renderer will receive an exit event if the process has closed.
-    }
+    writeToSessionProcess(session, payload.data);
   });
 
   ipcMain.on('terminal:resize', (_event, payload) => {

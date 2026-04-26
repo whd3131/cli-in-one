@@ -11,6 +11,7 @@
     "pack": "npm run build:renderer && electron-builder --dir --publish never",
     "dist": "npm run build:renderer && electron-builder --publish never",
     "dist:win": "npm run build:renderer && electron-builder --win nsis portable --publish never",
+    "dist:mac": "npm run build:renderer && electron-builder --mac dmg zip --publish never",
     "smoke": "electron scripts/electron-smoke.js",
     "postinstall": "node scripts/check-native.js"
   },
