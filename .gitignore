@@ -7,6 +7,7 @@ release/
 .files/
 .history/
 .tmp-settings-home-*/
+.claude/
 codex-quick-profiles.json
 .DS_Store
 Thumbs.db

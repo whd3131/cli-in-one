@@ -3,19 +3,17 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import {
+  Bot,
   Check,
   ChevronDown,
   ChevronRight,
-  Copy,
   Cpu,
-  Download,
   ExternalLink,
-  File,
-  Folder,
   FolderOpen,
   FolderPlus,
   GripVertical,
   Grid2X2,
+  ImagePlus,
   Languages,
   LayoutGrid,
   Maximize2,
@@ -26,14 +24,14 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  PanelRightClose,
-  PanelRightOpen,
   Pin,
+  Play,
   Plus,
   RefreshCw,
   RotateCcw,
   Save,
   Settings2,
+  Sparkles,
   SquareTerminal,
   Sun,
   Trash2,
@@ -43,12 +41,16 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { FloatingCommandDock } from '@/components/FloatingCommandDock';
+import { ImageGenerationCanvasPage } from '@/components/ImageGenerationCanvasPage';
+import { SessionReviewSidebar } from '@/components/SessionReviewSidebar';
+import { WorkspaceTreeSidebar } from '@/components/WorkspaceTreeSidebar';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarSection } from '@/components/ui/sidebar';
 import { Textarea } from '@/components/ui/textarea';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Dialog,
   DialogContent,
@@ -59,15 +61,29 @@ import {
 } from '@/components/ui/dialog';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
+import {
+  formatCommandDockTaskTitle,
+  parseCommandDockDispatchTasks
+} from '@/lib/commandDockTasks';
+import {
+  appendSessionReviewOutput,
+  buildSessionReviewSummaryText
+} from '@/lib/sessionReview';
+import { getWorkspaceTreeInsertPath } from '@/lib/workspaceTree';
 import cliProviderRegistry from '../shared/cli-providers.json';
+import claudeIconSvg from '../../static/claude.svg?raw';
 import codexIconSvg from '../../static/codex-color.svg?raw';
 import cursorIconSvg from '../../static/cursor.svg?raw';
 
 const bridge = window.cliBridge;
 const settingsKey = 'cli-in-one.settings.v3';
 const workspaceKey = 'cli-in-one.workspace.v1';
+const agentsKey = 'cli-in-one.agents.v1';
 const appLogoUrl = `${import.meta.env.BASE_URL}logo.webp`;
+const imageApiHelpUrl = 'https://github.com/432539/gpt2api';
+const releasePageUrl = 'https://github.com/whd3131/cli-in-one/releases';
 const cliProviderIconMarkup = {
+  'claude-code': claudeIconSvg,
   codex: codexIconSvg,
   'cursor-agent': cursorIconSvg
 };
@@ -87,6 +103,11 @@ const memoryUsageWarningThreshold = 0.85;
 const memoryUsageCriticalThreshold = 0.95;
 const panelIdleThresholdMs = 12000;
 const panelActivityFlushMs = 120;
+const agentTaskSubmitDelayMs = 1800;
+const commandDockTaskSubmitDelayMs = 1800;
+const commandDockDispatchSparkleMs = 4600;
+const canvasArrangeDurationMs = 760;
+const canvasArrangeMaxStaggerMs = 180;
 const formSelectClassName = 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50';
 
 function createDefaultView() {
@@ -94,7 +115,7 @@ function createDefaultView() {
 }
 
 const cliProviders = Array.isArray(cliProviderRegistry) ? cliProviderRegistry : [];
-const sessionLauncherProviderOrder = ['codex', 'cursor-agent', 'shell'];
+const sessionLauncherProviderOrder = ['codex', 'claude-code', 'cursor-agent', 'shell'];
 const cliProviderMap = new Map(
   cliProviders
     .filter((provider) => provider && typeof provider.id === 'string' && provider.id.trim())
@@ -181,6 +202,26 @@ function getCliProviderTitleBase(provider, language) {
 
 function getCliProviderDescription(provider, language) {
   return getLocalizedCliValue(provider?.description, language, '');
+}
+
+function formatDispatchTargetList(targets, language) {
+  const separator = language === 'zh' ? '、' : ', ';
+  const names = [];
+  const seen = new Set();
+
+  for (const target of Array.isArray(targets) ? targets : []) {
+    const id = String(target?.id || '').trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+
+    seen.add(id);
+    names.push(String(target?.title || id).trim() || id);
+  }
+
+  const visibleNames = names.slice(0, 5);
+  const suffix = names.length > visibleNames.length ? ` +${names.length - visibleNames.length}` : '';
+  return `${visibleNames.join(separator)}${suffix}`;
 }
 
 function CliProviderIcon({ className, provider, providerId }) {
@@ -338,6 +379,8 @@ const terminalThemes = {
 
 const codexFileMeta = {
   auth: {
+    owner: 'codex',
+    kind: 'auth',
     title: 'Codex auth.json',
     valid: 'JSON 有效',
     invalid: 'JSON 格式错误',
@@ -345,11 +388,22 @@ const codexFileMeta = {
     saved: 'Codex auth.json 已保存'
   },
   config: {
+    owner: 'codex',
+    kind: 'config',
     title: 'Codex config.toml',
     valid: 'TOML 有效',
     invalid: 'TOML 格式错误',
     missing: '文件不存在，保存后创建',
     saved: 'Codex config.toml 已保存'
+  },
+  claudeSettings: {
+    owner: 'claude',
+    kind: 'settings',
+    title: 'Claude settings.json',
+    valid: 'JSON 有效',
+    invalid: 'JSON 格式错误',
+    missing: '文件不存在，保存有效 JSON 后创建',
+    saved: 'Claude settings.json 已保存'
   }
 };
 
@@ -369,12 +423,39 @@ const codexProfileDefaults = {
   wireApi: 'responses'
 };
 
+const claudeProfileDefaults = {
+  apiKey: '',
+  baseUrl: '',
+  effortLevel: '',
+  model: '',
+  permissionMode: ''
+};
+
+const imageApiConfigDefaults = {
+  apiKey: '',
+  apiKeySet: false,
+  baseUrl: '',
+  clearApiKey: false,
+  configured: false,
+  model: 'gpt-image-2',
+  n: 1,
+  path: '',
+  size: '1024x1024'
+};
+
 const approvalPolicyOptions = ['', 'untrusted', 'on-request', 'never'];
 const sandboxModeOptions = ['', 'read-only', 'workspace-write', 'danger-full-access'];
 const reasoningEffortOptions = ['minimal', 'low', 'medium', 'high', 'xhigh'];
 const wireApiOptions = ['responses', 'chat'];
 const quickModelOptions = ['gpt-5.5', 'gpt-5.4'];
+const claudeEffortLevelOptions = ['', 'low', 'medium', 'high', 'xhigh'];
+const claudePermissionModeOptions = ['', 'default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'];
+const quickClaudeModelOptions = ['sonnet', 'opus', 'haiku', 'opusplan', 'sonnet[1m]', 'opus[1m]'];
 const workspaceSkillPreviewCount = 6;
+const commandDockSkillMentionMaxItems = 18;
+const commandDockSkillMentionMenuWidth = 320;
+const commandDockSkillMentionMenuMaxHeight = 232;
+const sessionReviewFlushMs = 180;
 const workspaceSkillSources = [
   { id: 'cursor', directoryName: '.cursor', label: 'Cursor' },
   { id: 'claude', directoryName: '.claude', label: 'Claude' },
@@ -400,6 +481,8 @@ const messages = {
     canvasMode: '画布模式',
     canvasModeShared: '共享',
     canvasModeProject: '按项目',
+    canvasModeProjectTooltip: '每个项目保留独立画布，只显示当前项目关联的会话和说明框。',
+    canvasModeSharedTooltip: '所有项目共用同一个画布，方便跨项目同时查看和整理会话。',
     sharedWorkspace: '共享工作区',
     settings: '设置',
     closeAll: '全部关闭',
@@ -414,6 +497,34 @@ const messages = {
     launchFourSessions: '4 个会话',
     launchCustomCount: '自定义数量',
     addSession: '新增会话',
+    agents: 'Agents',
+    agentsDialogTitle: 'Agents',
+    agentsDialogDescription: '保存可复用的 agent instructions，并把任务分配给指定 CLI 自动启动。',
+    agentsEmpty: '还没有 Agent。先新增一个并填写 instructions。',
+    newAgent: '新增 Agent',
+    saveAgent: '保存 Agent',
+    deleteAgent: '删除 Agent',
+    agentName: 'Agent 名称',
+    agentNamePlaceholder: '例如：代码审查、测试修复、文档整理',
+    agentInstructions: 'Agent instructions',
+    agentInstructionsPlaceholder: '写下这个 Agent 每次执行任务时都要遵循的角色、约束和工作方式。',
+    agentAvatar: '头像',
+    uploadAgentAvatar: '上传头像',
+    removeAgentAvatar: '移除头像',
+    agentAvatarHint: '图片会保存到程序目录的 .cli-in-one/agent-avatars，保存 Agent 后生效。',
+    agentTask: '任务描述',
+    agentTaskPlaceholder: '输入这次要分配给 Agent 的具体任务。',
+    agentRun: '分配并启动',
+    agentRequired: '请先选择或新增一个 Agent。',
+    agentNameRequired: 'Agent 名称不能为空。',
+    agentTaskRequired: '任务描述不能为空。',
+    agentSaved: 'Agent 已保存：{name}',
+    agentDeleted: 'Agent 已删除：{name}',
+    agentStarted: '已启动 Agent：{name}',
+    agentAvatarSaved: '头像已上传，保存 Agent 后生效。',
+    agentAvatarSaveFailed: '头像上传失败：{message}',
+    agentAvatarInvalid: '请选择图片文件。',
+    agentDeleteConfirm: '确认删除 Agent“{name}”？',
     addCommandLine: '新增 CMD',
     addProjectDialogTitle: '新增项目',
     addProjectDialogDescription: '先配置项目目录和名称，确认后再加入侧边栏。',
@@ -446,6 +557,9 @@ const messages = {
     workspaceTree: '文件树',
     workspaceTreeOpen: '展开文件树',
     workspaceTreeClose: '收起文件树',
+    sessionReview: '审阅台',
+    sessionReviewOpen: '打开审阅台',
+    sessionReviewClose: '关闭审阅台',
     zoomOut: '缩小',
     zoomIn: '放大',
     zoomLevel: '缩放比例',
@@ -489,7 +603,7 @@ const messages = {
     floatingComposerTarget: '目标会话',
     floatingComposerUnavailable: '当前画布没有可接收输入的会话。',
     floatingComposerPlaceholder: '输入内容后发送到 {name}',
-    floatingComposerHint: 'Enter 发送，Shift+Enter 换行，粘贴或拖拽图片会保存到 .files',
+    floatingComposerHint: 'Enter 发送，Ctrl+Enter 分发任务，Shift+Enter 换行，粘贴或拖拽图片会保存到程序目录的 .files',
     floatingComposerCurrent: '当前',
     floatingComposerSend: '发送',
     floatingComposerCollapse: '收起快捷发送',
@@ -499,6 +613,67 @@ const messages = {
     floatingComposerImagesAdded: '已添加 {count} 张图片',
     floatingComposerImageMissingDir: '未找到可保存图片的目录。',
     floatingComposerImageSaveFailed: '图片保存失败：{message}',
+    imageGeneration: 'GPT 生图',
+    imageGenerationTitle: 'GPT 生图',
+    imageGenerationDescription: '使用已配置的图像 API 生成图片。',
+    imageGenerationClose: '关闭 GPT 生图',
+    imageGenerationBackToWorkspace: '返回工作区',
+    imageGenerationControls: '生成设置',
+    imageGenerationOpenSettings: '图像 API 设置',
+    imageGenerationToolsTitle: '图片工具页',
+    imageGenerationOpenToolsPage: '浏览器打开',
+    imageGenerationPrompt: '提示词',
+    imageGenerationPlaceholder: '描述要生成的图片。',
+    imageGenerationModel: '图片模型',
+    imageGenerationAspectRatio: '画面比例',
+    imageGenerationAspectAuto: '自动',
+    imageGenerationAspectSummary: '比例 {ratio}',
+    imageGenerationCurrentSize: '尺寸 {size}',
+    imageGenerationCustomAspect: '当前自定义比例：{ratio}',
+    imageGenerationCountLabel: '生成张数',
+    imageGenerationRequestedCount: '请求 {count} 张',
+    imageGenerationResetCanvas: '重置画布',
+    imageGenerationCanvasEmpty: '生成结果会出现在画布上。',
+    imageGenerationConfigLoading: '正在加载配置',
+    imageGenerationGenerate: '生成',
+    imageGenerationSubmitting: '提交中',
+    imageGenerationGenerating: '生成中',
+    imageGenerationResult: '生成图片',
+    imageGenerationCount: '{count} 张生成结果',
+    imageGenerationEmpty: '暂无生成结果。',
+    imageGenerationClear: '清空结果',
+    imageGenerationCopyReference: '复制图片引用',
+    imageGenerationOpenFile: '打开图片',
+    imageGenerationCopied: '图片引用已复制。',
+    imageGenerationFileUnavailable: '图片不可用',
+    imageGenerationGenerated: '已生成 {count} 张图片',
+    imageGenerationTaskSubmitted: '生图任务已提交。',
+    imageGenerationTaskPending: '生成中',
+    imageGenerationTaskFailedTitle: '生成失败',
+    imageGenerationFailed: '生成图片失败：{message}',
+    imageGenerationNoLocalPath: '图像 API 没有返回本地图片路径。',
+    imageGenerationUnknownError: '未知错误',
+    floatingComposerDispatchTasks: '分发任务',
+    floatingComposerDispatchingTasks: '分发中',
+    floatingComposerDispatchTasksTitle: '按行分发任务：优先使用闲置会话，不够时自动新建会话（Ctrl+Enter）',
+    floatingComposerDispatchEmpty: '先在快捷发送里按行写任务。',
+    floatingComposerDispatchDone: '已分发 {count} 个任务，复用 {reused} 个闲置会话，新建 {created} 个会话。目标：{targets}',
+    floatingComposerDispatchFailed: '任务分发失败：{message}',
+    quickPrompts: '常用 prompt',
+    quickPromptDefaultName: '常用 prompt',
+    quickPromptSave: '保存 prompt',
+    quickPromptUse: '插入常用 prompt：{name}',
+    quickPromptDelete: '删除常用 prompt',
+    quickPromptNamePrompt: '输入常用 prompt 名称',
+    quickPromptNameRequired: '常用 prompt 名称不能为空。',
+    quickPromptContentRequired: '先输入要保存的 prompt。',
+    quickPromptSaved: '已保存常用 prompt：{name}',
+    quickPromptDeleted: '已删除常用 prompt：{name}',
+    quickPromptInserted: '已插入常用 prompt：{name}',
+    quickPromptDeleteConfirm: '确认删除常用 prompt「{name}」？',
+    quickPromptLoadFailed: '读取常用 prompt 失败：{message}',
+    quickPromptSaveFailed: '保存常用 prompt 失败：{message}',
+    quickPromptDeleteFailed: '删除常用 prompt 失败：{message}',
     sessionRuntime: '运行',
     sessionContext: '上下文',
     exportSession: '导出会话',
@@ -531,13 +706,52 @@ const messages = {
     wireApi: 'Wire API',
     quickProfile: '配置方案',
     currentCodexProfile: '当前 Codex 配置',
+    currentClaudeProfile: '当前 Claude Code 配置',
     saveQuickProfile: '保存方案',
     saveQuickProfileAs: '另存为',
     deleteQuickProfile: '删除方案',
     quickModel: '快速模型',
     quickModelHint: '点击按钮可快速填入常用模型，也可以继续手动输入自定义模型。',
-    rawCodexEditor: '原始文件编辑',
-    rawCodexEditorDescription: '这里可以直接修改并保存当前文件内容；快捷配置只是常用字段的便捷入口。',
+    claudeQuickConfig: 'Claude Code 快捷配置',
+    claudeApiKey: 'Anthropic API Key',
+    claudeBaseUrl: 'Anthropic Base URL',
+    claudeEffortLevel: '思考强度',
+    claudePermissionMode: '默认权限模式',
+    claudeQuickModel: 'Claude 快速模型',
+    claudeQuickModelHint: '点击按钮可快速填入 Claude Code 常用模型别名。',
+    imageApiConfig: '图像 API',
+    configFiles: '配置文件',
+    imageApiUrl: 'API URL',
+    imageApiModel: '图像模型',
+    imageApiSize: '尺寸',
+    imageApiCount: '数量',
+    imageApiKeySavedPlaceholder: '已保存，留空保持不变',
+    clearApiKey: '清除密钥',
+    saveImageApiConfig: '保存图像 API',
+    usageTracking: '用量与成本',
+    usageTrackingDescription: '基于本地终端输出估算 token；这不是供应商真实账单。',
+    usageSessions: '会话',
+    usageRuntime: '运行时长',
+    usageEstimatedTokens: '估算 Tokens',
+    usageEstimatedCost: '估算成本',
+    usageOutput: '终端输出',
+    usageRate: '单价',
+    usageRateHint: 'USD / 100 万估算 token',
+    saveUsageRates: '保存单价',
+    clearUsageRecords: '清空记录',
+    usageRecordsCleared: '用量记录已清空。',
+    usageRatesSaved: '用量单价已保存。',
+    usageTrackingLoaded: '用量记录已加载',
+    usageTrackingReadFailed: '读取用量记录失败：{message}',
+    usageTrackingDirty: '用量单价有未保存更改',
+    usageNoRecords: '暂无已结束会话记录。',
+    usageRecentSessions: '最近会话',
+    usageByCli: '按 CLI 汇总',
+    usageClearConfirm: '确认清空本地用量记录？单价配置会保留。',
+    imageApiHelp: '需要自建 OpenAI 兼容图像网关时，可参考 gpt2api；保存后把 API URL 填为你的 /v1 地址。',
+    imageApiHelpLink: '查看 gpt2api',
+    rawCodexEditor: 'CLI 配置文件编辑',
+    rawCodexEditorDescription: '这里可以直接修改并保存 Codex 或 Claude Code 的本地配置文件。',
     fastMode: 'Fast mode',
     requiresOpenaiAuth: '使用 OpenAI auth',
     disableResponseStorage: '禁用响应存储',
@@ -559,21 +773,33 @@ const messages = {
     skillsLoadFailed: '读取 skills 失败：{message}',
     skillsMoreFiles: '还有 {count} 个文件',
     skillsTruncated: '结果过多，已截断显示。',
+    floatingComposerSkillEmpty: '当前工作区没有可插入的 skill。',
+    floatingComposerSkillFile: '文件',
+    floatingComposerSkillDirectory: '目录',
+    floatingComposerSkillInserted: '已插入 Skill：{path}',
+    floatingComposerSkillNoMatch: '没有匹配的 skill。',
     currentVersion: '当前版本',
+    changelogTitle: 'GitHub Releases',
+    changelogLoading: '正在从 GitHub Releases 读取本版本更新…',
+    changelogMissing: 'GitHub Releases 中没有找到当前版本的 changelog。',
+    changelogReadFailed: '读取 GitHub Releases 失败：{message}',
+    changelogSourceGithub: 'GitHub Releases',
+    changelogSourceLocal: '本地备用',
+    openRelease: '打开 Release',
     localOnly: '完全本地',
     localData: '本地存储',
     localDataSummary: '应用偏好、项目列表、画布布局和导出记录都保存在当前设备。',
     appNetwork: '应用联网',
-    appNetworkSummary: '应用本身不发起联网请求，不上传会话内容，也不做云同步。',
+    appNetworkSummary: '点击版本号时会请求 GitHub Releases；使用图像 API 时会连接你配置的服务；应用不做云同步。',
     cliNetworkNotice: 'CLI 说明',
-    cliNetworkNoticeSummary: '终端里运行的 Codex、Cursor 或其他命令是否联网，取决于这些工具自身的行为和配置。',
+    cliNetworkNoticeSummary: '终端里运行的 Codex、Claude Code、Cursor 或其他命令是否联网，取决于这些工具自身的行为和配置。',
     modelUnset: '未设置模型',
     modelSwitched: '模型已切换为 {model}',
     modelSwitchFailed: '切换模型失败：{message}',
     backupHistory: '历史备份',
     noBackups: '暂无备份',
     restoreBackup: '恢复备份',
-    settingsDescription: '应用偏好和 Codex 配置文件。',
+    settingsDescription: '应用偏好、Codex 和 Claude Code 配置文件。',
     switchedProject: '当前项目：{name}',
     addedProject: '已新增项目：{name}',
     switchedExistingProject: '已切换到项目：{name}',
@@ -582,20 +808,29 @@ const messages = {
     switchedCanvasModeProject: '已切换到按项目画布',
     deleteProjectConfirm: '确认删除项目“{name}”？这只会从侧边栏移除项目，不会删除本地文件。',
     ptyFallback: '当前使用管道模式；安装 node-pty 成功后会自动切换到 ConPTY。',
+    configReadFailed: '读取配置失败：{message}',
     codexReadFailed: '读取 Codex 配置失败：{message}',
     codexProfileReadFailed: '读取 Codex 快捷配置失败：{message}',
     codexProfileSaved: 'Codex 快捷配置已保存。',
+    claudeProfileReadFailed: '读取 Claude Code 快捷配置失败：{message}',
+    claudeProfileSaved: 'Claude Code 快捷配置已保存。',
     reloadFailed: '刷新失败：{message}',
     saveFailed: '保存失败：{message}',
     backupListFailed: '读取备份失败：{message}',
     restoreFailed: '恢复失败：{message}',
     quickProfileStoreFailed: '读取快捷配置方案失败：{message}',
+    imageApiConfigLoaded: '图像 API 配置已加载',
+    imageApiConfigDirty: '图像 API 配置有未保存更改',
+    imageApiConfigSaved: '图像 API 配置已保存',
+    imageApiConfigReadFailed: '读取图像 API 配置失败：{message}',
+    openUrlFailed: '打开链接失败：{message}',
     openDirFailed: '打开目录失败：{message}',
     invalidNotSaved: '{name}，未保存。',
     unsavedCloseConfirm: '{name} 还没有保存，确认关闭？',
     switchDiscardConfirm: '切换文件会丢弃当前未保存更改，确认切换？',
     switchQuickProfileDiscardConfirm: '切换配置方案会丢弃当前快捷配置未保存更改，确认切换？',
     deleteQuickProfileConfirm: '确认删除配置方案“{name}”？这不会修改当前 Codex 配置文件。',
+    deleteClaudeQuickProfileConfirm: '确认删除配置方案“{name}”？这不会修改当前 Claude Code 配置文件。',
     reloadDiscardConfirm: '重新加载 {name} 会丢弃未保存更改，确认刷新？',
     restoreBackupConfirm: '确认用选中的历史备份覆盖当前 {name}？恢复前会先备份当前文件。',
     restoreBackupDirtyConfirm: '{name} 有未保存更改。确认用选中的历史备份覆盖，并丢弃未保存更改？恢复前会先备份当前文件。',
@@ -606,6 +841,7 @@ const messages = {
     quickConfigLoaded: '快捷配置已加载',
     quickConfigDirty: '快捷配置有未保存更改',
     newQuickProfile: '新配置方案',
+    newClaudeQuickProfile: '新 Claude Code 配置方案',
     quickProfileNamePrompt: '输入配置方案名称',
     quickProfileNameRequired: '配置方案名称不能为空。',
     quickProfileSaved: '配置方案已保存：{name}',
@@ -619,6 +855,10 @@ const messages = {
     workspaceTreeUnavailable: '当前没有可查看的工作区目录。',
     workspaceTreeFailed: '读取文件树失败：{message}',
     workspaceTreeCopied: '文件树已复制到剪贴板。',
+    workspaceTreeInsertToComposer: '插入到快捷发送',
+    workspaceTreeSelectFileHint: '选中文件后，可把路径插入到底部快捷发送',
+    workspaceTreeSelectedFile: '已选：{path}',
+    workspaceTreePathInserted: '已插入文件路径：{path}',
     workspaceTreeNoData: '还没有读取文件树。',
     workspaceTreeEmpty: '这个目录目前是空的。',
     workspaceTreeIgnored: '已跳过',
@@ -626,6 +866,22 @@ const messages = {
     workspaceTreeDepthLimit: '已达到深度限制',
     workspaceTreeOmitted: '省略 {count} 项',
     workspaceTreeUnreadable: '无法读取：{message}',
+    sessionReviewTitle: '会话审阅台',
+    sessionReviewDescription: '统一查看当前画布所有会话的最新输出。',
+    sessionReviewSummaryLine: '{total} 个会话，{running} 进行中，{idle} 闲置，{completed} 已完成，{error} 异常',
+    sessionReviewEmpty: '当前画布没有会话。',
+    sessionReviewLatestOutput: '最近输出',
+    sessionReviewNoOutput: '还没有输出记录。',
+    sessionReviewCopyAll: '复制汇总',
+    sessionReviewCopied: '会话汇总已复制。',
+    sessionReviewCopyOne: '复制这个会话',
+    sessionReviewExportAll: '导出全部',
+    sessionReviewExportedAll: '已导出 {count} 个会话。',
+    sessionReviewExportAllFailed: '批量导出失败：{message}',
+    sessionReviewOpenSession: '定位会话',
+    sessionReviewSetQuickTarget: '设为快捷发送目标',
+    sessionReviewUpdatedAt: '更新 {time}',
+    sessionReviewNeverUpdated: '未更新',
     apiKeyPlaceholder: 'sk-...',
     baseUrlPlaceholder: 'https://api.example.com/v1',
     modelPlaceholder: 'gpt-5.1-codex-max'
@@ -645,6 +901,8 @@ const messages = {
     canvasMode: 'Canvas mode',
     canvasModeShared: 'Shared',
     canvasModeProject: 'Per project',
+    canvasModeProjectTooltip: 'Each project keeps its own canvas and only shows sessions and frames linked to the active project.',
+    canvasModeSharedTooltip: 'All projects share one canvas, useful for viewing and arranging sessions across projects.',
     sharedWorkspace: 'Shared workspace',
     settings: 'Settings',
     closeAll: 'Close all',
@@ -659,6 +917,34 @@ const messages = {
     launchFourSessions: '4 sessions',
     launchCustomCount: 'Custom count',
     addSession: 'New session',
+    agents: 'Agents',
+    agentsDialogTitle: 'Agents',
+    agentsDialogDescription: 'Save reusable agent instructions, then assign a task to launch the selected CLI automatically.',
+    agentsEmpty: 'No agents yet. Create one and write its instructions.',
+    newAgent: 'New agent',
+    saveAgent: 'Save agent',
+    deleteAgent: 'Delete agent',
+    agentName: 'Agent name',
+    agentNamePlaceholder: 'For example: code review, test repair, docs cleanup',
+    agentInstructions: 'Agent instructions',
+    agentInstructionsPlaceholder: 'Write the role, constraints, and working style this agent should follow on every task.',
+    agentAvatar: 'Avatar',
+    uploadAgentAvatar: 'Upload avatar',
+    removeAgentAvatar: 'Remove avatar',
+    agentAvatarHint: 'Images are saved to the app .cli-in-one/agent-avatars folder and take effect after saving the agent.',
+    agentTask: 'Task description',
+    agentTaskPlaceholder: 'Describe the task to assign to this agent.',
+    agentRun: 'Assign and launch',
+    agentRequired: 'Select or create an agent first.',
+    agentNameRequired: 'Agent name is required.',
+    agentTaskRequired: 'Task description is required.',
+    agentSaved: 'Agent saved: {name}',
+    agentDeleted: 'Agent deleted: {name}',
+    agentStarted: 'Agent started: {name}',
+    agentAvatarSaved: 'Avatar uploaded. Save the agent to apply it.',
+    agentAvatarSaveFailed: 'Failed to upload avatar: {message}',
+    agentAvatarInvalid: 'Choose an image file.',
+    agentDeleteConfirm: 'Delete agent "{name}"?',
     addCommandLine: 'New CMD',
     addProjectDialogTitle: 'Add project',
     addProjectDialogDescription: 'Choose the project folder and name before adding it to the sidebar.',
@@ -691,6 +977,9 @@ const messages = {
     workspaceTree: 'File tree',
     workspaceTreeOpen: 'Open file tree',
     workspaceTreeClose: 'Close file tree',
+    sessionReview: 'Review',
+    sessionReviewOpen: 'Open review',
+    sessionReviewClose: 'Close review',
     zoomOut: 'Zoom out',
     zoomIn: 'Zoom in',
     zoomLevel: 'Zoom level',
@@ -734,7 +1023,7 @@ const messages = {
     floatingComposerTarget: 'Target session',
     floatingComposerUnavailable: 'No live session on this canvas can receive input.',
     floatingComposerPlaceholder: 'Type here and send to {name}',
-    floatingComposerHint: 'Enter to send, Shift+Enter for newline, paste or drop images to save them into .files',
+    floatingComposerHint: 'Enter to send, Ctrl+Enter to dispatch tasks, Shift+Enter for newline, paste or drop images to save them into the app .files folder',
     floatingComposerCurrent: 'Current',
     floatingComposerSend: 'Send',
     floatingComposerCollapse: 'Collapse quick send',
@@ -744,6 +1033,67 @@ const messages = {
     floatingComposerImagesAdded: 'Added {count} image(s)',
     floatingComposerImageMissingDir: 'No directory is available for saving images.',
     floatingComposerImageSaveFailed: 'Failed to save image: {message}',
+    imageGeneration: 'GPT Image',
+    imageGenerationTitle: 'GPT Image',
+    imageGenerationDescription: 'Generate images with the configured Image API.',
+    imageGenerationClose: 'Close GPT Image',
+    imageGenerationBackToWorkspace: 'Back to workspace',
+    imageGenerationControls: 'Generation settings',
+    imageGenerationOpenSettings: 'Image API settings',
+    imageGenerationToolsTitle: 'Image tools',
+    imageGenerationOpenToolsPage: 'Open in browser',
+    imageGenerationPrompt: 'Prompt',
+    imageGenerationPlaceholder: 'Describe the image to generate.',
+    imageGenerationModel: 'Image model',
+    imageGenerationAspectRatio: 'Aspect ratio',
+    imageGenerationAspectAuto: 'Auto',
+    imageGenerationAspectSummary: 'Ratio {ratio}',
+    imageGenerationCurrentSize: 'Size {size}',
+    imageGenerationCustomAspect: 'Current custom ratio: {ratio}',
+    imageGenerationCountLabel: 'Image count',
+    imageGenerationRequestedCount: 'Requested {count}',
+    imageGenerationResetCanvas: 'Reset canvas',
+    imageGenerationCanvasEmpty: 'Generated images will appear on the canvas.',
+    imageGenerationConfigLoading: 'Loading config',
+    imageGenerationGenerate: 'Generate',
+    imageGenerationSubmitting: 'Submitting',
+    imageGenerationGenerating: 'Generating',
+    imageGenerationResult: 'Generated image',
+    imageGenerationCount: '{count} generated image(s)',
+    imageGenerationEmpty: 'No generated images yet.',
+    imageGenerationClear: 'Clear results',
+    imageGenerationCopyReference: 'Copy image reference',
+    imageGenerationOpenFile: 'Open image',
+    imageGenerationCopied: 'Image reference copied.',
+    imageGenerationFileUnavailable: 'Image unavailable',
+    imageGenerationGenerated: 'Generated {count} image(s)',
+    imageGenerationTaskSubmitted: 'Image generation task submitted.',
+    imageGenerationTaskPending: 'Generating',
+    imageGenerationTaskFailedTitle: 'Generation failed',
+    imageGenerationFailed: 'Image generation failed: {message}',
+    imageGenerationNoLocalPath: 'The Image API did not return a local image path.',
+    imageGenerationUnknownError: 'Unknown error',
+    floatingComposerDispatchTasks: 'Dispatch tasks',
+    floatingComposerDispatchingTasks: 'Dispatching',
+    floatingComposerDispatchTasksTitle: 'Dispatch one task per line. Idle sessions are used first; new sessions are created when needed. (Ctrl+Enter)',
+    floatingComposerDispatchEmpty: 'Write one task per line in quick send first.',
+    floatingComposerDispatchDone: 'Dispatched {count} task(s), reused {reused} idle session(s), created {created} session(s). Targets: {targets}',
+    floatingComposerDispatchFailed: 'Task dispatch failed: {message}',
+    quickPrompts: 'Prompts',
+    quickPromptDefaultName: 'Saved prompt',
+    quickPromptSave: 'Save prompt',
+    quickPromptUse: 'Insert saved prompt: {name}',
+    quickPromptDelete: 'Delete saved prompt',
+    quickPromptNamePrompt: 'Enter saved prompt name',
+    quickPromptNameRequired: 'Saved prompt name is required.',
+    quickPromptContentRequired: 'Type a prompt before saving it.',
+    quickPromptSaved: 'Saved prompt: {name}',
+    quickPromptDeleted: 'Deleted prompt: {name}',
+    quickPromptInserted: 'Inserted prompt: {name}',
+    quickPromptDeleteConfirm: 'Delete saved prompt "{name}"?',
+    quickPromptLoadFailed: 'Failed to read saved prompts: {message}',
+    quickPromptSaveFailed: 'Failed to save prompt: {message}',
+    quickPromptDeleteFailed: 'Failed to delete prompt: {message}',
     sessionRuntime: 'Run',
     sessionContext: 'Context',
     exportSession: 'Export session',
@@ -776,13 +1126,52 @@ const messages = {
     wireApi: 'Wire API',
     quickProfile: 'Preset',
     currentCodexProfile: 'Current Codex config',
+    currentClaudeProfile: 'Current Claude Code config',
     saveQuickProfile: 'Save preset',
     saveQuickProfileAs: 'Save as',
     deleteQuickProfile: 'Delete preset',
     quickModel: 'Quick model',
     quickModelHint: 'Use the buttons to fill common models quickly, or keep typing a custom model manually.',
-    rawCodexEditor: 'Raw file editor',
-    rawCodexEditorDescription: 'Edit and save the current file directly here. Quick config is only a shortcut for common fields.',
+    claudeQuickConfig: 'Claude Code quick config',
+    claudeApiKey: 'Anthropic API key',
+    claudeBaseUrl: 'Anthropic Base URL',
+    claudeEffortLevel: 'Thinking effort',
+    claudePermissionMode: 'Default permission mode',
+    claudeQuickModel: 'Claude quick model',
+    claudeQuickModelHint: 'Use the buttons to fill common Claude Code model aliases quickly.',
+    imageApiConfig: 'Image API',
+    configFiles: 'Config files',
+    imageApiUrl: 'API URL',
+    imageApiModel: 'Image model',
+    imageApiSize: 'Size',
+    imageApiCount: 'Count',
+    imageApiKeySavedPlaceholder: 'Saved; leave blank to keep it',
+    clearApiKey: 'Clear key',
+    saveImageApiConfig: 'Save Image API',
+    usageTracking: 'Usage and cost',
+    usageTrackingDescription: 'Estimates tokens from local terminal output; this is not the provider bill.',
+    usageSessions: 'Sessions',
+    usageRuntime: 'Runtime',
+    usageEstimatedTokens: 'Estimated tokens',
+    usageEstimatedCost: 'Estimated cost',
+    usageOutput: 'Terminal output',
+    usageRate: 'Rate',
+    usageRateHint: 'USD / 1M estimated tokens',
+    saveUsageRates: 'Save rates',
+    clearUsageRecords: 'Clear records',
+    usageRecordsCleared: 'Usage records cleared.',
+    usageRatesSaved: 'Usage rates saved.',
+    usageTrackingLoaded: 'Usage records loaded',
+    usageTrackingReadFailed: 'Failed to read usage records: {message}',
+    usageTrackingDirty: 'Usage rates have unsaved changes',
+    usageNoRecords: 'No completed session records yet.',
+    usageRecentSessions: 'Recent sessions',
+    usageByCli: 'By CLI',
+    usageClearConfirm: 'Clear local usage records? Rate settings will be kept.',
+    imageApiHelp: 'For a self-hosted OpenAI-compatible image gateway, see gpt2api; then set API URL to your /v1 endpoint.',
+    imageApiHelpLink: 'View gpt2api',
+    rawCodexEditor: 'CLI config file editor',
+    rawCodexEditorDescription: 'Edit and save local Codex or Claude Code config files directly here.',
     fastMode: 'Fast mode',
     requiresOpenaiAuth: 'Use OpenAI auth',
     disableResponseStorage: 'Disable response storage',
@@ -804,21 +1193,33 @@ const messages = {
     skillsLoadFailed: 'Failed to read skills: {message}',
     skillsMoreFiles: '{count} more file(s)',
     skillsTruncated: 'Results were truncated.',
+    floatingComposerSkillEmpty: 'No insertable skill was found in this workspace.',
+    floatingComposerSkillFile: 'File',
+    floatingComposerSkillDirectory: 'Directory',
+    floatingComposerSkillInserted: 'Inserted Skill: {path}',
+    floatingComposerSkillNoMatch: 'No matching skill.',
     currentVersion: 'Current version',
+    changelogTitle: 'GitHub Releases',
+    changelogLoading: 'Loading this version from GitHub Releases...',
+    changelogMissing: 'No changelog entry was found for the current version in GitHub Releases.',
+    changelogReadFailed: 'Failed to read GitHub Releases: {message}',
+    changelogSourceGithub: 'GitHub Releases',
+    changelogSourceLocal: 'Local fallback',
+    openRelease: 'Open release',
     localOnly: 'Local only',
     localData: 'Local storage',
     localDataSummary: 'App preferences, project lists, canvas layouts, and exported records stay on this device.',
     appNetwork: 'App network',
-    appNetworkSummary: 'The app itself makes no network requests, uploads no session content, and does not sync to any cloud service.',
+    appNetworkSummary: 'Clicking the version requests GitHub Releases; using Image API connects to your configured service; the app does not sync data to any cloud service.',
     cliNetworkNotice: 'CLI notice',
-    cliNetworkNoticeSummary: 'Whether Codex, Cursor, or any other command inside the terminal connects to a network depends on that tool itself.',
+    cliNetworkNoticeSummary: 'Whether Codex, Claude Code, Cursor, or any other command inside the terminal connects to a network depends on that tool itself.',
     modelUnset: 'Model not set',
     modelSwitched: 'Model switched to {model}',
     modelSwitchFailed: 'Failed to switch model: {message}',
     backupHistory: 'Backups',
     noBackups: 'No backups',
     restoreBackup: 'Restore',
-    settingsDescription: 'App preferences and Codex config files.',
+    settingsDescription: 'App preferences, Codex config files, and Claude Code config files.',
     switchedProject: 'Current project: {name}',
     addedProject: 'Added project: {name}',
     switchedExistingProject: 'Switched to project: {name}',
@@ -827,20 +1228,29 @@ const messages = {
     switchedCanvasModeProject: 'Switched to per-project canvas',
     deleteProjectConfirm: 'Delete project "{name}"? This only removes it from the sidebar and will not delete local files.',
     ptyFallback: 'Pipe mode is active. Install node-pty successfully to use ConPTY.',
+    configReadFailed: 'Failed to read config: {message}',
     codexReadFailed: 'Failed to read Codex config: {message}',
     codexProfileReadFailed: 'Failed to read Codex quick config: {message}',
     codexProfileSaved: 'Codex quick config saved.',
+    claudeProfileReadFailed: 'Failed to read Claude Code quick config: {message}',
+    claudeProfileSaved: 'Claude Code quick config saved.',
     reloadFailed: 'Reload failed: {message}',
     saveFailed: 'Save failed: {message}',
     backupListFailed: 'Failed to read backups: {message}',
     restoreFailed: 'Restore failed: {message}',
     quickProfileStoreFailed: 'Failed to read quick presets: {message}',
+    imageApiConfigLoaded: 'Image API config loaded',
+    imageApiConfigDirty: 'Image API config has unsaved changes',
+    imageApiConfigSaved: 'Image API config saved',
+    imageApiConfigReadFailed: 'Failed to read Image API config: {message}',
+    openUrlFailed: 'Open link failed: {message}',
     openDirFailed: 'Open folder failed: {message}',
     invalidNotSaved: '{name}, not saved.',
     unsavedCloseConfirm: '{name} has unsaved changes. Close anyway?',
     switchDiscardConfirm: 'Switching files will discard unsaved changes. Continue?',
     switchQuickProfileDiscardConfirm: 'Switching presets will discard unsaved quick config changes. Continue?',
     deleteQuickProfileConfirm: 'Delete preset "{name}"? This will not modify current Codex config files.',
+    deleteClaudeQuickProfileConfirm: 'Delete preset "{name}"? This will not modify current Claude Code config files.',
     reloadDiscardConfirm: 'Reloading {name} will discard unsaved changes. Continue?',
     restoreBackupConfirm: 'Restore the selected backup over current {name}? The current file will be backed up first.',
     restoreBackupDirtyConfirm: '{name} has unsaved changes. Restore the selected backup and discard those changes? The current file will be backed up first.',
@@ -851,6 +1261,7 @@ const messages = {
     quickConfigLoaded: 'Quick config loaded',
     quickConfigDirty: 'Quick config has unsaved changes',
     newQuickProfile: 'New preset',
+    newClaudeQuickProfile: 'New Claude Code preset',
     quickProfileNamePrompt: 'Enter preset name',
     quickProfileNameRequired: 'Preset name is required.',
     quickProfileSaved: 'Preset saved: {name}',
@@ -864,6 +1275,10 @@ const messages = {
     workspaceTreeUnavailable: 'There is no workspace directory to inspect.',
     workspaceTreeFailed: 'Failed to read file tree: {message}',
     workspaceTreeCopied: 'File tree copied to clipboard.',
+    workspaceTreeInsertToComposer: 'Insert into quick send',
+    workspaceTreeSelectFileHint: 'Select a file to insert its path into quick send.',
+    workspaceTreeSelectedFile: 'Selected: {path}',
+    workspaceTreePathInserted: 'Inserted file path: {path}',
     workspaceTreeNoData: 'File tree has not been loaded yet.',
     workspaceTreeEmpty: 'This directory is currently empty.',
     workspaceTreeIgnored: 'Skipped',
@@ -871,6 +1286,22 @@ const messages = {
     workspaceTreeDepthLimit: 'Depth limit reached',
     workspaceTreeOmitted: '{count} omitted',
     workspaceTreeUnreadable: 'Unreadable: {message}',
+    sessionReviewTitle: 'Session review',
+    sessionReviewDescription: 'Review the latest output from every session on the current canvas.',
+    sessionReviewSummaryLine: '{total} sessions, {running} running, {idle} idle, {completed} completed, {error} error',
+    sessionReviewEmpty: 'There are no sessions on the current canvas.',
+    sessionReviewLatestOutput: 'Latest output',
+    sessionReviewNoOutput: 'No output has been captured yet.',
+    sessionReviewCopyAll: 'Copy summary',
+    sessionReviewCopied: 'Session summary copied.',
+    sessionReviewCopyOne: 'Copy this session',
+    sessionReviewExportAll: 'Export all',
+    sessionReviewExportedAll: 'Exported {count} session(s).',
+    sessionReviewExportAllFailed: 'Bulk export failed: {message}',
+    sessionReviewOpenSession: 'Focus session',
+    sessionReviewSetQuickTarget: 'Set quick-send target',
+    sessionReviewUpdatedAt: 'Updated {time}',
+    sessionReviewNeverUpdated: 'Not updated',
     apiKeyPlaceholder: 'sk-...',
     baseUrlPlaceholder: 'https://api.example.com/v1',
     modelPlaceholder: 'gpt-5.1-codex-max'
@@ -884,6 +1315,10 @@ function translate(language, key, values = {}) {
 
 function createEmptyCodexProfile() {
   return { ...codexProfileDefaults };
+}
+
+function createEmptyClaudeProfile() {
+  return { ...claudeProfileDefaults };
 }
 
 function normalizeCodexProfile(raw) {
@@ -908,12 +1343,60 @@ function normalizeCodexProfile(raw) {
   };
 }
 
+function normalizeClaudeProfile(raw) {
+  return {
+    ...claudeProfileDefaults,
+    ...(raw || {}),
+    effortLevel: claudeEffortLevelOptions.includes(raw?.effortLevel)
+      ? raw.effortLevel
+      : claudeProfileDefaults.effortLevel,
+    permissionMode: claudePermissionModeOptions.includes(raw?.permissionMode)
+      ? raw.permissionMode
+      : claudeProfileDefaults.permissionMode
+  };
+}
+
+function createEmptyImageApiConfig() {
+  return { ...imageApiConfigDefaults };
+}
+
+function normalizeImageApiConfig(raw) {
+  const count = Number.parseInt(raw?.n, 10);
+  return {
+    ...imageApiConfigDefaults,
+    ...(raw || {}),
+    apiKey: '',
+    apiKeySet: Boolean(raw?.apiKeySet),
+    clearApiKey: Boolean(raw?.clearApiKey),
+    configured: Boolean(raw?.configured),
+    n: Number.isFinite(count) ? Math.min(4, Math.max(1, count)) : imageApiConfigDefaults.n,
+    model: String(raw?.model || imageApiConfigDefaults.model).trim() || imageApiConfigDefaults.model,
+    size: String(raw?.size || imageApiConfigDefaults.size).trim() || imageApiConfigDefaults.size
+  };
+}
+
 function deriveQuickProfileName(profile, fallback) {
   const normalized = normalizeCodexProfile(profile);
   const parts = [normalized.providerName, normalized.model]
     .map((part) => String(part || '').trim())
     .filter(Boolean);
   return parts.join(' / ') || fallback;
+}
+
+function deriveClaudeQuickProfileName(profile, fallback) {
+  const normalized = normalizeClaudeProfile(profile);
+  const parts = [normalized.model, normalized.permissionMode, normalized.baseUrl]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean);
+  return parts.join(' / ') || fallback;
+}
+
+function deriveQuickPromptTitle(prompt, fallback) {
+  const firstLine = String(prompt || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  return (firstLine || fallback).slice(0, 48);
 }
 
 function formatQuickProfileLabel(record) {
@@ -930,13 +1413,28 @@ function formatQuickProfileLabel(record) {
   return `${record.name} (${detail})`;
 }
 
-function QuickModelButtons({ className, currentModel, disabled = false, onSelect, t }) {
+function formatClaudeQuickProfileLabel(record) {
+  const profile = normalizeClaudeProfile(record?.profile);
+  const detail = [profile.model, profile.permissionMode, profile.baseUrl]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join(' / ');
+
+  if (!detail || detail === record.name) {
+    return record.name;
+  }
+
+  return `${record.name} (${detail})`;
+}
+
+function QuickModelButtons({ className, currentModel, disabled = false, models = quickModelOptions, onSelect, t }) {
   const normalizedModel = String(currentModel || '').trim();
-  const hasQuickModel = quickModelOptions.includes(normalizedModel);
+  const modelOptions = Array.isArray(models) && models.length > 0 ? models : quickModelOptions;
+  const hasQuickModel = modelOptions.includes(normalizedModel);
 
   return (
     <div className={cn('flex min-w-0 flex-wrap items-center gap-2', className)}>
-      {quickModelOptions.map((model) => (
+      {modelOptions.map((model) => (
         <Button
           key={model}
           type="button"
@@ -1052,27 +1550,134 @@ function formatBytes(value) {
   return `${size.toFixed(digits)} ${units[unitIndex]}`;
 }
 
-function formatWorkspaceTreeSummary(snapshot, t) {
-  if (!snapshot) {
-    return '';
+function createEmptyUsageTrackingState() {
+  return {
+    path: '',
+    rates: {},
+    records: []
+  };
+}
+
+function normalizeUsageRate(value) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+function normalizeUsageRates(raw = {}) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {};
   }
 
-  if (!snapshot.directoryCount && !snapshot.fileCount) {
-    return t('workspaceTreeEmpty');
+  return Object.fromEntries(
+    Object.entries(raw)
+      .map(([providerId, value]) => {
+        const normalizedId = String(providerId || '').trim();
+        if (!normalizedId) {
+          return null;
+        }
+
+        const costPerMillionTokens = typeof value === 'object' && value !== null
+          ? normalizeUsageRate(value.costPerMillionTokens)
+          : normalizeUsageRate(value);
+
+        return [normalizedId, { costPerMillionTokens }];
+      })
+      .filter(Boolean)
+  );
+}
+
+function normalizeUsageRecord(raw = {}) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
   }
 
-  if (snapshot.omittedCount > 0) {
-    return t('workspaceTreeSummaryWithOmitted', {
-      directories: snapshot.directoryCount,
-      files: snapshot.fileCount,
-      omitted: snapshot.omittedCount
-    });
+  const id = String(raw.id || '').trim();
+  if (!id) {
+    return null;
   }
 
-  return t('workspaceTreeSummary', {
-    directories: snapshot.directoryCount,
-    files: snapshot.fileCount
+  return {
+    id,
+    title: String(raw.title || '').trim(),
+    cwd: String(raw.cwd || '').trim(),
+    cliProviderId: String(raw.cliProviderId || 'shell').trim() || 'shell',
+    model: String(raw.model || '').trim(),
+    providerName: String(raw.providerName || '').trim(),
+    initialCommand: String(raw.initialCommand || '').trim(),
+    status: String(raw.status || '').trim(),
+    createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : 0,
+    endedAt: Number.isFinite(raw.endedAt) ? raw.endedAt : 0,
+    runtimeMs: Number.isFinite(raw.runtimeMs) ? Math.max(0, raw.runtimeMs) : 0,
+    transcriptBytes: Number.isFinite(raw.transcriptBytes) ? Math.max(0, raw.transcriptBytes) : 0,
+    outputChars: Number.isFinite(raw.outputChars) ? Math.max(0, raw.outputChars) : 0,
+    estimatedTokens: Number.isFinite(raw.estimatedTokens) ? Math.max(0, raw.estimatedTokens) : 0
+  };
+}
+
+function normalizeUsageTrackingState(raw = {}) {
+  return {
+    path: String(raw?.path || '').trim(),
+    rates: normalizeUsageRates(raw?.rates),
+    records: Array.isArray(raw?.records)
+      ? raw.records.map(normalizeUsageRecord).filter(Boolean)
+      : []
+  };
+}
+
+function getUsageRecordCost(record, rates) {
+  const rate = normalizeUsageRate(rates?.[record.cliProviderId]?.costPerMillionTokens);
+  return (record.estimatedTokens / 1000000) * rate;
+}
+
+function summarizeUsageRecords(records, rates) {
+  return records.reduce((summary, record) => {
+    const cost = getUsageRecordCost(record, rates);
+    const provider = summary.byProvider[record.cliProviderId] || {
+      providerId: record.cliProviderId,
+      sessions: 0,
+      runtimeMs: 0,
+      transcriptBytes: 0,
+      estimatedTokens: 0,
+      estimatedCost: 0
+    };
+
+    provider.sessions += 1;
+    provider.runtimeMs += record.runtimeMs;
+    provider.transcriptBytes += record.transcriptBytes;
+    provider.estimatedTokens += record.estimatedTokens;
+    provider.estimatedCost += cost;
+
+    return {
+      sessions: summary.sessions + 1,
+      runtimeMs: summary.runtimeMs + record.runtimeMs,
+      transcriptBytes: summary.transcriptBytes + record.transcriptBytes,
+      estimatedTokens: summary.estimatedTokens + record.estimatedTokens,
+      estimatedCost: summary.estimatedCost + cost,
+      byProvider: {
+        ...summary.byProvider,
+        [record.cliProviderId]: provider
+      }
+    };
+  }, {
+    sessions: 0,
+    runtimeMs: 0,
+    transcriptBytes: 0,
+    estimatedTokens: 0,
+    estimatedCost: 0,
+    byProvider: {}
   });
+}
+
+function formatUsageCurrency(value) {
+  if (!Number.isFinite(value)) {
+    return '$0.00';
+  }
+
+  return `$${Math.max(0, value).toFixed(value >= 1 ? 2 : 4)}`;
+}
+
+function formatUsageNumber(value) {
+  return Number.isFinite(value) ? Math.round(value).toLocaleString() : '0';
 }
 
 function formatElapsedDuration(startedAt, endedAt) {
@@ -1305,14 +1910,15 @@ function pasteClipboardIntoTerminal(term, text = readClipboardText()) {
   return true;
 }
 
-function normalizeTerminalInputPayload(value) {
+function normalizeTerminalInputPayload(value, options = {}) {
   const normalized = String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   if (!normalized) {
     return '';
   }
 
   const payload = normalized.replace(/\n/g, '\r');
-  return payload.endsWith('\r') ? payload : `${payload}\r`;
+  const input = options.bracketedPasteMode ? `\x1b[200~${payload}\x1b[201~` : payload;
+  return input.endsWith('\r') ? input : `${input}\r`;
 }
 
 function trimTrailingLineBreaks(value) {
@@ -1330,6 +1936,191 @@ function isCommandDockSubmitKey(event) {
 
 function normalizePromptFilePath(filePath) {
   return String(filePath || '').replace(/\\/g, '/');
+}
+
+function createClosedCommandDockSkillMention() {
+  return {
+    open: false,
+    query: '',
+    triggerIndex: -1,
+    caretIndex: 0,
+    selectedIndex: 0,
+    position: { left: 12, bottom: 12 }
+  };
+}
+
+function getCommandDockSkillMentionTrigger(value, caretIndex) {
+  const text = String(value || '');
+  const index = clamp(Number.isFinite(caretIndex) ? caretIndex : text.length, 0, text.length);
+  const beforeCaret = text.slice(0, index);
+  const triggerIndex = beforeCaret.lastIndexOf('@');
+
+  if (triggerIndex < 0) {
+    return null;
+  }
+
+  const query = beforeCaret.slice(triggerIndex + 1);
+  if (/[\s@]/.test(query)) {
+    return null;
+  }
+
+  return {
+    query,
+    triggerIndex
+  };
+}
+
+function getTextareaCaretPopupPosition(textarea, caretIndex) {
+  if (!(textarea instanceof HTMLTextAreaElement)) {
+    return { left: 12, top: 12 };
+  }
+
+  const style = window.getComputedStyle(textarea);
+  const mirror = document.createElement('div');
+  const marker = document.createElement('span');
+  const mirroredProperties = [
+    'boxSizing',
+    'width',
+    'height',
+    'paddingTop',
+    'paddingRight',
+    'paddingBottom',
+    'paddingLeft',
+    'borderTopWidth',
+    'borderRightWidth',
+    'borderBottomWidth',
+    'borderLeftWidth',
+    'fontFamily',
+    'fontSize',
+    'fontStyle',
+    'fontWeight',
+    'letterSpacing',
+    'lineHeight',
+    'textAlign',
+    'textIndent',
+    'textTransform',
+    'tabSize'
+  ];
+
+  mirroredProperties.forEach((property) => {
+    mirror.style[property] = style[property];
+  });
+
+  mirror.style.position = 'absolute';
+  mirror.style.left = '-9999px';
+  mirror.style.top = '0';
+  mirror.style.visibility = 'hidden';
+  mirror.style.whiteSpace = 'pre-wrap';
+  mirror.style.overflow = 'hidden';
+  mirror.style.overflowWrap = 'break-word';
+  mirror.style.wordBreak = style.wordBreak;
+  mirror.textContent = textarea.value.slice(0, clamp(caretIndex, 0, textarea.value.length));
+  marker.textContent = '\u200b';
+  mirror.appendChild(marker);
+  document.body.appendChild(mirror);
+
+  const menuWidth = Math.min(
+    commandDockSkillMentionMenuWidth,
+    Math.max(180, textarea.clientWidth - 16)
+  );
+  const left = clamp(
+    marker.offsetLeft - textarea.scrollLeft,
+    8,
+    Math.max(8, textarea.clientWidth - menuWidth - 8)
+  );
+  const caretTop = marker.offsetTop - textarea.scrollTop;
+  const bottom = clamp(
+    textarea.clientHeight - caretTop + 6,
+    8,
+    Math.max(8, textarea.clientHeight - 8)
+  );
+  const menuBottomY = textarea.getBoundingClientRect().top + caretTop - 6;
+  const maxHeight = Math.min(
+    commandDockSkillMentionMenuMaxHeight,
+    Math.max(72, Math.floor(menuBottomY - 12))
+  );
+
+  document.body.removeChild(mirror);
+  return { left, bottom, maxHeight };
+}
+
+function normalizeSkillMentionSearchText(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function getWorkspaceSkillMentionItems(snapshot) {
+  const scopes = Array.isArray(snapshot?.scopes) ? snapshot.scopes : [];
+  const items = [];
+
+  scopes.forEach((scope) => {
+    const directoryName = String(scope?.directoryName || '').trim();
+    const scopeLabel = String(scope?.label || directoryName || '').trim();
+    const scopePath = String(scope?.path || '').trim();
+    const files = Array.isArray(scope?.files) ? scope.files : [];
+
+    if (scope?.exists && directoryName && scopePath) {
+      const insertPath = normalizePromptFilePath(`${directoryName}/`);
+      const title = insertPath;
+      const subtitle = scopeLabel;
+      items.push({
+        id: `directory:${scope.id || directoryName}`,
+        kind: 'directory',
+        label: title,
+        subtitle,
+        title: scopePath,
+        insertPath,
+        searchText: normalizeSkillMentionSearchText([
+          title,
+          subtitle,
+          scopePath
+        ].join(' '))
+      });
+    }
+
+    files.forEach((file) => {
+      const relativePath = String(file?.relativePath || file?.name || '').trim();
+      const filePath = String(file?.path || '').trim();
+      const insertPath = normalizePromptFilePath(
+        relativePath && directoryName ? `${directoryName}/${relativePath}` : (relativePath || filePath)
+      );
+
+      if (!insertPath) {
+        return;
+      }
+
+      const label = String(file?.name || relativePath || insertPath).trim();
+      const subtitle = insertPath;
+      items.push({
+        id: `file:${scope.id || directoryName}:${relativePath || filePath || label}`,
+        kind: 'file',
+        label,
+        subtitle,
+        title: filePath || insertPath,
+        insertPath,
+        searchText: normalizeSkillMentionSearchText([
+          label,
+          subtitle,
+          scopeLabel,
+          filePath
+        ].join(' '))
+      });
+    });
+  });
+
+  return items;
+}
+
+function filterWorkspaceSkillMentionItems(items, query) {
+  const normalizedQuery = normalizeSkillMentionSearchText(query);
+  const sourceItems = Array.isArray(items) ? items : [];
+
+  if (!normalizedQuery) {
+    return sourceItems.slice(0, commandDockSkillMentionMaxItems);
+  }
+
+  return sourceItems
+    .filter((item) => item.searchText.includes(normalizedQuery))
+    .slice(0, commandDockSkillMentionMaxItems);
 }
 
 function isImageFile(file) {
@@ -1478,7 +2269,8 @@ function isCodexPanel(panel) {
 }
 
 function hasPanelModelTag(panel) {
-  return isCodexPanel(panel);
+  const providerId = getPanelCliProvider(panel)?.id;
+  return providerId === 'codex' || providerId === 'claude-code';
 }
 
 function hasPanelContextTag(panel) {
@@ -1659,6 +2451,195 @@ function formatRelativeTime(ms) {
 
 function createLocalId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function encodeLocalFileUrlPath(value) {
+  return encodeURI(value).replace(/#/g, '%23').replace(/\?/g, '%3F');
+}
+
+function localFilePathToUrl(filePath) {
+  const value = String(filePath || '').trim();
+  if (!value) {
+    return '';
+  }
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(value) && !/^[a-zA-Z]:[\\/]/.test(value)) {
+    return value;
+  }
+
+  const normalized = value.replace(/\\/g, '/');
+  if (/^[a-zA-Z]:\//.test(normalized)) {
+    return `file:///${encodeLocalFileUrlPath(normalized)}`;
+  }
+  if (normalized.startsWith('//')) {
+    return `file:${encodeLocalFileUrlPath(normalized)}`;
+  }
+  if (normalized.startsWith('/')) {
+    return `file://${encodeLocalFileUrlPath(normalized)}`;
+  }
+
+  return encodeLocalFileUrlPath(normalized);
+}
+
+const imageGenerationFailedStatuses = new Set([
+  'cancelled',
+  'canceled',
+  'error',
+  'failed',
+  'rejected',
+  'timeout',
+  'timed_out'
+]);
+
+function normalizeImageGenerationStatus(value, fallback = 'queued') {
+  return String(value || fallback).trim().toLowerCase() || fallback;
+}
+
+function createImageGenerationTaskItem(source = {}, prompt = '') {
+  const id = String(source.id || '').trim() || createLocalId('image-task');
+  const createdAt = Number(source.createdAt) || Date.now();
+  return {
+    id,
+    kind: 'task',
+    taskId: String(source.taskId || '').trim(),
+    status: normalizeImageGenerationStatus(source.status),
+    createdAt,
+    updatedAt: Number(source.updatedAt) || createdAt,
+    finishedAt: source.finishedAt || null,
+    model: String(source.model || '').trim(),
+    n: Number.isFinite(Number.parseInt(source.n, 10)) ? Number.parseInt(source.n, 10) : null,
+    size: String(source.size || '').trim(),
+    name: '',
+    normalizedPath: '',
+    path: '',
+    prompt: String(source.prompt || prompt || ''),
+    url: '',
+    error: String(source.error || '').trim()
+  };
+}
+
+function createImageGenerationImageItems(images, prompt, source = {}) {
+  const generatedAt = Number(source.finishedAt || source.updatedAt) || Date.now();
+  const taskId = String(source.taskId || '').trim();
+  return (Array.isArray(images) ? images : [])
+    .map((image) => {
+      const filePath = String(image?.path || '').trim();
+      if (!filePath) {
+        return null;
+      }
+
+      const normalizedPath = normalizePromptFilePath(filePath);
+      const name = String(image?.name || normalizedPath.split('/').filter(Boolean).pop() || '').trim();
+      return {
+        id: createLocalId('generated-image'),
+        kind: 'image',
+        taskId,
+        status: 'success',
+        createdAt: generatedAt,
+        updatedAt: generatedAt,
+        model: String(source.model || '').trim(),
+        n: Number.isFinite(Number.parseInt(source.n, 10)) ? Number.parseInt(source.n, 10) : null,
+        size: String(source.size || '').trim(),
+        name,
+        normalizedPath,
+        path: filePath,
+        prompt,
+        url: localFilePathToUrl(filePath)
+      };
+    })
+    .filter(Boolean);
+}
+
+function isAgentAvatarFile(file) {
+  if (!file) {
+    return false;
+  }
+
+  const mimeType = String(file.type || '').toLowerCase();
+  if (mimeType.startsWith('image/')) {
+    return true;
+  }
+
+  return /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(String(file.name || ''));
+}
+
+function normalizeAgentRecord(record, fallbackIndex = 0) {
+  if (!record || typeof record !== 'object') {
+    return null;
+  }
+
+  const now = Date.now();
+  const id = String(record.id || '').trim() || createLocalId('agent');
+  const name = String(record.name || '').trim() || `Agent ${fallbackIndex + 1}`;
+  const cliProviderId = getCliProviderById(record.cliProviderId)?.id || defaultCliProviderId;
+
+  return {
+    id,
+    name,
+    instructions: String(record.instructions || ''),
+    cliProviderId,
+    avatarPath: String(record.avatarPath || ''),
+    avatarName: String(record.avatarName || ''),
+    createdAt: Number.isFinite(record.createdAt) ? record.createdAt : now,
+    updatedAt: Number.isFinite(record.updatedAt) ? record.updatedAt : now
+  };
+}
+
+function createAgentRecord(name, cliProviderId = defaultCliProviderId) {
+  const now = Date.now();
+  return {
+    id: createLocalId('agent'),
+    name: String(name || '').trim() || 'Agent',
+    instructions: '',
+    cliProviderId: getCliProviderById(cliProviderId)?.id || defaultCliProviderId,
+    avatarPath: '',
+    avatarName: '',
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function normalizeAgents(raw) {
+  const source = Array.isArray(raw)
+    ? raw
+    : Array.isArray(raw?.agents) ? raw.agents : [];
+  const seenIds = new Set();
+
+  return source
+    .map((record, index) => normalizeAgentRecord(record, index))
+    .filter(Boolean)
+    .map((agent) => {
+      if (!seenIds.has(agent.id)) {
+        seenIds.add(agent.id);
+        return agent;
+      }
+
+      const nextAgent = { ...agent, id: createLocalId('agent') };
+      seenIds.add(nextAgent.id);
+      return nextAgent;
+    });
+}
+
+function loadAgents() {
+  try {
+    return normalizeAgents(JSON.parse(localStorage.getItem(agentsKey) || '[]'));
+  } catch {
+    localStorage.removeItem(agentsKey);
+    return [];
+  }
+}
+
+function buildAgentTaskPrompt(agent, taskDescription) {
+  const name = String(agent?.name || 'Agent').trim();
+  const instructions = String(agent?.instructions || '').trim();
+  const task = String(taskDescription || '').trim();
+  const sections = [`You are the saved CLI in One agent "${name}".`];
+
+  if (instructions) {
+    sections.push(`Agent instructions:\n${instructions}`);
+  }
+
+  sections.push(`Task:\n${task}`);
+  return sections.join('\n\n');
 }
 
 function deriveNameFromPath(value) {
@@ -2019,6 +3000,7 @@ function EndpointGroup({
   runtimeNow,
   scale,
   commandTargetId,
+  dispatchSparkles = {},
   selectedIds,
   t,
   onActivate,
@@ -2133,13 +3115,15 @@ function EndpointGroup({
         {panels.map((panel) => {
           const selected = selectedIds.has(panel.id);
           const commandTargeted = panel.id === commandTargetId;
+          const dispatchSparkleKey = dispatchSparkles[panel.id] || '';
           return (
             <div
               key={panel.id}
               className={cn(
                 'endpoint-group-row',
                 selected && 'is-selected',
-                commandTargeted && 'is-command-target'
+                commandTargeted && 'is-command-target',
+                dispatchSparkleKey && 'is-dispatch-sparkling'
               )}
               role="button"
               tabIndex={0}
@@ -2151,6 +3135,11 @@ function EndpointGroup({
                 }
               }}
             >
+              {dispatchSparkleKey && (
+                <span key={dispatchSparkleKey} className="endpoint-group-row-sparkle" aria-hidden="true">
+                  <Sparkles className="h-3.5 w-3.5" />
+                </span>
+              )}
               <span className={cn('terminal-endpoint-dot', `is-${getPanelExecutionState(panel)}`)} aria-hidden="true" />
               <Input
                 className="endpoint-group-title"
@@ -2198,6 +3187,8 @@ function TerminalPanel({
   visible = true,
   selected = false,
   commandTargeted = false,
+  arrangeAnimation = null,
+  dispatchSparkleKey = '',
   onActivate,
   onClose,
   onExpand,
@@ -2218,6 +3209,14 @@ function TerminalPanel({
   const [scrollbarTrackHeight, setScrollbarTrackHeight] = useState(0);
   const [scrollbarState, setScrollbarState] = useState({ baseY: 0, rows: 0, viewportY: 0 });
   const panelProvider = getPanelCliProvider(panel);
+  const arrangeStyle = arrangeAnimation ? {
+    '--canvas-arrange-delay': `${arrangeAnimation.delay || 0}ms`,
+    '--canvas-arrange-duration': `${canvasArrangeDurationMs}ms`,
+    '--canvas-arrange-dx': `${arrangeAnimation.dx || 0}px`,
+    '--canvas-arrange-dy': `${arrangeAnimation.dy || 0}px`,
+    '--canvas-arrange-scale-x': String(arrangeAnimation.scaleX || 1),
+    '--canvas-arrange-scale-y': String(arrangeAnimation.scaleY || 1)
+  } : null;
 
   const syncInputAnchor = useCallback(() => {
     if (termRef.current) {
@@ -2583,6 +3582,8 @@ function TerminalPanel({
         panel.minimized && 'is-minimized',
         panel.minimized && selected && 'is-selected',
         commandTargeted && 'is-command-target',
+        arrangeAnimation && 'is-arranging',
+        dispatchSparkleKey && 'is-dispatch-sparkling',
         !visible && 'is-hidden'
       )}
       data-terminal-id={panel.id}
@@ -2592,7 +3593,8 @@ function TerminalPanel({
         top: panel.y,
         width: panel.minimized ? endpointWidth : panel.width,
         height: panel.minimized ? endpointHeight : panel.height,
-        zIndex: panel.zIndex
+        zIndex: panel.zIndex,
+        ...arrangeStyle
       }}
       onPointerDown={() => {
         if (visible) {
@@ -2600,6 +3602,11 @@ function TerminalPanel({
         }
       }}
     >
+      {dispatchSparkleKey && (
+        <div key={dispatchSparkleKey} className="terminal-panel-dispatch-sparkle" aria-hidden="true">
+          <Sparkles className="terminal-panel-dispatch-sparkle-icon h-4 w-4" />
+        </div>
+      )}
       {panel.minimized ? (
         <div
           className="terminal-endpoint"
@@ -2768,7 +3775,231 @@ function TerminalPanel({
   );
 }
 
-function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfileChanged, open, showToast, t }) {
+function getConfigFileMeta(fileId) {
+  return codexFileMeta[fileId] || codexFileMeta.config;
+}
+
+function isClaudeConfigFile(fileId) {
+  return getConfigFileMeta(fileId).owner === 'claude';
+}
+
+function getConfigFileKind(fileId) {
+  return getConfigFileMeta(fileId).kind || fileId;
+}
+
+function readCliConfigFile(fileId) {
+  const kind = getConfigFileKind(fileId);
+  return isClaudeConfigFile(fileId)
+    ? bridge.readClaudeConfig(kind)
+    : bridge.readCodexConfig(kind);
+}
+
+function validateCliConfigFile(fileId, content) {
+  const kind = getConfigFileKind(fileId);
+  return isClaudeConfigFile(fileId)
+    ? bridge.validateClaudeConfig(kind, content)
+    : bridge.validateCodexConfig(kind, content);
+}
+
+function writeCliConfigFile(fileId, content) {
+  const kind = getConfigFileKind(fileId);
+  return isClaudeConfigFile(fileId)
+    ? bridge.writeClaudeConfig(kind, content)
+    : bridge.writeCodexConfig(kind, content);
+}
+
+function listCliConfigFileBackups(fileId) {
+  const kind = getConfigFileKind(fileId);
+  return isClaudeConfigFile(fileId)
+    ? bridge.listClaudeConfigBackups(kind)
+    : bridge.listCodexConfigBackups(kind);
+}
+
+function restoreCliConfigFileBackup(fileId, backupName) {
+  const kind = getConfigFileKind(fileId);
+  return isClaudeConfigFile(fileId)
+    ? bridge.restoreClaudeConfigBackup(kind, backupName)
+    : bridge.restoreCodexConfigBackup(kind, backupName);
+}
+
+function UsageTrackingPanel({
+  language,
+  loading,
+  onClearRecords,
+  onRateChange,
+  onSaveRates,
+  ratesDraft,
+  saving,
+  status,
+  statusTone,
+  tracking,
+  t
+}) {
+  const records = Array.isArray(tracking?.records) ? tracking.records : [];
+  const rates = normalizeUsageRates(ratesDraft);
+  const summary = summarizeUsageRecords(records, rates);
+  const providerIds = Array.from(new Set([
+    ...cliProviders.map((provider) => provider.id).filter(Boolean),
+    ...records.map((record) => record.cliProviderId).filter(Boolean)
+  ]));
+  const providerSummaries = Object.values(summary.byProvider)
+    .sort((a, b) => b.estimatedCost - a.estimatedCost || b.estimatedTokens - a.estimatedTokens);
+  const recentRecords = [...records]
+    .sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0))
+    .slice(0, 5);
+  const statusText = loading ? t('loading') : status;
+
+  const getProviderLabel = (providerId) => {
+    const provider = getCliProviderById(providerId);
+    return provider ? getCliProviderDisplayName(provider, language) : providerId;
+  };
+
+  const renderSummaryMetric = (label, value) => (
+    <div className="grid min-w-0 gap-1 rounded-md border border-border bg-background/60 px-3 py-2">
+      <div className="truncate text-[11px] font-medium text-muted-foreground">{label}</div>
+      <div className="truncate font-mono text-sm font-semibold text-foreground">{value}</div>
+    </div>
+  );
+
+  return (
+    <div className="grid gap-3 rounded-md border border-border bg-muted/35 p-3">
+      <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold">{t('usageTracking')}</div>
+          <div className="text-xs text-muted-foreground">{t('usageTrackingDescription')}</div>
+          {tracking?.path ? (
+            <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={tracking.path}>
+              {tracking.path}
+            </div>
+          ) : null}
+        </div>
+        <div
+          className={cn(
+            'min-h-5 text-sm text-muted-foreground',
+            statusTone === 'ok' && 'text-emerald-700 dark:text-emerald-200',
+            statusTone === 'error' && 'text-red-700 dark:text-red-200'
+          )}
+        >
+          {statusText}
+        </div>
+      </div>
+
+      <div className="grid gap-2 md:grid-cols-5">
+        {renderSummaryMetric(t('usageSessions'), formatUsageNumber(summary.sessions))}
+        {renderSummaryMetric(t('usageRuntime'), formatElapsedDuration(0, summary.runtimeMs))}
+        {renderSummaryMetric(t('usageEstimatedTokens'), formatUsageNumber(summary.estimatedTokens))}
+        {renderSummaryMetric(t('usageEstimatedCost'), formatUsageCurrency(summary.estimatedCost))}
+        {renderSummaryMetric(t('usageOutput'), formatBytes(summary.transcriptBytes))}
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+        <div className="grid min-w-0 gap-2">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+            <div className="text-xs font-semibold text-muted-foreground">{t('usageRate')}</div>
+            <div className="text-[11px] text-muted-foreground">{t('usageRateHint')}</div>
+          </div>
+          <div className="grid max-h-44 gap-2 overflow-auto pr-1">
+            {providerIds.map((providerId) => {
+              const provider = getCliProviderById(providerId);
+              const rateValue = ratesDraft?.[providerId]?.costPerMillionTokens ?? '';
+
+              return (
+                <Label key={providerId} className="grid grid-cols-[minmax(0,1fr)_120px] items-center gap-2 text-xs">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <CliProviderIcon provider={provider} providerId={providerId} className="h-4 w-4" />
+                    <span className="truncate">{getProviderLabel(providerId)}</span>
+                  </span>
+                  <Input
+                    className="h-8 text-right font-mono text-xs"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={rateValue}
+                    onChange={(event) => onRateChange(providerId, event.target.value)}
+                    disabled={saving || loading}
+                  />
+                </Label>
+              );
+            })}
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <Button type="button" variant="primary" size="sm" onClick={onSaveRates} disabled={saving || loading}>
+              <Save className="h-3.5 w-3.5" />
+              {t('saveUsageRates')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onClearRecords}
+              disabled={saving || loading || records.length === 0}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              {t('clearUsageRecords')}
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid min-w-0 gap-3 md:grid-cols-2">
+          <div className="grid min-w-0 content-start gap-2">
+            <div className="text-xs font-semibold text-muted-foreground">{t('usageByCli')}</div>
+            {providerSummaries.length > 0 ? providerSummaries.map((item) => (
+              <div key={item.providerId} className="grid min-w-0 gap-1 rounded-md border border-border bg-background/60 px-3 py-2">
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <span className="flex min-w-0 items-center gap-2 text-xs font-medium">
+                    <CliProviderIcon providerId={item.providerId} className="h-4 w-4" />
+                    <span className="truncate">{getProviderLabel(item.providerId)}</span>
+                  </span>
+                  <span className="font-mono text-xs text-muted-foreground">{formatUsageCurrency(item.estimatedCost)}</span>
+                </div>
+                <div className="truncate font-mono text-[11px] text-muted-foreground">
+                  {formatUsageNumber(item.sessions)} / {formatUsageNumber(item.estimatedTokens)} tokens / {formatElapsedDuration(0, item.runtimeMs)}
+                </div>
+              </div>
+            )) : (
+              <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                {t('usageNoRecords')}
+              </div>
+            )}
+          </div>
+
+          <div className="grid min-w-0 content-start gap-2">
+            <div className="text-xs font-semibold text-muted-foreground">{t('usageRecentSessions')}</div>
+            {recentRecords.length > 0 ? recentRecords.map((record) => (
+              <div key={record.id} className="grid min-w-0 gap-1 rounded-md border border-border bg-background/60 px-3 py-2">
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <span className="truncate text-xs font-medium" title={record.title || record.initialCommand}>
+                    {record.title || getProviderLabel(record.cliProviderId)}
+                  </span>
+                  <span className="font-mono text-xs text-muted-foreground">{formatUsageCurrency(getUsageRecordCost(record, rates))}</span>
+                </div>
+                <div className="truncate text-[11px] text-muted-foreground">
+                  {getProviderLabel(record.cliProviderId)} / {formatUsageNumber(record.estimatedTokens)} tokens / {formatTime(record.endedAt)}
+                </div>
+              </div>
+            )) : (
+              <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                {t('usageNoRecords')}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CodexConfigDialog({
+  initialSettingsTab = 'preferences',
+  language,
+  onLanguageChange,
+  onOpenChange,
+  onProfileChanged,
+  open,
+  showToast,
+  t
+}) {
+  const [activeSettingsTab, setActiveSettingsTab] = useState(initialSettingsTab || 'preferences');
   const [activeFile, setActiveFile] = useState('config');
   const [pathText, setPathText] = useState('');
   const [value, setValue] = useState('');
@@ -2791,6 +4022,27 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
   const [selectedQuickProfileId, setSelectedQuickProfileId] = useState('');
   const [quickProfilesPath, setQuickProfilesPath] = useState('');
   const [quickProfilesLoading, setQuickProfilesLoading] = useState(false);
+  const [claudeProfile, setClaudeProfile] = useState(createEmptyClaudeProfile);
+  const [claudeProfileDirty, setClaudeProfileDirty] = useState(false);
+  const [claudeProfileSaving, setClaudeProfileSaving] = useState(false);
+  const [claudeProfileStatus, setClaudeProfileStatus] = useState('');
+  const [claudeProfileStatusTone, setClaudeProfileStatusTone] = useState('');
+  const [claudeQuickProfiles, setClaudeQuickProfiles] = useState([]);
+  const [selectedClaudeQuickProfileId, setSelectedClaudeQuickProfileId] = useState('');
+  const [claudeQuickProfilesPath, setClaudeQuickProfilesPath] = useState('');
+  const [claudeQuickProfilesLoading, setClaudeQuickProfilesLoading] = useState(false);
+  const [imageApiConfig, setImageApiConfig] = useState(createEmptyImageApiConfig);
+  const [imageApiDirty, setImageApiDirty] = useState(false);
+  const [imageApiSaving, setImageApiSaving] = useState(false);
+  const [imageApiStatus, setImageApiStatus] = useState('');
+  const [imageApiStatusTone, setImageApiStatusTone] = useState('');
+  const [usageTracking, setUsageTracking] = useState(createEmptyUsageTrackingState);
+  const [usageRatesDraft, setUsageRatesDraft] = useState({});
+  const [usageDirty, setUsageDirty] = useState(false);
+  const [usageSaving, setUsageSaving] = useState(false);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageStatus, setUsageStatus] = useState('');
+  const [usageStatusTone, setUsageStatusTone] = useState('');
   const validationSeq = useRef(0);
   const validationTimer = useRef(null);
   const editorRef = useRef(null);
@@ -2805,14 +4057,41 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
     setProfileStatusTone(tone);
   }, []);
 
+  const setClaudeProfileStatusMessage = useCallback((message, tone = '') => {
+    setClaudeProfileStatus(message);
+    setClaudeProfileStatusTone(tone);
+  }, []);
+
+  const setImageApiStatusMessage = useCallback((message, tone = '') => {
+    setImageApiStatus(message);
+    setImageApiStatusTone(tone);
+  }, []);
+
+  const setUsageStatusMessage = useCallback((message, tone = '') => {
+    setUsageStatus(message);
+    setUsageStatusTone(tone);
+  }, []);
+
   const selectedQuickProfile = useMemo(
     () => quickProfiles.find((record) => record.id === selectedQuickProfileId) || null,
     [quickProfiles, selectedQuickProfileId]
   );
 
+  const selectedClaudeQuickProfile = useMemo(
+    () => claudeQuickProfiles.find((record) => record.id === selectedClaudeQuickProfileId) || null,
+    [claudeQuickProfiles, selectedClaudeQuickProfileId]
+  );
+
+  useEffect(() => {
+    if (open && initialSettingsTab) {
+      setActiveSettingsTab(initialSettingsTab);
+    }
+  }, [initialSettingsTab, open]);
+
   const loadFile = useCallback(async (kind) => {
     setStatusMessage(t('loading'));
-    const snapshot = await bridge.readCodexConfig(kind);
+    const snapshot = await readCliConfigFile(kind);
+    const meta = getConfigFileMeta(kind);
     setPathText(snapshot.path);
     setValue(snapshot.content || '');
     setLastSavedValue(snapshot.content || '');
@@ -2823,7 +4102,7 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
       const modified = formatTime(snapshot.modifiedAt);
       setStatusMessage(modified ? `已加载，修改时间 ${modified}` : '已加载', 'ok');
     } else {
-      setStatusMessage(codexFileMeta[kind].missing);
+      setStatusMessage(meta.missing);
     }
 
     window.requestAnimationFrame(() => {
@@ -2834,7 +4113,7 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
   const loadBackups = useCallback(async (kind) => {
     setBackupsLoading(true);
     try {
-      const items = await bridge.listCodexConfigBackups(kind);
+      const items = await listCliConfigFileBackups(kind);
       setBackups(items);
       setSelectedBackup((current) => (
         items.some((item) => item.name === current) ? current : (items[0]?.name || '')
@@ -2861,6 +4140,47 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
     }
   }, []);
 
+  const loadClaudeQuickProfiles = useCallback(async () => {
+    setClaudeQuickProfilesLoading(true);
+    try {
+      const store = await bridge.listClaudeQuickProfiles();
+      const profiles = Array.isArray(store.profiles) ? store.profiles : [];
+      setClaudeQuickProfiles(profiles);
+      setClaudeQuickProfilesPath(store.path || '');
+      setSelectedClaudeQuickProfileId((current) => (
+        profiles.some((record) => record.id === current) ? current : ''
+      ));
+      return store;
+    } finally {
+      setClaudeQuickProfilesLoading(false);
+    }
+  }, []);
+
+  const loadImageApiConfig = useCallback(async () => {
+    setImageApiStatusMessage(t('loading'));
+    const snapshot = await bridge.readImageApiConfig();
+    setImageApiConfig(normalizeImageApiConfig(snapshot));
+    setImageApiDirty(false);
+    setImageApiStatusMessage(t('imageApiConfigLoaded'), 'ok');
+    return snapshot;
+  }, [setImageApiStatusMessage, t]);
+
+  const loadUsageTracking = useCallback(async () => {
+    setUsageLoading(true);
+    setUsageStatusMessage(t('loading'));
+    try {
+      const snapshot = await bridge.readUsageTracking();
+      const normalized = normalizeUsageTrackingState(snapshot);
+      setUsageTracking(normalized);
+      setUsageRatesDraft(normalized.rates);
+      setUsageDirty(false);
+      setUsageStatusMessage(t('usageTrackingLoaded'), 'ok');
+      return normalized;
+    } finally {
+      setUsageLoading(false);
+    }
+  }, [setUsageStatusMessage, t]);
+
   const loadProfile = useCallback(async () => {
     setProfileStatusMessage(t('loading'));
     const snapshot = await bridge.readCodexProfile();
@@ -2870,6 +4190,16 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
     setProfileStatusMessage(t('quickConfigLoaded'), 'ok');
     return snapshot;
   }, [setProfileStatusMessage, t]);
+
+  const loadClaudeProfile = useCallback(async () => {
+    setClaudeProfileStatusMessage(t('loading'));
+    const snapshot = await bridge.readClaudeProfile();
+    setClaudeProfile(normalizeClaudeProfile(snapshot.profile));
+    setSelectedClaudeQuickProfileId('');
+    setClaudeProfileDirty(false);
+    setClaudeProfileStatusMessage(t('quickConfigLoaded'), 'ok');
+    return snapshot;
+  }, [setClaudeProfileStatusMessage, t]);
 
   const syncProfileState = useCallback(async () => {
     const snapshot = await loadProfile();
@@ -2884,7 +4214,7 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
 
     loadFile(activeFile).catch((error) => {
       setStatusMessage(error.message, 'error');
-      showToast(t('codexReadFailed', { message: error.message }));
+      showToast(t('configReadFailed', { message: error.message }));
     });
   }, [activeFile, loadFile, open, setStatusMessage, showToast, t]);
 
@@ -2918,26 +4248,78 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
       return;
     }
 
+    loadClaudeQuickProfiles().catch((error) => {
+      setClaudeQuickProfiles([]);
+      setSelectedClaudeQuickProfileId('');
+      setClaudeQuickProfilesPath('');
+      showToast(t('quickProfileStoreFailed', { message: error.message }));
+    });
+  }, [loadClaudeQuickProfiles, open, showToast, t]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    loadImageApiConfig().catch((error) => {
+      setImageApiConfig(createEmptyImageApiConfig());
+      setImageApiDirty(false);
+      setImageApiStatusMessage(error.message, 'error');
+      showToast(t('imageApiConfigReadFailed', { message: error.message }));
+    });
+  }, [loadImageApiConfig, open, setImageApiStatusMessage, showToast, t]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    loadUsageTracking().catch((error) => {
+      setUsageTracking(createEmptyUsageTrackingState());
+      setUsageRatesDraft({});
+      setUsageDirty(false);
+      setUsageStatusMessage(error.message, 'error');
+      showToast(t('usageTrackingReadFailed', { message: error.message }));
+    });
+  }, [loadUsageTracking, open, setUsageStatusMessage, showToast, t]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
     syncProfileState().catch((error) => {
       setProfileStatusMessage(error.message, 'error');
       showToast(t('codexProfileReadFailed', { message: error.message }));
     });
   }, [open, setProfileStatusMessage, showToast, syncProfileState, t]);
 
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    loadClaudeProfile().catch((error) => {
+      setClaudeProfileStatusMessage(error.message, 'error');
+      showToast(t('claudeProfileReadFailed', { message: error.message }));
+    });
+  }, [loadClaudeProfile, open, setClaudeProfileStatusMessage, showToast, t]);
+
   useEffect(() => () => window.clearTimeout(validationTimer.current), []);
 
   const validate = useCallback(async ({ quietWhenValid = false } = {}) => {
     const seq = ++validationSeq.current;
-    const result = await bridge.validateCodexConfig(activeFile, value);
+    const meta = getConfigFileMeta(activeFile);
+    const result = await validateCliConfigFile(activeFile, value);
     if (seq !== validationSeq.current) {
       return result.valid;
     }
 
     setInvalid(!result.valid);
     if (!result.valid) {
-      setStatusMessage(result.error || codexFileMeta[activeFile].invalid, 'error');
+      setStatusMessage(result.error || meta.invalid, 'error');
     } else if (!quietWhenValid) {
-      setStatusMessage(dirty ? `${codexFileMeta[activeFile].valid}，有未保存更改` : codexFileMeta[activeFile].valid, 'ok');
+      setStatusMessage(dirty ? `${meta.valid}，有未保存更改` : meta.valid, 'ok');
     }
     return result.valid;
   }, [activeFile, dirty, setStatusMessage, value]);
@@ -2966,6 +4348,96 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
     }));
     setProfileDirty(true);
     setProfileStatusMessage(t('quickConfigDirty'));
+  };
+
+  const handleClaudeProfileChange = (field, nextValue) => {
+    setClaudeProfile((current) => ({
+      ...current,
+      [field]: nextValue
+    }));
+    setClaudeProfileDirty(true);
+    setClaudeProfileStatusMessage(t('quickConfigDirty'));
+  };
+
+  const handleImageApiConfigChange = (field, nextValue) => {
+    setImageApiConfig((current) => ({
+      ...current,
+      [field]: nextValue,
+      ...(field === 'apiKey' && nextValue ? { clearApiKey: false } : {})
+    }));
+    setImageApiDirty(true);
+    setImageApiStatusMessage(t('imageApiConfigDirty'));
+  };
+
+  const clearImageApiKey = () => {
+    setImageApiConfig((current) => ({
+      ...current,
+      apiKey: '',
+      apiKeySet: false,
+      clearApiKey: true,
+      configured: false
+    }));
+    setImageApiDirty(true);
+    setImageApiStatusMessage(t('imageApiConfigDirty'));
+  };
+
+  const handleUsageRateChange = (providerId, nextValue) => {
+    const normalizedProviderId = String(providerId || '').trim();
+    if (!normalizedProviderId) {
+      return;
+    }
+
+    setUsageRatesDraft((current) => ({
+      ...current,
+      [normalizedProviderId]: {
+        ...(current?.[normalizedProviderId] || {}),
+        costPerMillionTokens: nextValue
+      }
+    }));
+    setUsageDirty(true);
+    setUsageStatusMessage(t('usageTrackingDirty'));
+  };
+
+  const saveUsageRates = async () => {
+    setUsageSaving(true);
+    setUsageStatusMessage(`${t('save')}...`);
+    try {
+      const snapshot = await bridge.writeUsageRates(usageRatesDraft);
+      const normalized = normalizeUsageTrackingState(snapshot);
+      setUsageTracking(normalized);
+      setUsageRatesDraft(normalized.rates);
+      setUsageDirty(false);
+      setUsageStatusMessage(t('usageRatesSaved'), 'ok');
+      showToast(t('usageRatesSaved'));
+    } catch (error) {
+      setUsageStatusMessage(error.message, 'error');
+      showToast(t('saveFailed', { message: error.message }));
+    } finally {
+      setUsageSaving(false);
+    }
+  };
+
+  const clearUsageRecords = async () => {
+    if (!window.confirm(t('usageClearConfirm'))) {
+      return;
+    }
+
+    setUsageSaving(true);
+    setUsageStatusMessage(`${t('clearUsageRecords')}...`);
+    try {
+      const snapshot = await bridge.clearUsageRecords();
+      const normalized = normalizeUsageTrackingState(snapshot);
+      setUsageTracking(normalized);
+      setUsageRatesDraft(normalized.rates);
+      setUsageDirty(false);
+      setUsageStatusMessage(t('usageRecordsCleared'), 'ok');
+      showToast(t('usageRecordsCleared'));
+    } catch (error) {
+      setUsageStatusMessage(error.message, 'error');
+      showToast(t('saveFailed', { message: error.message }));
+    } finally {
+      setUsageSaving(false);
+    }
   };
 
   const handleQuickProfileSelect = (nextId) => {
@@ -3083,9 +4555,112 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
     }
   };
 
+  const handleClaudeQuickProfileSelect = (nextId) => {
+    if (nextId === selectedClaudeQuickProfileId) {
+      return;
+    }
+
+    if (claudeProfileDirty && !window.confirm(t('switchQuickProfileDiscardConfirm'))) {
+      return;
+    }
+
+    if (!nextId) {
+      loadClaudeProfile().catch((error) => {
+        setClaudeProfileStatusMessage(error.message, 'error');
+        showToast(t('claudeProfileReadFailed', { message: error.message }));
+      });
+      return;
+    }
+
+    const record = claudeQuickProfiles.find((item) => item.id === nextId);
+    if (!record) {
+      return;
+    }
+
+    setSelectedClaudeQuickProfileId(record.id);
+    setClaudeProfile(normalizeClaudeProfile(record.profile));
+    setClaudeProfileDirty(false);
+    setClaudeProfileStatusMessage(t('quickProfileSwitched', { name: record.name }), 'ok');
+  };
+
+  const saveClaudeQuickProfilePreset = async ({ saveAs = false } = {}) => {
+    const existing = saveAs ? null : selectedClaudeQuickProfile;
+    const name = existing?.name || promptQuickProfileName(deriveClaudeQuickProfileName(claudeProfile, t('newClaudeQuickProfile')));
+    if (!name) {
+      return;
+    }
+
+    setClaudeQuickProfilesLoading(true);
+    setClaudeProfileStatusMessage(`${t('saveQuickProfile')}...`);
+    try {
+      const store = await bridge.saveClaudeQuickProfile({
+        id: existing?.id || null,
+        name,
+        profile: claudeProfile
+      });
+      const profiles = Array.isArray(store.profiles) ? store.profiles : [];
+      const savedProfile = store.savedProfile || profiles.find((record) => record.id === store.activeId);
+
+      setClaudeQuickProfiles(profiles);
+      setClaudeQuickProfilesPath(store.path || claudeQuickProfilesPath);
+      if (savedProfile) {
+        setSelectedClaudeQuickProfileId(savedProfile.id);
+        setClaudeProfile(normalizeClaudeProfile(savedProfile.profile));
+        setClaudeProfileStatusMessage(t('quickProfileSaved', { name: savedProfile.name }), 'ok');
+        showToast(t('quickProfileSaved', { name: savedProfile.name }));
+      } else {
+        setClaudeProfileStatusMessage(t('quickProfileSaved', { name }), 'ok');
+        showToast(t('quickProfileSaved', { name }));
+      }
+      setClaudeProfileDirty(false);
+    } catch (error) {
+      setClaudeProfileStatusMessage(error.message, 'error');
+      showToast(t('saveFailed', { message: error.message }));
+    } finally {
+      setClaudeQuickProfilesLoading(false);
+    }
+  };
+
+  const deleteClaudeQuickProfilePreset = async () => {
+    if (!selectedClaudeQuickProfile) {
+      return;
+    }
+
+    if (claudeProfileDirty && !window.confirm(t('switchQuickProfileDiscardConfirm'))) {
+      return;
+    }
+
+    if (!window.confirm(t('deleteClaudeQuickProfileConfirm', { name: selectedClaudeQuickProfile.name }))) {
+      return;
+    }
+
+    setClaudeQuickProfilesLoading(true);
+    setClaudeProfileStatusMessage(`${t('deleteQuickProfile')}...`);
+    try {
+      const store = await bridge.deleteClaudeQuickProfile(selectedClaudeQuickProfile.id);
+      setClaudeQuickProfiles(Array.isArray(store.profiles) ? store.profiles : []);
+      setClaudeQuickProfilesPath(store.path || claudeQuickProfilesPath);
+      setSelectedClaudeQuickProfileId('');
+      const snapshot = await bridge.readClaudeProfile();
+      setClaudeProfile(normalizeClaudeProfile(snapshot.profile));
+      setClaudeProfileDirty(false);
+      const deletedMessage = t('quickProfileDeleted', { name: selectedClaudeQuickProfile.name });
+      setClaudeProfileStatusMessage(deletedMessage, 'ok');
+      showToast(deletedMessage);
+    } catch (error) {
+      setClaudeProfileStatusMessage(error.message, 'error');
+      showToast(t('saveFailed', { message: error.message }));
+    } finally {
+      setClaudeQuickProfilesLoading(false);
+    }
+  };
+
   const handleOpenChange = (nextOpen) => {
-    if (!nextOpen && (dirty || profileDirty)) {
-      const name = dirty ? codexFileMeta[activeFile].title : t('codexQuickConfig');
+    if (!nextOpen && (dirty || profileDirty || claudeProfileDirty || imageApiDirty || usageDirty)) {
+      const meta = getConfigFileMeta(activeFile);
+      const name = dirty
+        ? meta.title
+        : profileDirty ? t('codexQuickConfig') : claudeProfileDirty ? t('claudeQuickConfig') : imageApiDirty ? t('imageApiConfig') : t('usageTracking');
       if (!window.confirm(t('unsavedCloseConfirm', { name }))) {
         return;
       }
@@ -3107,8 +4682,11 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
   };
 
   const reload = () => {
-    if (dirty || profileDirty) {
-      const name = dirty ? codexFileMeta[activeFile].title : t('codexQuickConfig');
+    if (dirty || profileDirty || claudeProfileDirty || imageApiDirty || usageDirty) {
+      const meta = getConfigFileMeta(activeFile);
+      const name = dirty
+        ? meta.title
+        : profileDirty ? t('codexQuickConfig') : claudeProfileDirty ? t('claudeQuickConfig') : imageApiDirty ? t('imageApiConfig') : t('usageTracking');
       if (!window.confirm(t('reloadDiscardConfirm', { name }))) {
         return;
       }
@@ -3132,10 +4710,33 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
       setQuickProfilesPath('');
       showToast(t('quickProfileStoreFailed', { message: error.message }));
     });
+    loadClaudeProfile().catch((error) => {
+      setClaudeProfileStatusMessage(error.message, 'error');
+      showToast(t('claudeProfileReadFailed', { message: error.message }));
+    });
+    loadClaudeQuickProfiles().catch((error) => {
+      setClaudeQuickProfiles([]);
+      setSelectedClaudeQuickProfileId('');
+      setClaudeQuickProfilesPath('');
+      showToast(t('quickProfileStoreFailed', { message: error.message }));
+    });
+    loadImageApiConfig().catch((error) => {
+      setImageApiConfig(createEmptyImageApiConfig());
+      setImageApiDirty(false);
+      setImageApiStatusMessage(error.message, 'error');
+      showToast(t('imageApiConfigReadFailed', { message: error.message }));
+    });
+    loadUsageTracking().catch((error) => {
+      setUsageTracking(createEmptyUsageTrackingState());
+      setUsageRatesDraft({});
+      setUsageDirty(false);
+      setUsageStatusMessage(error.message, 'error');
+      showToast(t('usageTrackingReadFailed', { message: error.message }));
+    });
   };
 
   const saveProfile = async () => {
-    if (dirty && !window.confirm(t('profileSaveDiscardConfirm'))) {
+    if (dirty && !isClaudeConfigFile(activeFile) && !window.confirm(t('profileSaveDiscardConfirm'))) {
       return;
     }
 
@@ -3147,7 +4748,9 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
       setProfileDirty(false);
       setProfileStatusMessage(t('codexProfileSaved'), 'ok');
       onProfileChanged?.(normalizeCodexProfile(snapshot.profile));
-      await loadFile(activeFile);
+      if (!isClaudeConfigFile(activeFile)) {
+        await loadFile(activeFile);
+      }
       showToast(t('codexProfileSaved'));
     } catch (error) {
       setProfileStatusMessage(error.message, 'error');
@@ -3157,17 +4760,59 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
     }
   };
 
+  const saveClaudeProfile = async () => {
+    if (dirty && isClaudeConfigFile(activeFile) && !window.confirm(t('profileSaveDiscardConfirm'))) {
+      return;
+    }
+
+    setClaudeProfileSaving(true);
+    setClaudeProfileStatusMessage(`${t('save')}...`);
+    try {
+      const snapshot = await bridge.writeClaudeProfile(claudeProfile);
+      setClaudeProfile(normalizeClaudeProfile(snapshot.profile));
+      setClaudeProfileDirty(false);
+      setClaudeProfileStatusMessage(t('claudeProfileSaved'), 'ok');
+      if (isClaudeConfigFile(activeFile)) {
+        await loadFile(activeFile);
+      }
+      showToast(t('claudeProfileSaved'));
+    } catch (error) {
+      setClaudeProfileStatusMessage(error.message, 'error');
+      showToast(t('saveFailed', { message: error.message }));
+    } finally {
+      setClaudeProfileSaving(false);
+    }
+  };
+
+  const saveImageApiConfig = async () => {
+    setImageApiSaving(true);
+    setImageApiStatusMessage(`${t('save')}...`);
+    try {
+      const snapshot = await bridge.writeImageApiConfig(imageApiConfig);
+      setImageApiConfig(normalizeImageApiConfig(snapshot));
+      setImageApiDirty(false);
+      setImageApiStatusMessage(t('imageApiConfigSaved'), 'ok');
+      showToast(t('imageApiConfigSaved'));
+    } catch (error) {
+      setImageApiStatusMessage(error.message, 'error');
+      showToast(t('saveFailed', { message: error.message }));
+    } finally {
+      setImageApiSaving(false);
+    }
+  };
+
   const save = async () => {
+    const meta = getConfigFileMeta(activeFile);
     const valid = await validate();
     if (!valid) {
-      showToast(t('invalidNotSaved', { name: codexFileMeta[activeFile].invalid }));
+      showToast(t('invalidNotSaved', { name: meta.invalid }));
       return;
     }
 
     setSaving(true);
     setStatusMessage(`${t('save')}...`);
     try {
-      const snapshot = await bridge.writeCodexConfig(activeFile, value);
+      const snapshot = await writeCliConfigFile(activeFile, value);
       setPathText(snapshot.path);
       setValue(snapshot.content || '');
       setLastSavedValue(snapshot.content || '');
@@ -3175,10 +4820,16 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
       setInvalid(false);
       const backupNote = snapshot.backupPath ? '，已生成备份' : '';
       setStatusMessage(`已保存${backupNote}`, 'ok');
-      showToast(`${codexFileMeta[activeFile].saved}${backupNote}。`);
-      syncProfileState().catch((error) => {
-        setProfileStatusMessage(error.message, 'error');
-      });
+      showToast(`${meta.saved}${backupNote}。`);
+      if (!isClaudeConfigFile(activeFile)) {
+        syncProfileState().catch((error) => {
+          setProfileStatusMessage(error.message, 'error');
+        });
+      } else {
+        loadClaudeProfile().catch((error) => {
+          setClaudeProfileStatusMessage(error.message, 'error');
+        });
+      }
       loadBackups(activeFile).catch((error) => {
         setBackups([]);
         setSelectedBackup('');
@@ -3197,15 +4848,16 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
       return;
     }
 
+    const meta = getConfigFileMeta(activeFile);
     const confirmKey = dirty || profileDirty ? 'restoreBackupDirtyConfirm' : 'restoreBackupConfirm';
-    if (!window.confirm(t(confirmKey, { name: codexFileMeta[activeFile].title }))) {
+    if (!window.confirm(t(confirmKey, { name: meta.title }))) {
       return;
     }
 
     setRestoring(true);
     setStatusMessage(`${t('restoreBackup')}...`);
     try {
-      const snapshot = await bridge.restoreCodexConfigBackup(activeFile, selectedBackup);
+      const snapshot = await restoreCliConfigFileBackup(activeFile, selectedBackup);
       setPathText(snapshot.path);
       setValue(snapshot.content || '');
       setLastSavedValue(snapshot.content || '');
@@ -3214,9 +4866,15 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
       const restoredMessage = snapshot.backupPath ? t('restoreBackupSavedWithBackup') : t('restoreBackupSaved');
       setStatusMessage(restoredMessage, 'ok');
       showToast(t('restoreBackupSavedToast', { name: snapshot.restoredFrom?.name || selectedBackup }));
-      syncProfileState().catch((error) => {
-        setProfileStatusMessage(error.message, 'error');
-      });
+      if (!isClaudeConfigFile(activeFile)) {
+        syncProfileState().catch((error) => {
+          setProfileStatusMessage(error.message, 'error');
+        });
+      } else {
+        loadClaudeProfile().catch((error) => {
+          setClaudeProfileStatusMessage(error.message, 'error');
+        });
+      }
       loadBackups(activeFile).catch((error) => {
         setBackups([]);
         setSelectedBackup('');
@@ -3231,20 +4889,45 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
   };
 
   const openFolder = () => {
-    bridge.openCodexConfigFolder().catch((error) => showToast(t('openDirFailed', { message: error.message })));
+    const openConfigFolder = isClaudeConfigFile(activeFile)
+      ? bridge.openClaudeConfigFolder
+      : bridge.openCodexConfigFolder;
+    openConfigFolder().catch((error) => showToast(t('openDirFailed', { message: error.message })));
+  };
+
+  const openImageApiHelp = () => {
+    bridge.openExternalUrl(imageApiHelpUrl).catch((error) => {
+      showToast(t('openUrlFailed', { message: error.message }));
+    });
   };
 
   const selectClassName = 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50';
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent id="codexConfigPanel" className="grid h-[calc(100vh-100px)] w-[min(980px,calc(100vw-32px))] grid-rows-[auto_1fr_auto] p-0">
+      <DialogContent
+        id="codexConfigPanel"
+        className="left-4 bottom-4 right-auto top-auto grid h-[min(820px,calc(100vh-96px))] max-h-[calc(100vh-96px)] w-[min(980px,calc(100vw-32px))] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden p-0"
+      >
         <DialogHeader>
           <DialogTitle id="codexConfigTitle">{t('settings')}</DialogTitle>
           <DialogDescription id="codexConfigPath" title={pathText}>{t('settingsDescription')}</DialogDescription>
         </DialogHeader>
 
-        <div className="grid min-h-0 grid-rows-[auto_auto_auto_auto_minmax(0,1fr)_auto] gap-2 p-3">
+        <Tabs
+          value={activeSettingsTab}
+          onValueChange={setActiveSettingsTab}
+          className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] p-3"
+        >
+          <TabsList className="w-full justify-start overflow-x-auto">
+            <TabsTrigger className="shrink-0" value="preferences">{t('preferences')}</TabsTrigger>
+            <TabsTrigger className="shrink-0" value="imageApi">{t('imageApiConfig')}</TabsTrigger>
+            <TabsTrigger className="shrink-0" value="usage">{t('usageTracking')}</TabsTrigger>
+            <TabsTrigger className="shrink-0" value="quickConfig">{t('codexQuickConfig')}</TabsTrigger>
+            <TabsTrigger className="shrink-0" value="files">{t('configFiles')}</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="preferences" className="min-h-0 overflow-y-auto pr-1">
           <div className="grid gap-3 rounded-md border border-border bg-muted/35 p-3">
             <div className="grid gap-2">
               <div className="grid gap-1.5">
@@ -3263,7 +4946,128 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
               </div>
             </div>
           </div>
+          </TabsContent>
 
+          <TabsContent value="imageApi" className="min-h-0 overflow-y-auto pr-1">
+          <div className="grid gap-3">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-card/65 px-3 py-2 text-xs text-muted-foreground">
+            <span className="min-w-[220px] flex-1 leading-5">{t('imageApiHelp')}</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 shrink-0 gap-1.5 px-2"
+              onClick={openImageApiHelp}
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              {t('imageApiHelpLink')}
+            </Button>
+          </div>
+          <div className="grid gap-3 rounded-md border border-border bg-muted/35 p-3">
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+              <div className="text-sm font-semibold">{t('imageApiConfig')}</div>
+              <div
+                className={cn(
+                  'min-h-5 text-sm text-muted-foreground',
+                  imageApiStatusTone === 'ok' && 'text-emerald-700 dark:text-emerald-200',
+                  imageApiStatusTone === 'error' && 'text-red-700 dark:text-red-200'
+                )}
+              >
+                {imageApiStatus}
+              </div>
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-6">
+              <div className="grid min-w-0 gap-1.5 md:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">{t('imageApiUrl')}</Label>
+                <Input
+                  value={imageApiConfig.baseUrl}
+                  placeholder={t('baseUrlPlaceholder')}
+                  spellCheck={false}
+                  onChange={(event) => handleImageApiConfigChange('baseUrl', event.target.value)}
+                />
+              </div>
+              <div className="grid min-w-0 gap-1.5 md:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">{t('apiKey')}</Label>
+                <Input
+                  type="password"
+                  value={imageApiConfig.apiKey}
+                  placeholder={imageApiConfig.apiKeySet ? t('imageApiKeySavedPlaceholder') : t('apiKeyPlaceholder')}
+                  spellCheck={false}
+                  onChange={(event) => handleImageApiConfigChange('apiKey', event.target.value)}
+                />
+              </div>
+              <div className="grid min-w-0 gap-1.5 md:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">{t('imageApiModel')}</Label>
+                <Input
+                  value={imageApiConfig.model}
+                  placeholder="gpt-image-2"
+                  spellCheck={false}
+                  onChange={(event) => handleImageApiConfigChange('model', event.target.value)}
+                />
+              </div>
+              <div className="grid min-w-0 gap-1.5 md:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">{t('imageApiSize')}</Label>
+                <Input
+                  value={imageApiConfig.size}
+                  placeholder="1024x1024"
+                  spellCheck={false}
+                  onChange={(event) => handleImageApiConfigChange('size', event.target.value)}
+                />
+              </div>
+              <div className="grid min-w-0 gap-1.5 md:col-span-1">
+                <Label className="text-xs font-medium text-muted-foreground">{t('imageApiCount')}</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="4"
+                  value={imageApiConfig.n}
+                  onChange={(event) => handleImageApiConfigChange('n', event.target.value)}
+                />
+              </div>
+              <div className="flex min-w-0 items-end gap-2 md:col-span-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={clearImageApiKey}
+                  disabled={imageApiSaving || (!imageApiConfig.apiKeySet && !imageApiConfig.apiKey)}
+                >
+                  <X className="h-4 w-4" />
+                  {t('clearApiKey')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="primary"
+                  onClick={saveImageApiConfig}
+                  disabled={imageApiSaving}
+                >
+                  <Save className="h-4 w-4" />
+                  {t('saveImageApiConfig')}
+                </Button>
+              </div>
+            </div>
+          </div>
+          </div>
+          </TabsContent>
+
+          <TabsContent value="usage" className="min-h-0 overflow-y-auto pr-1">
+          <UsageTrackingPanel
+            language={language}
+            loading={usageLoading}
+            onClearRecords={clearUsageRecords}
+            onRateChange={handleUsageRateChange}
+            onSaveRates={saveUsageRates}
+            ratesDraft={usageRatesDraft}
+            saving={usageSaving}
+            status={usageStatus}
+            statusTone={usageStatusTone}
+            tracking={usageTracking}
+            t={t}
+          />
+          </TabsContent>
+
+          <TabsContent value="quickConfig" className="min-h-0 overflow-y-auto pr-1">
+          <div className="grid gap-3">
           <div className="grid gap-3 rounded-md border border-border bg-muted/35 p-3">
             <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
               <div className="text-sm font-semibold">{t('codexQuickConfig')}</div>
@@ -3470,12 +5274,149 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
               </Button>
             </div>
           </div>
+          <div className="grid gap-3 rounded-md border border-border bg-muted/35 p-3">
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+              <div className="text-sm font-semibold">{t('claudeQuickConfig')}</div>
+              <div
+                className={cn(
+                  'min-h-5 text-sm text-muted-foreground',
+                  claudeProfileStatusTone === 'ok' && 'text-emerald-700 dark:text-emerald-200',
+                  claudeProfileStatusTone === 'error' && 'text-red-700 dark:text-red-200'
+                )}
+              >
+                {claudeProfileStatus}
+              </div>
+            </div>
 
+            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto_auto_auto] md:items-end">
+              <div className="grid min-w-0 gap-1.5">
+                <Label htmlFor="claudeQuickProfileSelect" className="text-xs font-medium text-muted-foreground">
+                  {t('quickProfile')}
+                </Label>
+                <select
+                  id="claudeQuickProfileSelect"
+                  className={selectClassName}
+                  value={selectedClaudeQuickProfileId}
+                  title={claudeQuickProfilesPath}
+                  onChange={(event) => handleClaudeQuickProfileSelect(event.target.value)}
+                  disabled={claudeQuickProfilesLoading || claudeProfileSaving || restoring}
+                >
+                  <option value="">{t('currentClaudeProfile')}</option>
+                  {claudeQuickProfiles.map((record) => (
+                    <option key={record.id} value={record.id}>{formatClaudeQuickProfileLabel(record)}</option>
+                  ))}
+                </select>
+              </div>
+              <Button
+                type="button"
+                onClick={() => saveClaudeQuickProfilePreset()}
+                disabled={claudeQuickProfilesLoading || claudeProfileSaving || restoring}
+              >
+                <Save className="h-4 w-4" />
+                {t('saveQuickProfile')}
+              </Button>
+              <Button
+                type="button"
+                onClick={() => saveClaudeQuickProfilePreset({ saveAs: true })}
+                disabled={claudeQuickProfilesLoading || claudeProfileSaving || restoring}
+              >
+                <Plus className="h-4 w-4" />
+                {t('saveQuickProfileAs')}
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={deleteClaudeQuickProfilePreset}
+                disabled={!selectedClaudeQuickProfile || claudeQuickProfilesLoading || claudeProfileSaving || restoring}
+              >
+                <Trash2 className="h-4 w-4" />
+                {t('deleteQuickProfile')}
+              </Button>
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-6">
+              <div className="grid min-w-0 gap-1.5 md:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">{t('model')}</Label>
+                <Input
+                  value={claudeProfile.model}
+                  placeholder="sonnet"
+                  spellCheck={false}
+                  onChange={(event) => handleClaudeProfileChange('model', event.target.value)}
+                />
+              </div>
+              <div className="grid min-w-0 gap-1.5 md:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">{t('claudeEffortLevel')}</Label>
+                <select
+                  className={selectClassName}
+                  value={claudeProfile.effortLevel}
+                  onChange={(event) => handleClaudeProfileChange('effortLevel', event.target.value)}
+                >
+                  {claudeEffortLevelOptions.map((option) => (
+                    <option key={option || 'default'} value={option}>{option || t('defaultValue')}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid min-w-0 gap-1.5 md:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">{t('claudePermissionMode')}</Label>
+                <select
+                  className={selectClassName}
+                  value={claudeProfile.permissionMode}
+                  onChange={(event) => handleClaudeProfileChange('permissionMode', event.target.value)}
+                >
+                  {claudePermissionModeOptions.map((option) => (
+                    <option key={option || 'default'} value={option}>{option || t('defaultValue')}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid min-w-0 gap-1.5 md:col-span-3">
+                <Label className="text-xs font-medium text-muted-foreground">{t('claudeApiKey')}</Label>
+                <Input
+                  type="password"
+                  value={claudeProfile.apiKey}
+                  placeholder="sk-ant-..."
+                  spellCheck={false}
+                  onChange={(event) => handleClaudeProfileChange('apiKey', event.target.value)}
+                />
+              </div>
+              <div className="grid min-w-0 gap-1.5 md:col-span-3">
+                <Label className="text-xs font-medium text-muted-foreground">{t('claudeBaseUrl')}</Label>
+                <Input
+                  value={claudeProfile.baseUrl}
+                  placeholder="https://api.anthropic.com"
+                  spellCheck={false}
+                  onChange={(event) => handleClaudeProfileChange('baseUrl', event.target.value)}
+                />
+              </div>
+              <div className="grid min-w-0 gap-1.5 md:col-span-6">
+                <Label className="text-xs font-medium text-muted-foreground">{t('claudeQuickModel')}</Label>
+                <QuickModelButtons
+                  currentModel={claudeProfile.model}
+                  disabled={claudeQuickProfilesLoading || claudeProfileSaving || restoring}
+                  models={quickClaudeModelOptions}
+                  onSelect={(model) => handleClaudeProfileChange('model', model)}
+                  t={t}
+                />
+                <div className="text-xs text-muted-foreground">{t('claudeQuickModelHint')}</div>
+              </div>
+            </div>
+
+            <div className="flex min-w-0 justify-end">
+              <Button type="button" variant="primary" onClick={saveClaudeProfile} disabled={claudeProfileSaving || restoring}>
+                <Save className="h-4 w-4" />
+                {t('applyQuickConfig')}
+              </Button>
+            </div>
+          </div>
+          </div>
+          </TabsContent>
+
+          <TabsContent value="files" className="min-h-0 overflow-hidden">
+          <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-2">
           <div className="grid gap-1.5 rounded-md border border-border bg-card/70 p-3">
             <div className="text-sm font-semibold">{t('rawCodexEditor')}</div>
             <div className="text-xs text-muted-foreground">{t('rawCodexEditorDescription')}</div>
             <div className="truncate font-mono text-[11px] text-muted-foreground" title={pathText}>
-              {pathText || codexFileMeta[activeFile].title}
+              {pathText || getConfigFileMeta(activeFile).title}
             </div>
           </div>
 
@@ -3487,6 +5428,9 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
                 </TabsTrigger>
                 <TabsTrigger className={cn(activeFile === 'config' && 'active')} data-codex-file="config" value="config" onClick={() => switchFile('config')}>
                   config.toml
+                </TabsTrigger>
+                <TabsTrigger className={cn(activeFile === 'claudeSettings' && 'active')} data-config-file="claudeSettings" value="claudeSettings" onClick={() => switchFile('claudeSettings')}>
+                  Claude settings.json
                 </TabsTrigger>
               </TabsList>
             </Tabs>
@@ -3522,7 +5466,7 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
 
           <Textarea
             id="codexConfigEditor"
-            className={cn('config-editor h-full font-mono text-[13px]', invalid && 'is-invalid')}
+            className={cn('config-editor h-full min-h-0 font-mono text-[13px]', invalid && 'is-invalid')}
             ref={editorRef}
             spellCheck={false}
             value={value}
@@ -3548,9 +5492,12 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
           >
             {status}
           </div>
-        </div>
+          </div>
+          </TabsContent>
+        </Tabs>
 
-        <DialogFooter>
+        {activeSettingsTab === 'files' ? (
+        <DialogFooter className="flex-wrap">
           <Button id="reloadCodexConfig" type="button" onClick={reload}>
             <RefreshCw className="h-4 w-4" />
             {t('reload')}
@@ -3568,6 +5515,7 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onProfile
             {t('save')}
           </Button>
         </DialogFooter>
+        ) : null}
       </DialogContent>
     </Dialog>
   );
@@ -3676,7 +5624,7 @@ function NewSessionDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent id="newSessionDialog" className="w-[min(640px,calc(100vw-32px))] p-0">
+      <DialogContent id="newSessionDialog" className="left-4 right-auto top-4 w-[min(640px,calc(100vw-32px))] p-0">
         <DialogHeader>
           <DialogTitle>{t('newSessionSource')}</DialogTitle>
           <DialogDescription>{t('newSessionSourceDescription')}</DialogDescription>
@@ -3766,6 +5714,382 @@ function NewSessionDialog({
             )}
           </div>
         </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AgentAvatar({ agent, className }) {
+  const [failed, setFailed] = useState(false);
+  const avatarUrl = localFilePathToUrl(agent?.avatarPath);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [avatarUrl]);
+
+  return (
+    <span
+      className={cn(
+        'inline-flex shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-muted text-muted-foreground',
+        className
+      )}
+      aria-hidden="true"
+    >
+      {avatarUrl && !failed ? (
+        <img
+          className="h-full w-full object-cover"
+          src={avatarUrl}
+          alt=""
+          draggable="false"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <Bot className="h-1/2 w-1/2" />
+      )}
+    </span>
+  );
+}
+
+function AgentsDialog({
+  agents,
+  initialCliProviderId = defaultCliProviderId,
+  language,
+  onAgentsChange,
+  onOpenChange,
+  onRunAgent,
+  open,
+  showToast,
+  t
+}) {
+  const selectableCliProviders = useMemo(() => getSelectableCliProviders(['project', 'directory']), []);
+  const initialProviderId = getInitialCliProviderId(initialCliProviderId, selectableCliProviders);
+  const avatarInputRef = useRef(null);
+  const [selectedAgentId, setSelectedAgentId] = useState('');
+  const [draftName, setDraftName] = useState('');
+  const [draftInstructions, setDraftInstructions] = useState('');
+  const [draftCliProviderId, setDraftCliProviderId] = useState(initialProviderId);
+  const [draftAvatarPath, setDraftAvatarPath] = useState('');
+  const [draftAvatarName, setDraftAvatarName] = useState('');
+  const [taskDescription, setTaskDescription] = useState('');
+  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
+  const draftAgentForAvatar = selectedAgent
+    ? { ...selectedAgent, avatarPath: draftAvatarPath, avatarName: draftAvatarName }
+    : null;
+  const normalizedName = draftName.trim();
+  const normalizedTask = trimTrailingLineBreaks(taskDescription).trim();
+  const dirty = Boolean(selectedAgent) && (
+    normalizedName !== selectedAgent.name ||
+    draftInstructions !== selectedAgent.instructions ||
+    draftCliProviderId !== selectedAgent.cliProviderId ||
+    draftAvatarPath !== String(selectedAgent.avatarPath || '') ||
+    draftAvatarName !== String(selectedAgent.avatarName || '')
+  );
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    if (!selectedAgentId || !agents.some((agent) => agent.id === selectedAgentId)) {
+      setSelectedAgentId(agents[0]?.id || '');
+    }
+  }, [agents, open, selectedAgentId]);
+
+  useEffect(() => {
+    if (!selectedAgent) {
+      setDraftName('');
+      setDraftInstructions('');
+      setDraftCliProviderId(initialProviderId);
+      setDraftAvatarPath('');
+      setDraftAvatarName('');
+      return;
+    }
+
+    setDraftName(selectedAgent.name);
+    setDraftInstructions(selectedAgent.instructions);
+    setDraftCliProviderId(getInitialCliProviderId(selectedAgent.cliProviderId, selectableCliProviders));
+    setDraftAvatarPath(selectedAgent.avatarPath || '');
+    setDraftAvatarName(selectedAgent.avatarName || '');
+  }, [initialProviderId, selectableCliProviders, selectedAgent]);
+
+  const createAgent = useCallback(() => {
+    const agent = createAgentRecord(t('newAgent'), initialProviderId);
+    onAgentsChange([agent, ...agents]);
+    setSelectedAgentId(agent.id);
+  }, [agents, initialProviderId, onAgentsChange, t]);
+
+  const saveAgent = useCallback((options = {}) => {
+    if (!selectedAgent) {
+      showToast(t('agentRequired'));
+      return null;
+    }
+
+    if (!normalizedName) {
+      showToast(t('agentNameRequired'));
+      return null;
+    }
+
+    const updatedAgent = {
+      ...selectedAgent,
+      name: normalizedName,
+      instructions: draftInstructions,
+      cliProviderId: getInitialCliProviderId(draftCliProviderId, selectableCliProviders),
+      avatarPath: draftAvatarPath,
+      avatarName: draftAvatarName,
+      updatedAt: Date.now()
+    };
+
+    onAgentsChange(agents.map((agent) => (agent.id === updatedAgent.id ? updatedAgent : agent)));
+    if (!options.silent) {
+      showToast(t('agentSaved', { name: updatedAgent.name }));
+    }
+    return updatedAgent;
+  }, [
+    agents,
+    draftCliProviderId,
+    draftAvatarName,
+    draftAvatarPath,
+    draftInstructions,
+    normalizedName,
+    onAgentsChange,
+    selectableCliProviders,
+    selectedAgent,
+    showToast,
+    t
+  ]);
+
+  const deleteAgent = useCallback(() => {
+    if (!selectedAgent) {
+      return;
+    }
+
+    if (!window.confirm(t('agentDeleteConfirm', { name: selectedAgent.name }))) {
+      return;
+    }
+
+    const nextAgents = agents.filter((agent) => agent.id !== selectedAgent.id);
+    onAgentsChange(nextAgents);
+    setSelectedAgentId(nextAgents[0]?.id || '');
+    showToast(t('agentDeleted', { name: selectedAgent.name }));
+  }, [agents, onAgentsChange, selectedAgent, showToast, t]);
+
+  const uploadAgentAvatar = useCallback(async (file) => {
+    if (!selectedAgent) {
+      showToast(t('agentRequired'));
+      return;
+    }
+    if (!isAgentAvatarFile(file)) {
+      showToast(t('agentAvatarInvalid'));
+      return;
+    }
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const savedAvatar = await bridge.saveAgentAvatar({
+        agentId: selectedAgent.id,
+        fileName: file.name,
+        mimeType: file.type,
+        bytes: new Uint8Array(arrayBuffer)
+      });
+      setDraftAvatarPath(savedAvatar.path || '');
+      setDraftAvatarName(savedAvatar.name || file.name || '');
+      showToast(t('agentAvatarSaved'));
+    } catch (error) {
+      showToast(t('agentAvatarSaveFailed', { message: error.message }));
+    }
+  }, [selectedAgent, showToast, t]);
+
+  const removeAgentAvatar = useCallback(() => {
+    setDraftAvatarPath('');
+    setDraftAvatarName('');
+  }, []);
+
+  const runAgent = useCallback(() => {
+    if (!selectedAgent) {
+      showToast(t('agentRequired'));
+      return;
+    }
+
+    if (!normalizedTask) {
+      showToast(t('agentTaskRequired'));
+      return;
+    }
+
+    const agentToRun = dirty ? saveAgent({ silent: true }) : selectedAgent;
+    if (!agentToRun) {
+      return;
+    }
+
+    onRunAgent(agentToRun, normalizedTask);
+    setTaskDescription('');
+  }, [dirty, normalizedTask, onRunAgent, saveAgent, selectedAgent, showToast, t]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent id="agentsDialog" className="grid h-[min(760px,calc(100vh-96px))] w-[min(980px,calc(100vw-32px))] grid-rows-[auto_minmax(0,1fr)_auto] p-0">
+        <DialogHeader>
+          <DialogTitle>{t('agentsDialogTitle')}</DialogTitle>
+          <DialogDescription>{t('agentsDialogDescription')}</DialogDescription>
+        </DialogHeader>
+
+        <div className="grid min-h-0 grid-cols-[260px_minmax(0,1fr)]">
+          <aside className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] border-r border-border bg-muted/25">
+            <div className="border-b border-border p-3">
+              <Button type="button" className="w-full justify-start" size="sm" onClick={createAgent}>
+                <Plus className="h-4 w-4" />
+                {t('newAgent')}
+              </Button>
+            </div>
+            <div className="min-h-0 overflow-auto p-2">
+              {agents.length === 0 && (
+                <div className="p-3 text-xs leading-5 text-muted-foreground">{t('agentsEmpty')}</div>
+              )}
+              {agents.map((agent) => {
+                const provider = resolveCliProvider(agent.cliProviderId);
+                return (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                      selectedAgentId === agent.id && 'bg-accent text-accent-foreground'
+                    )}
+                    onClick={() => setSelectedAgentId(agent.id)}
+                  >
+                    <AgentAvatar agent={agent} className="h-9 w-9" />
+                    <span className="grid min-w-0 flex-1 gap-1">
+                      <span className="truncate text-sm font-semibold">{agent.name}</span>
+                      <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                        <CliProviderIcon provider={provider} className="h-3.5 w-3.5" />
+                        <span className="truncate">{getCliProviderBadgeLabel(provider, language)}</span>
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
+
+          <div className="grid min-h-0 grid-rows-[minmax(0,1fr)] overflow-auto p-4">
+            {selectedAgent ? (
+              <div className="grid content-start gap-4">
+                <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-card/70 p-3">
+                  <AgentAvatar agent={draftAgentForAvatar} className="h-16 w-16" />
+                  <div className="grid min-w-[180px] flex-1 gap-1">
+                    <div className="text-sm font-semibold">{t('agentAvatar')}</div>
+                    <div className="text-xs leading-5 text-muted-foreground">
+                      {t('agentAvatarHint')}
+                    </div>
+                    {draftAvatarName && (
+                      <div className="truncate font-mono text-[11px] text-muted-foreground" title={draftAvatarName}>
+                        {draftAvatarName}
+                      </div>
+                    )}
+                  </div>
+                  <input
+                    ref={avatarInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] || null;
+                      event.target.value = '';
+                      if (file) {
+                        void uploadAgentAvatar(file);
+                      }
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => avatarInputRef.current?.click()}
+                  >
+                    <ImagePlus className="h-4 w-4" />
+                    {t('uploadAgentAvatar')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={!draftAvatarPath}
+                    onClick={removeAgentAvatar}
+                  >
+                    <X className="h-4 w-4" />
+                    {t('removeAgentAvatar')}
+                  </Button>
+                </div>
+
+                <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_220px]">
+                  <div className="grid gap-2">
+                    <Label htmlFor="agentName">{t('agentName')}</Label>
+                    <Input
+                      id="agentName"
+                      value={draftName}
+                      placeholder={t('agentNamePlaceholder')}
+                      onChange={(event) => setDraftName(event.target.value)}
+                    />
+                  </div>
+                  <CliProviderSelectField
+                    id="agentCliProvider"
+                    language={language}
+                    label={t('cliProvider')}
+                    onChange={setDraftCliProviderId}
+                    providerId={draftCliProviderId}
+                    providers={selectableCliProviders}
+                    showSummary={false}
+                    targetType="project"
+                    t={t}
+                  />
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="agentInstructions">{t('agentInstructions')}</Label>
+                  <Textarea
+                    id="agentInstructions"
+                    className="min-h-[220px] resize-y font-mono text-xs leading-5"
+                    value={draftInstructions}
+                    placeholder={t('agentInstructionsPlaceholder')}
+                    onChange={(event) => setDraftInstructions(event.target.value)}
+                  />
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="agentTask">{t('agentTask')}</Label>
+                  <Textarea
+                    id="agentTask"
+                    className="min-h-[132px] resize-y"
+                    value={taskDescription}
+                    placeholder={t('agentTaskPlaceholder')}
+                    onChange={(event) => setTaskDescription(event.target.value)}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="flex min-h-[280px] items-center justify-center rounded-md border border-dashed border-border text-sm text-muted-foreground">
+                {t('agentsEmpty')}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            {t('close')}
+          </Button>
+          <Button type="button" variant="outline" onClick={deleteAgent} disabled={!selectedAgent}>
+            <Trash2 className="h-4 w-4" />
+            {t('deleteAgent')}
+          </Button>
+          <Button type="button" variant={dirty ? 'primary' : 'outline'} onClick={() => saveAgent()} disabled={!selectedAgent}>
+            <Save className="h-4 w-4" />
+            {t('saveAgent')}
+          </Button>
+          <Button type="button" variant="primary" onClick={runAgent} disabled={!selectedAgent || !normalizedTask}>
+            <Play className="h-4 w-4" />
+            {t('agentRun')}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
@@ -3960,56 +6284,19 @@ function SystemStats({ stats, t }) {
 }
 
 function SidebarThemeControl({ compact = false, onThemeChange, t, theme }) {
-  const options = [
-    { value: 'light', label: t('light'), Icon: Sun },
-    { value: 'dark', label: t('dark'), Icon: Moon }
-  ];
-
-  if (compact) {
-    return (
-      <div
-        className="grid gap-1 rounded-lg border border-border bg-card/70 p-1"
-        role="group"
-        aria-label={t('appearance')}
-      >
-        {options.map(({ value, label, Icon }) => (
-          <Button
-            key={value}
-            type="button"
-            size="icon"
-            variant={theme === value ? 'primary' : 'ghost'}
-            className="h-8 w-8"
-            title={label}
-            aria-label={label}
-            onClick={() => onThemeChange(value)}
-          >
-            <Icon className="h-4 w-4" />
-          </Button>
-        ))}
-      </div>
-    );
-  }
+  const nextTheme = theme === 'dark' ? 'light' : 'dark';
+  const Icon = nextTheme === 'dark' ? Moon : Sun;
+  const label = `${t('appearance')}: ${t(nextTheme)}`;
 
   return (
-    <div className="grid gap-2 rounded-md border border-border bg-card/70 p-2">
-      <div className="px-1 text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-        {t('appearance')}
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        {options.map(({ value, label, Icon }) => (
-          <Button
-            key={value}
-            type="button"
-            variant={theme === value ? 'primary' : 'outline'}
-            className="w-full justify-center"
-            onClick={() => onThemeChange(value)}
-          >
-            <Icon className="h-4 w-4" />
-            {label}
-          </Button>
-        ))}
-      </div>
-    </div>
+    <IconButton
+      label={label}
+      type="button"
+      className={cn(!compact && 'justify-self-start')}
+      onClick={() => onThemeChange(nextTheme)}
+    >
+      <Icon className="h-4 w-4" />
+    </IconButton>
   );
 }
 
@@ -4049,7 +6336,7 @@ function GridSessionDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent id="gridSessionDialog" className="w-[min(420px,calc(100vw-32px))] p-0">
+      <DialogContent id="gridSessionDialog" className="left-4 right-auto top-4 w-[min(420px,calc(100vw-32px))] p-0">
         <DialogHeader>
           <DialogTitle>{t('gridSessionDialogTitle')}</DialogTitle>
           <DialogDescription>{t('gridSessionDialogDescription')}</DialogDescription>
@@ -4120,242 +6407,6 @@ function GridSessionDialog({
   );
 }
 
-function getWorkspaceTreeNodeLabel(node, t) {
-  if (!node) {
-    return '';
-  }
-
-  if (node.type === 'omitted') {
-    return t('workspaceTreeOmitted', { count: node.omittedCount || 0 });
-  }
-
-  if (node.type === 'depth-limit') {
-    return t('workspaceTreeDepthLimit');
-  }
-
-  if (node.type === 'unreadable') {
-    return t('workspaceTreeUnreadable', { message: node.message || 'error' });
-  }
-
-  return node.name || node.relativePath || node.path || '';
-}
-
-function WorkspaceTreeNode({ depth = 0, expandedIds, node, onToggle, t }) {
-  const children = Array.isArray(node?.children) ? node.children : [];
-  const directory = node?.type === 'directory';
-  const notice = node?.type === 'omitted' || node?.type === 'depth-limit' || node?.type === 'unreadable';
-  const canExpand = directory && children.length > 0;
-  const expanded = canExpand && expandedIds.has(node.id);
-  const label = getWorkspaceTreeNodeLabel(node, t);
-  const title = [node?.relativePath || label, node?.path].filter(Boolean).join('\n');
-  const rowClassName = cn(
-    'workspace-tree-row',
-    directory && 'is-directory',
-    notice && 'is-notice',
-    node?.type === 'unreadable' && 'is-error'
-  );
-  const rowStyle = { '--tree-indent': `${depth * 14}px` };
-  const fileIcon = node?.type === 'link' ? ExternalLink : File;
-  const TreeIcon = directory ? (expanded ? FolderOpen : Folder) : fileIcon;
-  const rowChildren = (
-    <>
-      <span className="workspace-tree-expander" aria-hidden="true">
-        {canExpand ? (
-          expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />
-        ) : null}
-      </span>
-      <TreeIcon className="workspace-tree-node-icon h-3.5 w-3.5" />
-      <span className="workspace-tree-node-name">{label}</span>
-      {node?.ignored && <span className="workspace-tree-node-tag">{t('workspaceTreeIgnored')}</span>}
-      {node?.link && <span className="workspace-tree-node-tag">{t('workspaceTreeLink')}</span>}
-    </>
-  );
-
-  return (
-    <li role="treeitem" aria-expanded={canExpand ? expanded : undefined} aria-level={depth + 1}>
-      {canExpand ? (
-        <button
-          type="button"
-          className={rowClassName}
-          style={rowStyle}
-          title={title || undefined}
-          onClick={() => onToggle(node.id)}
-        >
-          {rowChildren}
-        </button>
-      ) : (
-        <div className={rowClassName} style={rowStyle} title={title || undefined}>
-          {rowChildren}
-        </div>
-      )}
-
-      {canExpand && expanded && (
-        <ul className="workspace-tree-children" role="group">
-          {children.map((child) => (
-            <WorkspaceTreeNode
-              key={child.id || `${node.id}:${child.name}`}
-              depth={depth + 1}
-              expandedIds={expandedIds}
-              node={child}
-              onToggle={onToggle}
-              t={t}
-            />
-          ))}
-        </ul>
-      )}
-    </li>
-  );
-}
-
-function WorkspaceTreeView({ root, t }) {
-  const [expandedIds, setExpandedIds] = useState(() => new Set());
-
-  useEffect(() => {
-    setExpandedIds(root?.id ? new Set([root.id]) : new Set());
-  }, [root?.id]);
-
-  const toggleNode = useCallback((nodeId) => {
-    setExpandedIds((current) => {
-      const next = new Set(current);
-      if (next.has(nodeId)) {
-        next.delete(nodeId);
-      } else {
-        next.add(nodeId);
-      }
-      return next;
-    });
-  }, []);
-
-  if (!root) {
-    return null;
-  }
-
-  return (
-    <ul className="workspace-tree-list" role="tree">
-      <WorkspaceTreeNode
-        expandedIds={expandedIds}
-        node={root}
-        onToggle={toggleNode}
-        t={t}
-      />
-    </ul>
-  );
-}
-
-function WorkspaceTreeContent({ state, t }) {
-  const snapshot = state.snapshot;
-  const root = snapshot?.root || null;
-
-  if (state.status === 'loading' && !root) {
-    return (
-      <div className="workspace-tree-placeholder">
-        <RefreshCw className="h-4 w-4 animate-spin" />
-        <span>{t('workspaceTreeLoading')}</span>
-      </div>
-    );
-  }
-
-  if (state.status === 'error') {
-    return (
-      <div className="workspace-tree-placeholder is-error">
-        {state.error || t('workspaceTreeNoData')}
-      </div>
-    );
-  }
-
-  if (!root) {
-    return (
-      <div className="workspace-tree-placeholder">
-        {t('workspaceTreeNoData')}
-      </div>
-    );
-  }
-
-  return <WorkspaceTreeView root={root} t={t} />;
-}
-
-function WorkspaceTreeSidebar({
-  currentPath,
-  onClose,
-  onCopy,
-  onOpen,
-  onRefresh,
-  open,
-  state,
-  t
-}) {
-  const snapshot = state.snapshot;
-  const currentTreePath = snapshot?.cwd || state.requestedPath || currentPath || '';
-  const summary = state.status === 'error'
-    ? state.error || t('workspaceTreeNoData')
-    : formatWorkspaceTreeSummary(snapshot, t);
-  const loading = state.status === 'loading';
-
-  return (
-    <aside className={cn('workspace-tree-sidebar', open && 'is-open')} aria-label={t('workspaceTreeTitle')}>
-      {!open && (
-        <div className="workspace-tree-rail">
-          <IconButton
-            id="openWorkspaceTree"
-            label={t('workspaceTreeOpen')}
-            disabled={!currentPath}
-            onClick={onOpen}
-          >
-            <PanelRightOpen className="h-4 w-4" />
-          </IconButton>
-        </div>
-      )}
-
-      {open && (
-        <section className="workspace-tree-panel">
-          <header className="workspace-tree-panel-header">
-            <div className="min-w-0">
-              <div className="workspace-tree-panel-title">
-                <FolderOpen className="h-4 w-4 text-primary" />
-                <span>{t('workspaceTree')}</span>
-              </div>
-              <div className="workspace-tree-path" title={currentTreePath || undefined}>
-                {currentTreePath || t('workspaceTreeUnavailable')}
-              </div>
-            </div>
-            <IconButton label={t('workspaceTreeClose')} variant="ghost" onClick={onClose}>
-              <PanelRightClose className="h-4 w-4" />
-            </IconButton>
-          </header>
-
-          <div className="workspace-tree-panel-meta">
-            <div className={cn('workspace-tree-summary', state.status === 'error' && 'is-error')}>
-              {loading ? t('workspaceTreeLoading') : (summary || t('workspaceTreeNoData'))}
-            </div>
-            <div className="workspace-tree-actions">
-              <IconButton
-                label={t('reload')}
-                variant="ghost"
-                disabled={!currentPath || loading}
-                onClick={onRefresh}
-              >
-                <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
-              </IconButton>
-              <IconButton
-                label={t('copy')}
-                variant="ghost"
-                disabled={!snapshot?.text}
-                onClick={onCopy}
-              >
-                <Copy className="h-4 w-4" />
-              </IconButton>
-            </div>
-          </div>
-
-          <div className="workspace-tree-panel-body">
-            <WorkspaceTreeContent state={state} t={t} />
-          </div>
-        </section>
-      )}
-    </aside>
-  );
-}
-
 function CommandLineConfigDialog({
   initialCliProviderId = defaultCliProviderId,
   initialDirectory,
@@ -4400,7 +6451,7 @@ function CommandLineConfigDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent id="commandLineConfigDialog" className="w-[min(520px,calc(100vw-32px))] p-0">
+      <DialogContent id="commandLineConfigDialog" className="left-4 right-auto top-4 w-[min(520px,calc(100vw-32px))] p-0">
         <DialogHeader>
           <DialogTitle>{t('addCommandDialogTitle')}</DialogTitle>
           <DialogDescription>{t('addCommandDialogDescription')}</DialogDescription>
@@ -4492,7 +6543,7 @@ function ProjectConfigDialog({ onCreate, onOpenChange, open, t }) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent id="projectConfigDialog" className="w-[min(560px,calc(100vw-32px))] p-0">
+      <DialogContent id="projectConfigDialog" className="left-4 right-auto top-4 w-[min(560px,calc(100vw-32px))] p-0">
         <DialogHeader>
           <DialogTitle>{t('addProjectDialogTitle')}</DialogTitle>
           <DialogDescription>{t('addProjectDialogDescription')}</DialogDescription>
@@ -4552,9 +6603,24 @@ function ProjectConfigDialog({ onCreate, onOpenChange, open, t }) {
 
 function ReleaseInfoCard({
   appVersion,
+  changelog,
+  changelogLoading = false,
   t,
-  detail = false
+  detail = false,
+  onOpenRelease,
+  onClose
 }) {
+  const changelogSections = Array.isArray(changelog?.sections)
+    ? changelog.sections.filter((section) => (
+      section?.title || (Array.isArray(section?.notes) && section.notes.length > 0)
+    ))
+    : [];
+  const changelogError = String(changelog?.error || '').trim();
+  const hasChangelog = Boolean(changelog?.found && changelogSections.length > 0);
+  const sourceLabel = changelogLoading
+    ? t('loading')
+    : changelog?.source === 'local' ? t('changelogSourceLocal') : t('changelogSourceGithub');
+
   return (
     <div className={cn('sidebar-release-card', detail && 'is-detail')}>
       <div className="sidebar-release-header">
@@ -4562,9 +6628,73 @@ function ReleaseInfoCard({
           <div className="sidebar-release-kicker">{t('currentVersion')}</div>
           <div className="sidebar-release-version">{formatVersionLabel(appVersion)}</div>
         </div>
-        <Badge variant="success" className="sidebar-release-badge">
-          {t('localOnly')}
-        </Badge>
+        <div className="sidebar-release-actions">
+          <Badge
+            variant={changelog?.source === 'local' ? 'outline' : 'success'}
+            className="sidebar-release-badge"
+          >
+            {sourceLabel}
+          </Badge>
+          {onClose && (
+            <button
+              type="button"
+              className="sidebar-release-close"
+              aria-label={t('close')}
+              title={t('close')}
+              onClick={onClose}
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="sidebar-release-block">
+        <div className="sidebar-release-kicker">{t('changelogTitle')}</div>
+        {changelog?.date && (
+          <div className="sidebar-release-date">{changelog.date}</div>
+        )}
+        {changelog?.url && (
+          <button
+            type="button"
+            className="sidebar-release-link"
+            onClick={() => onOpenRelease?.(changelog.url)}
+          >
+            <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">{t('openRelease')}</span>
+          </button>
+        )}
+        {changelogLoading ? (
+          <div className="sidebar-release-empty">{t('changelogLoading')}</div>
+        ) : hasChangelog ? (
+          <div className="sidebar-release-changelog">
+            {changelogSections.map((section, sectionIndex) => (
+              <div
+                key={`${section.title || 'notes'}-${sectionIndex}`}
+                className="sidebar-release-section"
+              >
+                {section.title && (
+                  <div className="sidebar-release-section-title">{section.title}</div>
+                )}
+                {Array.isArray(section.notes) && section.notes.length > 0 && (
+                  <ul className="sidebar-release-notes">
+                    {section.notes.map((note, noteIndex) => (
+                      <li key={`${note}-${noteIndex}`} className="sidebar-release-note">
+                        {note}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className={cn('sidebar-release-empty', changelogError && 'is-error')}>
+            {changelogError
+              ? t('changelogReadFailed', { message: changelogError })
+              : t('changelogMissing')}
+          </div>
+        )}
       </div>
 
       <div className="sidebar-release-block">
@@ -4591,37 +6721,158 @@ function ReleaseInfo({
   compact = false
 }) {
   const [open, setOpen] = useState(false);
+  const [changelogState, setChangelogState] = useState({ status: 'idle', data: null });
+  const panelRef = useRef(null);
+  const triggerRef = useRef(null);
+  const changelogRequestIdRef = useRef(0);
   const versionLabel = formatVersionLabel(appVersion);
+
+  const loadChangelog = useCallback(async () => {
+    const version = normalizeVersionText(appVersion);
+    const requestId = changelogRequestIdRef.current + 1;
+    changelogRequestIdRef.current = requestId;
+
+    if (!version) {
+      setChangelogState({
+        status: 'ready',
+        data: {
+          found: false,
+          notes: [],
+          sections: [],
+          source: 'github',
+          url: releasePageUrl,
+          version: ''
+        }
+      });
+      return;
+    }
+
+    setChangelogState((current) => ({
+      status: 'loading',
+      data: current.data
+    }));
+
+    try {
+      const data = await bridge.getReleaseChangelog(version);
+      if (changelogRequestIdRef.current === requestId) {
+        setChangelogState({
+          status: 'ready',
+          data: {
+            found: Boolean(data?.found),
+            notes: Array.isArray(data?.notes) ? data.notes : [],
+            sections: Array.isArray(data?.sections) ? data.sections : [],
+            source: data?.source || 'github',
+            url: data?.url || releasePageUrl,
+            version: data?.version || version,
+            date: data?.date || '',
+            error: data?.error || '',
+            fallbackReason: data?.fallbackReason || '',
+            tagName: data?.tagName || '',
+            title: data?.title || ''
+          }
+        });
+      }
+    } catch (error) {
+      if (changelogRequestIdRef.current === requestId) {
+        setChangelogState({
+          status: 'error',
+          data: {
+            error: error?.message || String(error),
+            found: false,
+            notes: [],
+            sections: [],
+            source: 'github',
+            url: releasePageUrl,
+            version
+          }
+        });
+      }
+    }
+  }, [appVersion]);
+
+  useEffect(() => {
+    changelogRequestIdRef.current += 1;
+    setChangelogState({ status: 'idle', data: null });
+  }, [appVersion]);
+
+  useEffect(() => {
+    if (open && changelogState.status === 'idle') {
+      loadChangelog();
+    }
+  }, [changelogState.status, loadChangelog, open]);
+
+  const openReleaseUrl = useCallback((url) => {
+    const targetUrl = String(url || releasePageUrl).trim() || releasePageUrl;
+    bridge.openExternalUrl(targetUrl).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event) => {
+      if (
+        panelRef.current?.contains(event.target) ||
+        triggerRef.current?.contains(event.target)
+      ) {
+        return;
+      }
+
+      setOpen(false);
+    };
+
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
 
   return (
     <>
       <button
+        ref={triggerRef}
         type="button"
         className={cn('sidebar-version-button', compact && 'compact')}
         title={`${t('currentVersion')} ${versionLabel}`}
         aria-label={`${t('currentVersion')} ${versionLabel}`}
-        onClick={() => setOpen(true)}
+        aria-controls={open ? 'releaseInfoPanel' : undefined}
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
       >
         <Badge variant="outline" className={cn('sidebar-version-badge', compact && 'compact')}>
           {versionLabel}
         </Badge>
       </button>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent id="releaseInfoDialog" className="w-[min(640px,calc(100vw-32px))] p-0">
-          <DialogHeader>
-            <DialogTitle className="font-mono">{versionLabel}</DialogTitle>
-            <DialogDescription>{t('currentVersion')}</DialogDescription>
-          </DialogHeader>
-          <div className="p-4">
-            <ReleaseInfoCard
-              appVersion={appVersion}
-              t={t}
-              detail
-            />
-          </div>
-        </DialogContent>
-      </Dialog>
+      {open && (
+        <div
+          ref={panelRef}
+          id="releaseInfoPanel"
+          className="sidebar-release-popover"
+          role="dialog"
+          aria-label={`${t('currentVersion')} ${versionLabel}`}
+        >
+          <ReleaseInfoCard
+            appVersion={appVersion}
+            changelog={changelogState.data}
+            changelogLoading={changelogState.status === 'loading'}
+            t={t}
+            detail
+            onOpenRelease={openReleaseUrl}
+            onClose={() => setOpen(false)}
+          />
+        </div>
+      )}
     </>
   );
 }
@@ -4783,196 +7034,6 @@ function WorkspaceSkillsSection({
   );
 }
 
-function FloatingCommandDock({
-  activeId,
-  collapsed,
-  inputRef,
-  language,
-  message,
-  onExport,
-  onExportCustom,
-  onInputChange,
-  onInputCompositionEnd,
-  onInputCompositionStart,
-  onInputDragOver,
-  onInputKeyDown,
-  onInputDrop,
-  onInputPaste,
-  onSend,
-  onToggleCollapsed,
-  onTargetChange,
-  panels,
-  targetId,
-  t
-}) {
-  const targetPanel = panels.find((panel) => panel.id === targetId) || null;
-  const targetReady = canPanelReceiveInput(targetPanel);
-  const canExport = Boolean(targetPanel);
-  const canSend = Boolean(targetReady && String(message || '').trim());
-  const targetSummary = targetPanel
-    ? t('floatingComposerSubtitle', { name: targetPanel.title })
-    : t('floatingComposerUnavailable');
-
-  return (
-    <div className="pointer-events-none absolute bottom-3 left-1/2 z-[7000] w-[calc(100%-20px)] max-w-[980px] -translate-x-1/2 md:bottom-[18px] md:w-[calc(100%-32px)]">
-      <Card
-        className="pointer-events-auto overflow-hidden shadow-lg"
-        onPointerDown={(event) => event.stopPropagation()}
-        onWheel={(event) => event.stopPropagation()}
-        onDragOver={onInputDragOver}
-        onDrop={onInputDrop}
-      >
-        <CardHeader className={cn('px-3', collapsed ? 'gap-1 py-2.5' : 'gap-2 py-3')}>
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0 flex flex-1 items-center gap-2">
-              <CardTitle className="shrink-0 text-sm">{t('floatingComposerTitle')}</CardTitle>
-              <CardDescription className="truncate text-xs" title={targetPanel?.cwd || undefined}>
-                {targetSummary}
-              </CardDescription>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              {targetPanel && (
-                <CliProviderBadge
-                  className="shrink-0 px-2 py-0 text-[11px]"
-                  language={language}
-                  provider={getPanelCliProvider(targetPanel)}
-                />
-              )}
-              <IconButton
-                label={t(collapsed ? 'floatingComposerExpand' : 'floatingComposerCollapse')}
-                variant="ghost"
-                className="h-8 w-8 shrink-0"
-                aria-expanded={!collapsed}
-                onClick={onToggleCollapsed}
-              >
-                {collapsed ? <Maximize2 className="h-4 w-4" /> : <Minimize2 className="h-4 w-4" />}
-              </IconButton>
-            </div>
-          </div>
-          {!collapsed && (
-            <div
-              className="flex max-h-32 flex-wrap gap-2 overflow-x-hidden overflow-y-auto pr-1"
-              role="group"
-              aria-label={t('floatingComposerTarget')}
-            >
-              {panels.map((panel) => {
-                const executionState = getPanelExecutionState(panel);
-                const sendDisabled = !canPanelReceiveInput(panel);
-                const current = panel.id === activeId;
-                const targeted = panel.id === targetId;
-                const providerLabel = getCliProviderBadgeLabel(getPanelCliProvider(panel), language);
-                const summary = [
-                  panel.title,
-                  providerLabel,
-                  getExecutionStateLabel(executionState, t),
-                  current ? t('floatingComposerCurrent') : ''
-                ].filter(Boolean).join(', ');
-
-                return (
-                  <Button
-                    key={panel.id}
-                    type="button"
-                    variant={targeted ? 'primary' : 'outline'}
-                    size="sm"
-                    className={cn(
-                      'h-8 min-w-0 max-w-full basis-[220px] justify-start gap-1.5 px-2.5 text-[11px]',
-                      current && !targeted && 'border-primary/35',
-                      sendDisabled && 'opacity-60'
-                    )}
-                    aria-pressed={targeted}
-                    title={`${summary}\n${panel.cwd}`}
-                    onClick={() => onTargetChange(panel.id)}
-                  >
-                    <span className={cn('shrink-0 terminal-endpoint-dot', `is-${executionState}`)} />
-                    <span className={cn(
-                      'min-w-0 truncate whitespace-nowrap',
-                      targeted ? 'text-primary-foreground' : 'text-foreground'
-                    )}>
-                      {summary}
-                    </span>
-                  </Button>
-                );
-              })}
-            </div>
-          )}
-        </CardHeader>
-
-        {!collapsed && (
-          <>
-            <CardContent className="grid gap-2 px-3 pb-3 pt-0">
-              <div className="relative">
-                <Textarea
-                  ref={inputRef}
-                  rows={1}
-                  spellCheck={false}
-                  value={message}
-                  placeholder={targetPanel
-                    ? t('floatingComposerPlaceholder', { name: targetPanel.title })
-                    : t('floatingComposerUnavailable')}
-                  className="min-h-[108px] max-h-[260px] resize-none pb-12 pr-24 font-mono text-sm leading-6"
-                  onChange={onInputChange}
-                  onCompositionEnd={onInputCompositionEnd}
-                  onCompositionStart={onInputCompositionStart}
-                  onDragOver={onInputDragOver}
-                  onDrop={onInputDrop}
-                  onKeyDown={onInputKeyDown}
-                  onPaste={onInputPaste}
-                />
-                <Button
-                  type="button"
-                  variant="primary"
-                  size="sm"
-                  className="absolute bottom-2 right-2 h-8 px-3 shadow-sm"
-                  onClick={onSend}
-                  disabled={!canSend}
-                >
-                  {t('floatingComposerSend')}
-                </Button>
-              </div>
-            </CardContent>
-
-            <CardFooter className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2">
-              <div className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={targetPanel?.cwd || undefined}>
-                {targetPanel?.cwd
-                  ? `${targetPanel.cwd} · ${t('floatingComposerHint')}`
-                  : t('floatingComposerUnavailable')}
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1.5 px-2"
-                  title={t('exportSession')}
-                  aria-label={t('exportSession')}
-                  onClick={() => canExport && onExport(targetPanel.id)}
-                  disabled={!canExport}
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  {t('exportSession')}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1.5 px-2"
-                  title={t('exportSessionCustom')}
-                  aria-label={t('exportSessionCustom')}
-                  onClick={() => canExport && onExportCustom(targetPanel.id)}
-                  disabled={!canExport}
-                >
-                  <FolderOpen className="h-3.5 w-3.5" />
-                  {t('exportSessionCustom')}
-                </Button>
-              </div>
-            </CardFooter>
-          </>
-        )}
-      </Card>
-    </div>
-  );
-}
-
 function WorkspaceSidebar({
   appVersion,
   workspace,
@@ -4984,6 +7045,7 @@ function WorkspaceSidebar({
   onCanvasModeChange,
   onKillAll,
   onAddSession,
+  onToggleImageGeneration,
   onOpenPath,
   onOpenCodexConfig,
   onRefreshSkills,
@@ -4997,6 +7059,7 @@ function WorkspaceSidebar({
   skillsRootPath,
   skillsState,
   t,
+  imageGenerationOpen,
   onToggleCollapsed
 }) {
   const collapsed = workspace.sidebarCollapsed;
@@ -5069,6 +7132,13 @@ function WorkspaceSidebar({
         <IconButton label={t('addProject')} onClick={onAddProject}>
           <FolderPlus className="h-4 w-4" />
         </IconButton>
+        <IconButton
+          label={t('imageGeneration')}
+          variant={imageGenerationOpen ? 'primary' : 'default'}
+          onClick={onToggleImageGeneration}
+        >
+          <ImagePlus className="h-4 w-4" />
+        </IconButton>
         <div className="sidebar-rail-spacer" />
         <SidebarThemeControl compact theme={theme} onThemeChange={onThemeChange} t={t} />
         <IconButton label={t('settings')} onClick={onOpenCodexConfig}>
@@ -5111,6 +7181,14 @@ function WorkspaceSidebar({
           <FolderPlus className="h-4 w-4" />
           {t('addProject')}
         </Button>
+        <Button
+          className="w-full justify-start"
+          variant={imageGenerationOpen ? 'primary' : 'ghost'}
+          onClick={onToggleImageGeneration}
+        >
+          <ImagePlus className="h-4 w-4" />
+          {t('imageGeneration')}
+        </Button>
       </div>
 
       <SidebarContent>
@@ -5119,13 +7197,33 @@ function WorkspaceSidebar({
             <span>{t('canvasMode')}</span>
           </div>
           <Tabs value={workspace.canvasMode} onValueChange={onCanvasModeChange}>
-            <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger className="px-2 text-xs" value="project">
-                {t('canvasModeProject')}
-              </TabsTrigger>
-              <TabsTrigger className="px-2 text-xs" value="shared">
-                {t('canvasModeShared')}
-              </TabsTrigger>
+            <TabsList className="grid w-full grid-cols-2 bg-background/70 shadow-inner">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <TabsTrigger
+                    className="h-7 border border-transparent px-2 text-xs data-[state=active]:border-primary/40 data-[state=active]:bg-primary data-[state=active]:font-semibold data-[state=active]:text-primary-foreground"
+                    value="project"
+                  >
+                    {t('canvasModeProject')}
+                  </TabsTrigger>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-[240px] whitespace-normal leading-5">
+                  {t('canvasModeProjectTooltip')}
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <TabsTrigger
+                    className="h-7 border border-transparent px-2 text-xs data-[state=active]:border-primary/40 data-[state=active]:bg-primary data-[state=active]:font-semibold data-[state=active]:text-primary-foreground"
+                    value="shared"
+                  >
+                    {t('canvasModeShared')}
+                  </TabsTrigger>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-[240px] whitespace-normal leading-5">
+                  {t('canvasModeSharedTooltip')}
+                </TooltipContent>
+              </Tooltip>
             </TabsList>
           </Tabs>
         </SidebarSection>
@@ -5244,7 +7342,7 @@ function WorkspaceSidebar({
           appVersion={appVersion}
           t={t}
         />
-        <Button className="w-full justify-start" variant="destructive" onClick={onKillAll}>
+        <Button className="w-full justify-start" variant="destructive" size="sm" onClick={onKillAll}>
           <Trash2 className="h-4 w-4" />
           {t('closeAll')}
         </Button>
@@ -5260,12 +7358,14 @@ function WorkspaceSidebar({
 export default function App() {
   const initialSettings = useMemo(loadSettings, []);
   const initialWorkspace = useMemo(loadWorkspace, []);
+  const initialAgents = useMemo(loadAgents, []);
   const initialView = useMemo(() => normalizeCanvasView(initialSettings.view), [initialSettings.view]);
   const [cwd, setCwd] = useState(initialSettings.cwd);
   const [theme, setTheme] = useState(initialSettings.theme);
   const [language, setLanguage] = useState(initialSettings.language);
   const [view, setView] = useState(initialView);
   const [workspace, setWorkspace] = useState(initialWorkspace);
+  const [agents, setAgents] = useState(initialAgents);
   const [panels, setPanels] = useState([]);
   const [endpointGroups, setEndpointGroups] = useState([]);
   const [selectedEndpointIds, setSelectedEndpointIds] = useState(() => new Set());
@@ -5274,17 +7374,28 @@ export default function App() {
   const [pendingCanvasFrame, setPendingCanvasFrame] = useState(false);
   const [launchCliProviderId, setLaunchCliProviderId] = useState(defaultCliProviderId);
   const [codexOpen, setCodexOpen] = useState(false);
+  const [codexInitialTab, setCodexInitialTab] = useState('preferences');
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [commandDialogOpen, setCommandDialogOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [gridSessionOpen, setGridSessionOpen] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
   const [workspaceTreeOpen, setWorkspaceTreeOpen] = useState(false);
+  const [sessionReviewOpen, setSessionReviewOpen] = useState(false);
+  const [imageGenerationOpen, setImageGenerationOpen] = useState(false);
+  const [imageGenerationPrompt, setImageGenerationPrompt] = useState('');
+  const [imageGenerationResults, setImageGenerationResults] = useState([]);
+  const [imageGenerationSubmitting, setImageGenerationSubmitting] = useState(false);
+  const [imageGenerationConfig, setImageGenerationConfig] = useState(createEmptyImageApiConfig);
+  const [imageGenerationConfigLoading, setImageGenerationConfigLoading] = useState(false);
+  const [sessionReviewRecords, setSessionReviewRecords] = useState({});
   const [workspaceTreeState, setWorkspaceTreeState] = useState({
     status: 'idle',
     snapshot: null,
     error: '',
     requestedPath: ''
   });
+  const [workspaceTreeSelectedNode, setWorkspaceTreeSelectedNode] = useState(null);
   const [workspaceSkillsState, setWorkspaceSkillsState] = useState({
     status: 'idle',
     snapshot: createEmptyWorkspaceSkillsSnapshot(''),
@@ -5303,12 +7414,24 @@ export default function App() {
   const [commandDockValue, setCommandDockValue] = useState('');
   const [commandDockTargetId, setCommandDockTargetId] = useState('');
   const [commandDockCollapsed, setCommandDockCollapsed] = useState(false);
+  const [commandDockTaskDispatching, setCommandDockTaskDispatching] = useState(false);
+  const [commandDockDispatchSparkles, setCommandDockDispatchSparkles] = useState({});
+  const [canvasArrangeAnimations, setCanvasArrangeAnimations] = useState({});
+  const [canvasArrangeActive, setCanvasArrangeActive] = useState(false);
+  const [quickPrompts, setQuickPrompts] = useState([]);
+  const [quickPromptsPath, setQuickPromptsPath] = useState('');
+  const [quickPromptsLoading, setQuickPromptsLoading] = useState(false);
+  const [commandDockSkillMention, setCommandDockSkillMention] = useState(createClosedCommandDockSkillMention);
   const viewportRef = useRef(null);
   const commandDockInputRef = useRef(null);
   const commandDockComposingRef = useRef(false);
   const commandDockPendingSubmitRef = useRef(false);
+  const commandDockDispatchSparkleTimersRef = useRef(new Map());
+  const canvasArrangeTimerRef = useRef(null);
   const panelActivityQueueRef = useRef(new Map());
   const panelActivityFlushTimer = useRef(null);
+  const sessionReviewRecordsRef = useRef({});
+  const sessionReviewFlushTimer = useRef(null);
   const terminalInstances = useRef(new Map());
   const panelsRef = useRef([]);
   const endpointGroupsRef = useRef([]);
@@ -5347,6 +7470,46 @@ export default function App() {
   );
   const skillsRootPath = currentWorkspacePath;
   const t = useCallback((key, values) => translate(language, key, values), [language]);
+  const flashCommandDockDispatchTargets = useCallback((targets) => {
+    const ids = [...new Set((Array.isArray(targets) ? targets : [targets])
+      .map((target) => String(target?.id || target || '').trim())
+      .filter(Boolean))];
+
+    if (ids.length === 0) {
+      return;
+    }
+
+    const stamp = Date.now().toString(36);
+    const timers = commandDockDispatchSparkleTimersRef.current;
+    setCommandDockDispatchSparkles((current) => {
+      const next = { ...current };
+      ids.forEach((id, index) => {
+        next[id] = `${stamp}-${index}-${id}`;
+      });
+      return next;
+    });
+
+    ids.forEach((id) => {
+      const currentTimer = timers.get(id);
+      if (currentTimer) {
+        window.clearTimeout(currentTimer);
+      }
+
+      const timer = window.setTimeout(() => {
+        timers.delete(id);
+        setCommandDockDispatchSparkles((current) => {
+          if (!current[id]) {
+            return current;
+          }
+
+          const next = { ...current };
+          delete next[id];
+          return next;
+        });
+      }, commandDockDispatchSparkleMs);
+      timers.set(id, timer);
+    });
+  }, []);
   const visiblePanels = useMemo(
     () => panels.filter((panel) => isPanelVisibleInWorkspace(panel, workspace)),
     [panels, workspace.activeProjectId, workspace.canvasMode]
@@ -5412,7 +7575,19 @@ export default function App() {
     () => commandDockPanels.filter((panel) => canPanelReceiveInput(panel)),
     [commandDockPanels]
   );
-  const commandDockVisible = visiblePanels.length > 0;
+  const commandDockVisible = visiblePanels.length > 0 && !imageGenerationOpen;
+  const commandDockSkillMentionSourceItems = useMemo(
+    () => getWorkspaceSkillMentionItems(workspaceSkillsState.snapshot),
+    [workspaceSkillsState.snapshot]
+  );
+  const commandDockSkillMentionItems = useMemo(
+    () => filterWorkspaceSkillMentionItems(
+      commandDockSkillMentionSourceItems,
+      commandDockSkillMention.query
+    ),
+    [commandDockSkillMention.query, commandDockSkillMentionSourceItems]
+  );
+  const commandDockSkillMentionLoading = workspaceSkillsState.status === 'loading';
 
   useEffect(() => {
     panelsRef.current = panels;
@@ -5484,6 +7659,10 @@ export default function App() {
   }, [workspace.activeProjectId, workspace.canvasMode]);
 
   useEffect(() => {
+    setWorkspaceTreeSelectedNode(null);
+  }, [currentWorkspacePath]);
+
+  useEffect(() => {
     const activeGroupIds = new Set(panels.filter((panel) => panel.groupId).map((panel) => panel.groupId));
     setEndpointGroups((current) => {
       const next = current.filter((group) => activeGroupIds.has(group.id));
@@ -5518,11 +7697,87 @@ export default function App() {
     });
   }, [activeId, commandDockPanels, liveCommandDockPanels]);
 
+  useEffect(() => {
+    setCommandDockSkillMention((current) => {
+      if (!current.open) {
+        return current;
+      }
+
+      const selectedIndex = commandDockSkillMentionItems.length > 0
+        ? clamp(current.selectedIndex, 0, commandDockSkillMentionItems.length - 1)
+        : 0;
+
+      return selectedIndex === current.selectedIndex
+        ? current
+        : { ...current, selectedIndex };
+    });
+  }, [commandDockSkillMentionItems.length]);
+
+  useEffect(() => {
+    if (commandDockVisible && !commandDockCollapsed) {
+      return;
+    }
+
+    setCommandDockSkillMention((current) => (
+      current.open ? createClosedCommandDockSkillMention() : current
+    ));
+  }, [commandDockCollapsed, commandDockVisible]);
+
+  useEffect(() => {
+    setCommandDockSkillMention((current) => (
+      current.open ? createClosedCommandDockSkillMention() : current
+    ));
+  }, [skillsRootPath]);
+
   const showToast = useCallback((message) => {
     window.clearTimeout(toastTimer.current);
     setToast(message);
     toastTimer.current = window.setTimeout(() => setToast(''), 3200);
   }, []);
+
+  const loadImageGenerationConfig = useCallback(async () => {
+    setImageGenerationConfigLoading(true);
+    try {
+      const snapshot = await bridge.readImageApiConfig();
+      const normalized = normalizeImageApiConfig(snapshot);
+      setImageGenerationConfig(normalized);
+      return normalized;
+    } catch (error) {
+      setImageGenerationConfig(createEmptyImageApiConfig());
+      showToast(t('imageApiConfigReadFailed', { message: error.message }));
+      return null;
+    } finally {
+      setImageGenerationConfigLoading(false);
+    }
+  }, [showToast, t]);
+
+  const loadQuickPrompts = useCallback(async () => {
+    setQuickPromptsLoading(true);
+    try {
+      const store = await bridge.listQuickPrompts();
+      setQuickPrompts(Array.isArray(store.prompts) ? store.prompts : []);
+      setQuickPromptsPath(store.path || '');
+      return store;
+    } finally {
+      setQuickPromptsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadQuickPrompts().catch((error) => {
+      setQuickPrompts([]);
+      setQuickPromptsPath('');
+      showToast(t('quickPromptLoadFailed', { message: error.message }));
+    });
+  }, [loadQuickPrompts, showToast, t]);
+
+  useEffect(() => {
+    if (!imageGenerationOpen) {
+      return;
+    }
+
+    void loadImageGenerationConfig();
+  }, [imageGenerationOpen, loadImageGenerationConfig]);
 
   const loadWorkspaceTree = useCallback(async (targetPath) => {
     const requestedPath = String(targetPath || '').trim();
@@ -5581,6 +7836,8 @@ export default function App() {
 
   const openWorkspaceTree = useCallback(() => {
     setWorkspaceTreeOpen(true);
+    setSessionReviewOpen(false);
+    setImageGenerationOpen(false);
     void loadWorkspaceTree(currentWorkspacePath);
   }, [currentWorkspacePath, loadWorkspaceTree]);
 
@@ -5617,6 +7874,19 @@ export default function App() {
       showToast(t('workspaceTreeCopied'));
     }
   }, [showToast, t, workspaceTreeState.snapshot]);
+
+  const selectWorkspaceTreeNode = useCallback((node) => {
+    const nextPath = getWorkspaceTreeInsertPath(node, normalizePromptFilePath);
+    if (!nextPath) {
+      setWorkspaceTreeSelectedNode(null);
+      return;
+    }
+
+    setWorkspaceTreeSelectedNode({
+      id: node.id,
+      path: nextPath
+    });
+  }, []);
 
   const loadWorkspaceSkills = useCallback(async (targetPath, options = {}) => {
     const requestedPath = String(targetPath || '').trim();
@@ -5694,6 +7964,12 @@ export default function App() {
     });
   }, [showToast, t]);
 
+  const openCodexSettings = useCallback((tab = 'preferences') => {
+    const nextTab = typeof tab === 'string' && tab ? tab : 'preferences';
+    setCodexInitialTab(nextTab);
+    setCodexOpen(true);
+  }, []);
+
   useEffect(() => {
     void loadWorkspaceSkills(skillsRootPath, { quiet: true });
   }, [loadWorkspaceSkills, skillsRootPath]);
@@ -5751,6 +8027,56 @@ export default function App() {
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
   useEffect(() => () => window.clearTimeout(panelActivityFlushTimer.current), []);
+  useEffect(() => () => window.clearTimeout(sessionReviewFlushTimer.current), []);
+  useEffect(() => () => {
+    commandDockDispatchSparkleTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    commandDockDispatchSparkleTimersRef.current.clear();
+  }, []);
+  useEffect(() => () => window.clearTimeout(canvasArrangeTimerRef.current), []);
+
+  const closeCommandDockSkillMention = useCallback(() => {
+    setCommandDockSkillMention((current) => (
+      current.open ? createClosedCommandDockSkillMention() : current
+    ));
+  }, []);
+
+  const updateCommandDockSkillMention = useCallback((element = commandDockInputRef.current, valueOverride) => {
+    if (!(element instanceof HTMLTextAreaElement)) {
+      closeCommandDockSkillMention();
+      return;
+    }
+
+    const value = typeof valueOverride === 'string' ? valueOverride : element.value;
+    const selectionStart = Number.isFinite(element.selectionStart) ? element.selectionStart : value.length;
+    const selectionEnd = Number.isFinite(element.selectionEnd) ? element.selectionEnd : selectionStart;
+
+    if (selectionStart !== selectionEnd) {
+      closeCommandDockSkillMention();
+      return;
+    }
+
+    const trigger = getCommandDockSkillMentionTrigger(value, selectionStart);
+    if (!trigger) {
+      closeCommandDockSkillMention();
+      return;
+    }
+
+    const position = getTextareaCaretPopupPosition(element, selectionStart);
+    setCommandDockSkillMention((current) => {
+      const sameQuery = current.open
+        && current.triggerIndex === trigger.triggerIndex
+        && current.query === trigger.query;
+
+      return {
+        open: true,
+        query: trigger.query,
+        triggerIndex: trigger.triggerIndex,
+        caretIndex: selectionStart,
+        selectedIndex: sameQuery ? current.selectedIndex : 0,
+        position
+      };
+    });
+  }, [closeCommandDockSkillMention]);
 
   const resizeCommandDockInput = useCallback((element = commandDockInputRef.current) => {
     if (!(element instanceof HTMLTextAreaElement)) {
@@ -5778,7 +8104,16 @@ export default function App() {
   const handleCommandDockInputChange = useCallback((event) => {
     setCommandDockValue(event.target.value);
     resizeCommandDockInput(event.target);
-  }, [resizeCommandDockInput]);
+    updateCommandDockSkillMention(event.target);
+  }, [resizeCommandDockInput, updateCommandDockSkillMention]);
+
+  const handleCommandDockInputSelect = useCallback((event) => {
+    updateCommandDockSkillMention(event.target);
+  }, [updateCommandDockSkillMention]);
+
+  const handleCommandDockInputScroll = useCallback((event) => {
+    updateCommandDockSkillMention(event.target);
+  }, [updateCommandDockSkillMention]);
 
   const selectCommandDockTarget = useCallback((id) => {
     setCommandDockTargetId(id);
@@ -5812,6 +8147,7 @@ export default function App() {
       return;
     }
 
+    closeCommandDockSkillMention();
     const element = commandDockInputRef.current;
     const currentValue = typeof element?.value === 'string' ? element.value : commandDockValue;
     const selectionStart = typeof element?.selectionStart === 'number' ? element.selectionStart : currentValue.length;
@@ -5830,21 +8166,182 @@ export default function App() {
       commandDockInputRef.current?.focus();
       commandDockInputRef.current?.setSelectionRange(caret, caret);
     });
-  }, [commandDockValue, resizeCommandDockInput]);
+  }, [closeCommandDockSkillMention, commandDockValue, resizeCommandDockInput]);
+
+  const promptQuickPromptName = useCallback((fallback) => {
+    const value = window.prompt(t('quickPromptNamePrompt'), fallback);
+    if (value === null) {
+      return null;
+    }
+
+    const name = value.trim();
+    if (!name) {
+      showToast(t('quickPromptNameRequired'));
+      return null;
+    }
+
+    return name;
+  }, [showToast, t]);
+
+  const saveCommandDockPrompt = useCallback(async () => {
+    if (quickPromptsLoading) {
+      return false;
+    }
+
+    const prompt = trimTrailingLineBreaks(commandDockInputRef.current?.value ?? commandDockValue);
+    if (!String(prompt || '').trim()) {
+      showToast(t('quickPromptContentRequired'));
+      return false;
+    }
+
+    const title = promptQuickPromptName(deriveQuickPromptTitle(prompt, t('quickPromptDefaultName')));
+    if (!title) {
+      return false;
+    }
+
+    setQuickPromptsLoading(true);
+    try {
+      const store = await bridge.saveQuickPrompt({ title, prompt });
+      const prompts = Array.isArray(store.prompts) ? store.prompts : [];
+      const savedPrompt = store.savedPrompt || prompts.find((record) => record.title === title);
+
+      setQuickPrompts(prompts);
+      setQuickPromptsPath((current) => store.path || current);
+      showToast(t('quickPromptSaved', { name: savedPrompt?.title || title }));
+      return true;
+    } catch (error) {
+      showToast(t('quickPromptSaveFailed', { message: error.message }));
+      return false;
+    } finally {
+      setQuickPromptsLoading(false);
+    }
+  }, [commandDockValue, promptQuickPromptName, quickPromptsLoading, showToast, t]);
+
+  const insertQuickPromptIntoCommandDock = useCallback((record) => {
+    const prompt = String(record?.prompt || '').trim();
+    if (!prompt) {
+      return false;
+    }
+
+    if (commandDockCollapsed) {
+      setCommandDockCollapsed(false);
+    }
+
+    insertTextIntoCommandDock(prompt);
+    const title = String(record?.title || '').trim()
+      || deriveQuickPromptTitle(prompt, t('quickPromptDefaultName'));
+    showToast(t('quickPromptInserted', { name: title }));
+    return true;
+  }, [commandDockCollapsed, insertTextIntoCommandDock, showToast, t]);
+
+  const deleteCommandDockPrompt = useCallback(async (record) => {
+    if (quickPromptsLoading) {
+      return false;
+    }
+
+    const promptId = String(record?.id || '').trim();
+    if (!promptId) {
+      return false;
+    }
+
+    const title = String(record?.title || '').trim()
+      || deriveQuickPromptTitle(record?.prompt, t('quickPromptDefaultName'));
+    if (!window.confirm(t('quickPromptDeleteConfirm', { name: title }))) {
+      return false;
+    }
+
+    setQuickPromptsLoading(true);
+    try {
+      const store = await bridge.deleteQuickPrompt(promptId);
+      setQuickPrompts(Array.isArray(store.prompts) ? store.prompts : []);
+      setQuickPromptsPath((current) => store.path || current);
+      showToast(t('quickPromptDeleted', { name: store.deletedPrompt?.title || title }));
+      return true;
+    } catch (error) {
+      showToast(t('quickPromptDeleteFailed', { message: error.message }));
+      return false;
+    } finally {
+      setQuickPromptsLoading(false);
+    }
+  }, [quickPromptsLoading, showToast, t]);
+
+  const insertCommandDockSkillMention = useCallback((item) => {
+    const insertPath = String(item?.insertPath || '').trim();
+    if (!insertPath) {
+      return false;
+    }
+
+    const element = commandDockInputRef.current;
+    const currentValue = typeof element?.value === 'string' ? element.value : commandDockValue;
+    const selectionStart = typeof element?.selectionStart === 'number'
+      ? element.selectionStart
+      : commandDockSkillMention.caretIndex;
+    const trigger = getCommandDockSkillMentionTrigger(currentValue, selectionStart);
+    const triggerIndex = trigger?.triggerIndex ?? commandDockSkillMention.triggerIndex;
+    const caretIndex = trigger ? selectionStart : commandDockSkillMention.caretIndex;
+
+    if (!Number.isFinite(triggerIndex) || triggerIndex < 0 || caretIndex < triggerIndex) {
+      return false;
+    }
+
+    const before = currentValue.slice(0, triggerIndex);
+    const after = currentValue.slice(caretIndex);
+    const insertion = `@${insertPath}`;
+    const suffix = after && /^\s/.test(after) ? '' : ' ';
+    const nextValue = `${before}${insertion}${suffix}${after}`;
+    const caret = before.length + insertion.length + suffix.length;
+
+    setCommandDockValue(nextValue);
+    closeCommandDockSkillMention();
+    showToast(t('floatingComposerSkillInserted', { path: insertPath }));
+    window.requestAnimationFrame(() => {
+      resizeCommandDockInput();
+      commandDockInputRef.current?.focus();
+      commandDockInputRef.current?.setSelectionRange(caret, caret);
+    });
+    return true;
+  }, [
+    closeCommandDockSkillMention,
+    commandDockSkillMention.caretIndex,
+    commandDockSkillMention.triggerIndex,
+    commandDockValue,
+    resizeCommandDockInput,
+    showToast,
+    t
+  ]);
+
+  const insertWorkspaceTreePathIntoCommandDock = useCallback((targetPath) => {
+    const normalizedPath = String(targetPath || '').trim();
+    if (!normalizedPath || !commandDockVisible) {
+      return false;
+    }
+
+    if (commandDockCollapsed) {
+      setCommandDockCollapsed(false);
+    }
+
+    insertTextIntoCommandDock(normalizedPath);
+    showToast(t('workspaceTreePathInserted', { path: normalizedPath }));
+    return true;
+  }, [commandDockCollapsed, commandDockVisible, insertTextIntoCommandDock, showToast, t]);
+
+  const insertSelectedWorkspaceTreePath = useCallback(() => {
+    insertWorkspaceTreePathIntoCommandDock(workspaceTreeSelectedNode?.path);
+  }, [insertWorkspaceTreePathIntoCommandDock, workspaceTreeSelectedNode?.path]);
+
+  const handleWorkspaceTreeNodeInsert = useCallback((node) => {
+    const nextPath = getWorkspaceTreeInsertPath(node, normalizePromptFilePath);
+    if (!nextPath) {
+      return;
+    }
+
+    selectWorkspaceTreeNode(node);
+    insertWorkspaceTreePathIntoCommandDock(nextPath);
+  }, [insertWorkspaceTreePathIntoCommandDock, selectWorkspaceTreeNode]);
 
   const saveCommandDockImages = useCallback(async (files) => {
     const imageFiles = Array.isArray(files) ? files.filter((file) => isImageFile(file)) : [];
     if (imageFiles.length === 0) {
-      return false;
-    }
-
-    const targetPanel = commandDockPanels.find((panel) => panel.id === commandDockTargetId)
-      || panelsRef.current.find((panel) => panel.id === commandDockTargetId)
-      || panelsRef.current.find((panel) => panel.id === activeIdRef.current)
-      || null;
-    const assetCwd = String(targetPanel?.cwd || cwdRef.current || defaultCwd || '').trim();
-    if (!assetCwd) {
-      showToast(t('floatingComposerImageMissingDir'));
       return false;
     }
 
@@ -5853,7 +8350,6 @@ export default function App() {
       for (const file of imageFiles) {
         const arrayBuffer = await file.arrayBuffer();
         const savedImage = await bridge.saveCommandDockImage({
-          cwd: assetCwd,
           fileName: file.name,
           mimeType: file.type,
           bytes: new Uint8Array(arrayBuffer)
@@ -5870,7 +8366,7 @@ export default function App() {
       showToast(t('floatingComposerImageSaveFailed', { message: error.message }));
       return false;
     }
-  }, [commandDockPanels, commandDockTargetId, defaultCwd, insertTextIntoCommandDock, showToast, t]);
+  }, [insertTextIntoCommandDock, showToast, t]);
 
   const handleCommandDockPaste = useCallback((event) => {
     const imageFiles = extractImageFilesFromDataTransfer(event.clipboardData);
@@ -5904,24 +8400,185 @@ export default function App() {
     void saveCommandDockImages(imageFiles);
   }, [saveCommandDockImages]);
 
-  const submitCommandDockPayload = useCallback((panelId, value) => {
+  const generateImageFromCanvas = useCallback(async (payload) => {
+    if (imageGenerationSubmitting) {
+      return false;
+    }
+
+    const options = payload && typeof payload === 'object'
+      ? payload
+      : { prompt: payload };
+    const prompt = trimTrailingLineBreaks(options.prompt ?? imageGenerationPrompt);
+    if (!prompt.trim()) {
+      return false;
+    }
+
+    const model = String(options.model || '').trim();
+    const size = String(options.size || '').trim();
+    const count = Number.parseInt(options.n, 10);
+    const n = Number.isFinite(count) ? Math.min(4, Math.max(1, count)) : undefined;
+    const taskId = createLocalId('image-task');
+    const pendingTask = createImageGenerationTaskItem({
+      id: taskId,
+      prompt,
+      model,
+      n,
+      size,
+      status: 'submitting',
+      createdAt: Date.now()
+    });
+
+    setImageGenerationResults((current) => [pendingTask, ...current].slice(0, 40));
+    setImageGenerationSubmitting(true);
+    try {
+      const task = await bridge.generateImage({
+        prompt,
+        clientTaskId: taskId,
+        ...(model ? { model } : {}),
+        ...(size ? { size } : {}),
+        ...(n ? { n } : {})
+      });
+      setImageGenerationResults((current) => current.map((item) => (
+        item.id === taskId
+          ? {
+              ...item,
+              ...createImageGenerationTaskItem(task, prompt),
+              id: taskId
+            }
+          : item
+      )));
+      showToast(t('imageGenerationTaskSubmitted'));
+      return true;
+    } catch (error) {
+      const message = error?.message || t('imageGenerationUnknownError');
+      setImageGenerationResults((current) => current.map((item) => (
+        item.id === taskId
+          ? {
+              ...item,
+              status: 'failed',
+              updatedAt: Date.now(),
+              finishedAt: Date.now(),
+              error: message
+            }
+          : item
+      )));
+      showToast(t('imageGenerationFailed', { message }));
+      return false;
+    } finally {
+      setImageGenerationSubmitting(false);
+    }
+  }, [
+    imageGenerationSubmitting,
+    imageGenerationPrompt,
+    showToast,
+    t
+  ]);
+
+  useEffect(() => {
+    if (typeof bridge.onImageGenerationTaskUpdate !== 'function') {
+      return undefined;
+    }
+
+    return bridge.onImageGenerationTaskUpdate((update) => {
+      const id = String(update?.id || '').trim();
+      if (!id) {
+        return;
+      }
+
+      const status = normalizeImageGenerationStatus(update?.status);
+      const prompt = String(update?.prompt || '').trim();
+
+      if (status === 'success') {
+        const images = createImageGenerationImageItems(update?.images, prompt, update);
+        setImageGenerationResults((current) => {
+          const withoutTask = current.filter((item) => item.id !== id);
+          return images.length > 0
+            ? [...images, ...withoutTask].slice(0, 40)
+            : withoutTask;
+        });
+
+        if (images.length > 0) {
+          showToast(t('imageGenerationGenerated', { count: images.length }));
+        } else {
+          showToast(t('imageGenerationFailed', { message: t('imageGenerationNoLocalPath') }));
+        }
+        return;
+      }
+
+      if (imageGenerationFailedStatuses.has(status)) {
+        const message = String(update?.error || '').trim() || t('imageGenerationUnknownError');
+        const failedTask = createImageGenerationTaskItem({
+          ...update,
+          status: 'failed',
+          error: message
+        }, prompt);
+
+        setImageGenerationResults((current) => {
+          const found = current.some((item) => item.id === id);
+          const nextItems = found
+            ? current.map((item) => (item.id === id ? { ...item, ...failedTask, id } : item))
+            : [failedTask, ...current];
+          return nextItems.slice(0, 40);
+        });
+        showToast(t('imageGenerationFailed', { message }));
+        return;
+      }
+
+      setImageGenerationResults((current) => current.map((item) => (
+        item.id === id
+          ? {
+              ...item,
+              ...createImageGenerationTaskItem(update, prompt || item.prompt),
+              id
+            }
+          : item
+      )));
+    });
+  }, [showToast, t]);
+
+  const copyImageGenerationReference = useCallback((item) => {
+    const normalizedPath = normalizePromptFilePath(item?.path || item?.normalizedPath);
+    if (!normalizedPath) {
+      return false;
+    }
+
+    const reference = t('floatingComposerImageReference', { path: normalizedPath });
+    if (writeClipboardText(reference)) {
+      showToast(t('imageGenerationCopied'));
+      return true;
+    }
+    return false;
+  }, [showToast, t]);
+
+  const openImageGenerationFile = useCallback((item) => {
+    openWorkspacePath(item?.path || item?.normalizedPath);
+  }, [openWorkspacePath]);
+
+  const clearImageGenerationResults = useCallback(() => {
+    setImageGenerationResults([]);
+  }, []);
+
+  const submitTerminalTextPayload = useCallback((panelId, value) => {
     const text = String(value || '');
     if (!text) {
       return false;
     }
 
     const instance = terminalInstances.current.get(panelId);
-    if (instance?.term) {
-      // Route quick-send through xterm so CLIs that enable bracketed paste
-      // receive a real paste event, then submit with a separate Enter.
-      instance.term.paste(text);
-      instance.term.input('\r', false);
-      return true;
+    const payload = normalizeTerminalInputPayload(text, {
+      bracketedPasteMode: Boolean(instance?.term?.modes?.bracketedPasteMode)
+    });
+    if (!payload) {
+      return false;
     }
 
-    bridge.writeTerminal(panelId, normalizeTerminalInputPayload(text));
+    bridge.writeTerminal(panelId, payload);
     return true;
   }, []);
+
+  const submitCommandDockPayload = useCallback((panelId, value) => (
+    submitTerminalTextPayload(panelId, value)
+  ), [submitTerminalTextPayload]);
 
   const sendCommandDockInput = useCallback((options = {}) => {
     const targetPanel = commandDockPanels.find((panel) => panel.id === commandDockTargetId);
@@ -5942,21 +8599,23 @@ export default function App() {
     touchPanelActivity(targetPanel.id);
     submitCommandDockPayload(targetPanel.id, nextValue);
     setCommandDockValue('');
+    closeCommandDockSkillMention();
     showToast(t('floatingComposerSent', { name: targetPanel.title }));
     window.requestAnimationFrame(() => {
       resizeCommandDockInput();
       commandDockInputRef.current?.focus();
     });
     return true;
-  }, [commandDockPanels, commandDockTargetId, commandDockValue, resizeCommandDockInput, showToast, submitCommandDockPayload, t, touchPanelActivity]);
+  }, [closeCommandDockSkillMention, commandDockPanels, commandDockTargetId, commandDockValue, resizeCommandDockInput, showToast, submitCommandDockPayload, t, touchPanelActivity]);
 
   const handleCommandDockCompositionStart = useCallback(() => {
     commandDockComposingRef.current = true;
   }, []);
 
-  const handleCommandDockCompositionEnd = useCallback(() => {
+  const handleCommandDockCompositionEnd = useCallback((event) => {
     commandDockComposingRef.current = false;
     if (!commandDockPendingSubmitRef.current) {
+      updateCommandDockSkillMention(event.target);
       return;
     }
 
@@ -5968,17 +8627,61 @@ export default function App() {
         value: committedValue
       });
     });
-  }, [sendCommandDockInput]);
+  }, [sendCommandDockInput, updateCommandDockSkillMention]);
 
   const handleCommandDockKeyDown = useCallback((event) => {
-    if (!isCommandDockSubmitKey(event) || event.shiftKey) {
-      return;
-    }
-
     const isComposing = commandDockComposingRef.current
       || event.nativeEvent?.isComposing
       || event.keyCode === 229
       || event.which === 229;
+
+    if (!isComposing && commandDockSkillMention.open) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setCommandDockSkillMention((current) => ({
+          ...current,
+          selectedIndex: commandDockSkillMentionItems.length > 0
+            ? (current.selectedIndex + 1) % commandDockSkillMentionItems.length
+            : 0
+        }));
+        return;
+      }
+
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setCommandDockSkillMention((current) => ({
+          ...current,
+          selectedIndex: commandDockSkillMentionItems.length > 0
+            ? (current.selectedIndex - 1 + commandDockSkillMentionItems.length) % commandDockSkillMentionItems.length
+            : 0
+        }));
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeCommandDockSkillMention();
+        return;
+      }
+
+      if (
+        (event.key === 'Tab' || isCommandDockSubmitKey(event)) &&
+        !event.shiftKey &&
+        commandDockSkillMentionItems.length > 0
+      ) {
+        event.preventDefault();
+        const selectedItem = commandDockSkillMentionItems[
+          clamp(commandDockSkillMention.selectedIndex || 0, 0, commandDockSkillMentionItems.length - 1)
+        ];
+        insertCommandDockSkillMention(selectedItem);
+        return;
+      }
+    }
+
+    if (!isCommandDockSubmitKey(event) || event.shiftKey) {
+      return;
+    }
+
     if (isComposing) {
       commandDockPendingSubmitRef.current = true;
       return;
@@ -5987,7 +8690,14 @@ export default function App() {
     commandDockPendingSubmitRef.current = false;
     event.preventDefault();
     sendCommandDockInput();
-  }, [sendCommandDockInput]);
+  }, [
+    closeCommandDockSkillMention,
+    commandDockSkillMention.open,
+    commandDockSkillMention.selectedIndex,
+    commandDockSkillMentionItems,
+    insertCommandDockSkillMention,
+    sendCommandDockInput
+  ]);
 
   const loadCodexProfile = useCallback(async ({ quiet = false } = {}) => {
     try {
@@ -6096,6 +8806,10 @@ export default function App() {
   useEffect(() => () => window.clearTimeout(saveWorkspaceTimer.current), []);
 
   useEffect(() => {
+    localStorage.setItem(agentsKey, JSON.stringify(agents));
+  }, [agents]);
+
+  useEffect(() => {
     window.clearTimeout(persistCanvasViewTimer.current);
     persistCanvasViewTimer.current = window.setTimeout(() => {
       const nextWorkspace = withWorkspaceCanvasView(
@@ -6127,9 +8841,65 @@ export default function App() {
     focusTerminalForTextInput(instance.term);
   }, []);
 
+  const flushSessionReviewRecords = useCallback(() => {
+    sessionReviewFlushTimer.current = null;
+    setSessionReviewRecords({ ...sessionReviewRecordsRef.current });
+  }, []);
+
+  const scheduleSessionReviewFlush = useCallback(() => {
+    if (sessionReviewFlushTimer.current !== null) {
+      return;
+    }
+
+    sessionReviewFlushTimer.current = window.setTimeout(() => {
+      flushSessionReviewRecords();
+    }, sessionReviewFlushMs);
+  }, [flushSessionReviewRecords]);
+
+  const appendSessionReviewRecord = useCallback((id, data, timestamp = Date.now()) => {
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      return;
+    }
+
+    const currentRecord = sessionReviewRecordsRef.current[normalizedId] || null;
+    const nextRecord = appendSessionReviewOutput(currentRecord, data, timestamp);
+    if (nextRecord === currentRecord) {
+      return;
+    }
+
+    sessionReviewRecordsRef.current = {
+      ...sessionReviewRecordsRef.current,
+      [normalizedId]: nextRecord
+    };
+    scheduleSessionReviewFlush();
+  }, [scheduleSessionReviewFlush]);
+
+  useEffect(() => {
+    const panelIds = new Set(panels.map((panel) => panel.id));
+    const currentRecords = sessionReviewRecordsRef.current;
+    const nextRecords = {};
+    let changed = false;
+
+    Object.entries(currentRecords).forEach(([id, record]) => {
+      if (panelIds.has(id)) {
+        nextRecords[id] = record;
+        return;
+      }
+
+      changed = true;
+    });
+
+    if (changed) {
+      sessionReviewRecordsRef.current = nextRecords;
+      setSessionReviewRecords(nextRecords);
+    }
+  }, [panels]);
+
   useEffect(() => {
     const offData = bridge.onTerminalData(({ id, data }) => {
       touchPanelActivity(id);
+      appendSessionReviewRecord(id, data);
       terminalInstances.current.get(id)?.term.write(data);
     });
 
@@ -6139,6 +8909,7 @@ export default function App() {
         ? signal || 'closed'
         : `code ${exitCode}`;
       instance?.term.write(`\r\n\x1b[38;5;246m[process exited: ${label}]\x1b[0m\r\n`);
+      appendSessionReviewRecord(id, `\n[process exited: ${label}]\n`);
       setPanels((current) => current.map((panel) => (
         panel.id === id
           ? {
@@ -6156,7 +8927,7 @@ export default function App() {
       offData();
       offExit();
     };
-  }, [touchPanelActivity]);
+  }, [appendSessionReviewRecord, touchPanelActivity]);
 
   const getViewportRect = useCallback(() => viewportRef.current.getBoundingClientRect(), []);
 
@@ -6334,6 +9105,169 @@ export default function App() {
       targetType: projectId ? 'project' : 'directory'
     };
   }, [defaultCwd]);
+
+  const runAgentTask = useCallback((agent, taskDescription) => {
+    const normalizedAgent = normalizeAgentRecord(agent);
+    const task = String(taskDescription || '').trim();
+    if (!normalizedAgent) {
+      showToast(t('agentRequired'));
+      return;
+    }
+    if (!task) {
+      showToast(t('agentTaskRequired'));
+      return;
+    }
+
+    const run = async () => {
+      const cliProvider = resolveCliProvider(normalizedAgent.cliProviderId || launchCliProviderId);
+      const cliProviderId = cliProvider?.id || defaultCliProviderId;
+      const launchContext = getCurrentSessionLaunchContext();
+      const prompt = buildAgentTaskPrompt(normalizedAgent, task);
+
+      if (launchContext.cwd && launchContext.cwd !== cwdRef.current) {
+        setCwd(launchContext.cwd);
+      }
+
+      setLaunchCliProviderId(cliProviderId);
+      const panel = await createTerminal({
+        ...getCenteredTerminalSlot(workspaceRef.current, 700, 420),
+        ...launchContext,
+        title: normalizedAgent.name,
+        cliProviderId
+      });
+
+      window.setTimeout(() => {
+        touchPanelActivity(panel.id);
+        submitTerminalTextPayload(panel.id, prompt);
+      }, agentTaskSubmitDelayMs);
+
+      showToast(t('agentStarted', { name: normalizedAgent.name }));
+    };
+
+    run().catch((error) => showToast(error.message));
+  }, [
+    createTerminal,
+    getCenteredTerminalSlot,
+    getCurrentSessionLaunchContext,
+    launchCliProviderId,
+    showToast,
+    submitTerminalTextPayload,
+    t,
+    touchPanelActivity
+  ]);
+
+  const dispatchCommandDockTasks = useCallback(() => {
+    if (commandDockTaskDispatching) {
+      return false;
+    }
+
+    const tasks = parseCommandDockDispatchTasks(commandDockInputRef.current?.value ?? commandDockValue);
+    if (tasks.length === 0) {
+      showToast(t('floatingComposerDispatchEmpty'));
+      return false;
+    }
+
+    const run = async () => {
+      setCommandDockTaskDispatching(true);
+      closeCommandDockSkillMention();
+
+      try {
+        const targetPanel = commandDockPanels.find((panel) => panel.id === commandDockTargetId)
+          || commandDockPanels[0]
+          || null;
+        const cliProviderId = targetPanel?.cliProviderId || launchCliProviderId;
+        const cliProvider = resolveCliProvider(cliProviderId);
+        const launchContext = getCurrentSessionLaunchContext();
+        const baseSlot = getCenteredTerminalSlot(workspaceRef.current, 700, 420);
+        const idlePanels = commandDockPanels.filter((panel) => (
+          canPanelReceiveInput(panel) &&
+          getPanelExecutionState(panel, runtimeNow) === 'idle'
+        ));
+        let reused = 0;
+        let created = 0;
+        const dispatchTargets = [];
+
+        const submitTaskToPanel = (panel, task, delay = 0) => {
+          const submit = () => {
+            touchPanelActivity(panel.id);
+            submitTerminalTextPayload(panel.id, task);
+            flashCommandDockDispatchTargets(panel.id);
+          };
+
+          if (delay > 0) {
+            window.setTimeout(submit, delay);
+            return;
+          }
+
+          submit();
+        };
+
+        for (const task of tasks) {
+          const idlePanel = idlePanels.shift();
+          if (idlePanel) {
+            dispatchTargets.push(idlePanel);
+            submitTaskToPanel(idlePanel, task);
+            reused += 1;
+            continue;
+          }
+
+          const newPanel = await createTerminal({
+            ...baseSlot,
+            ...launchContext,
+            x: Math.round(baseSlot.x + created * 34),
+            y: Math.round(baseSlot.y + created * 34),
+            title: formatCommandDockTaskTitle(
+              task,
+              `${getCliProviderTitleBase(cliProvider, language)} ${created + 1}`
+            ),
+            cliProviderId
+          });
+          created += 1;
+          dispatchTargets.push(newPanel);
+          submitTaskToPanel(newPanel, task, commandDockTaskSubmitDelayMs);
+        }
+
+        setCommandDockValue('');
+        showToast(t('floatingComposerDispatchDone', {
+          count: tasks.length,
+          reused,
+          created,
+          targets: formatDispatchTargetList(dispatchTargets, language)
+        }));
+        window.requestAnimationFrame(() => {
+          resizeCommandDockInput();
+          commandDockInputRef.current?.focus();
+        });
+        return true;
+      } catch (error) {
+        showToast(t('floatingComposerDispatchFailed', { message: error.message }));
+        return false;
+      } finally {
+        setCommandDockTaskDispatching(false);
+      }
+    };
+
+    void run();
+    return true;
+  }, [
+    closeCommandDockSkillMention,
+    commandDockPanels,
+    commandDockTargetId,
+    commandDockTaskDispatching,
+    commandDockValue,
+    createTerminal,
+    flashCommandDockDispatchTargets,
+    getCenteredTerminalSlot,
+    getCurrentSessionLaunchContext,
+    language,
+    launchCliProviderId,
+    resizeCommandDockInput,
+    runtimeNow,
+    showToast,
+    submitTerminalTextPayload,
+    t,
+    touchPanelActivity
+  ]);
 
   const createWorkspaceCommandLineFromConfig = useCallback((config = {}) => {
     const run = async () => {
@@ -6622,6 +9556,174 @@ export default function App() {
     }
   }, [exportTerminal, showToast, t]);
 
+  const toggleImageGeneration = useCallback(() => {
+    setImageGenerationOpen((current) => {
+      const next = !current;
+      if (next) {
+        setWorkspaceTreeOpen(false);
+        setSessionReviewOpen(false);
+      }
+      return next;
+    });
+  }, []);
+
+  const openImageGenerationSettings = useCallback(() => {
+    openCodexSettings('imageApi');
+  }, [openCodexSettings]);
+
+  const toggleSessionReview = useCallback(() => {
+    setSessionReviewOpen((current) => {
+      const next = !current;
+      if (next) {
+        setWorkspaceTreeOpen(false);
+        setImageGenerationOpen(false);
+      }
+      return next;
+    });
+  }, []);
+
+  const focusSessionFromReview = useCallback((id) => {
+    const panel = panelsRef.current.find((item) => item.id === id);
+    if (!panel) {
+      return;
+    }
+
+    if (panel.minimized) {
+      expandPanel(id);
+      return;
+    }
+
+    activatePanel(id);
+  }, [activatePanel, expandPanel]);
+
+  const setCommandTargetFromReview = useCallback((id) => {
+    setCommandDockTargetId(id);
+    if (commandDockCollapsed) {
+      setCommandDockCollapsed(false);
+    }
+    window.requestAnimationFrame(() => commandDockInputRef.current?.focus());
+  }, [commandDockCollapsed]);
+
+  const copySessionReviewSummary = useCallback(() => {
+    const text = buildSessionReviewSummaryText({
+      panels: commandDockPanels,
+      records: sessionReviewRecordsRef.current,
+      runtimeNow,
+      language,
+      t,
+      getPanelProviderLabel: (panel, activeLanguage) => (
+        getCliProviderBadgeLabel(getPanelCliProvider(panel), activeLanguage)
+      ),
+      getPanelState: getPanelExecutionState,
+      getStateLabel: getExecutionStateLabel
+    });
+    if (writeClipboardText(text)) {
+      showToast(t('sessionReviewCopied'));
+    }
+  }, [commandDockPanels, language, runtimeNow, showToast, t]);
+
+  const copySessionReviewRecord = useCallback((id) => {
+    const panel = commandDockPanels.find((item) => item.id === id)
+      || panelsRef.current.find((item) => item.id === id);
+    if (!panel) {
+      return;
+    }
+
+    const text = buildSessionReviewSummaryText({
+      panels: [panel],
+      records: sessionReviewRecordsRef.current,
+      runtimeNow,
+      language,
+      t,
+      getPanelProviderLabel: (item, activeLanguage) => (
+        getCliProviderBadgeLabel(getPanelCliProvider(item), activeLanguage)
+      ),
+      getPanelState: getPanelExecutionState,
+      getStateLabel: getExecutionStateLabel
+    });
+    if (writeClipboardText(text)) {
+      showToast(t('sessionReviewCopied'));
+    }
+  }, [commandDockPanels, language, runtimeNow, showToast, t]);
+
+  const exportSessionReviewPanels = useCallback(async () => {
+    let count = 0;
+    try {
+      for (const panel of commandDockPanels) {
+        await bridge.exportTerminal(panel.id, {});
+        count += 1;
+      }
+      showToast(t('sessionReviewExportedAll', { count }));
+    } catch (error) {
+      showToast(t('sessionReviewExportAllFailed', { message: error.message }));
+    }
+  }, [commandDockPanels, showToast, t]);
+
+  const startCanvasArrangeAnimation = useCallback((records, positions) => {
+    const animations = {};
+    const orderedRecords = [...records].sort((left, right) => (
+      (left.y - right.y) || (left.x - right.x) || left.title.localeCompare(right.title)
+    ));
+    const orderIndex = new Map(orderedRecords.map((panel, index) => [panel.id, index]));
+
+    records.forEach((panel) => {
+      const nextLayout = positions.get(panel.id);
+      if (!nextLayout || (panel.groupId && panel.minimized)) {
+        return;
+      }
+
+      const fromRect = {
+        x: panel.x,
+        y: panel.y,
+        width: panel.minimized ? endpointWidth : panel.width,
+        height: panel.minimized ? endpointHeight : panel.height
+      };
+      const toRect = {
+        x: nextLayout.x,
+        y: nextLayout.y,
+        width: panel.minimized ? endpointWidth : nextLayout.width,
+        height: panel.minimized ? endpointHeight : nextLayout.height
+      };
+      const dx = Math.round(fromRect.x - toRect.x);
+      const dy = Math.round(fromRect.y - toRect.y);
+      const scaleX = toRect.width > 0 ? clamp(fromRect.width / toRect.width, 0.25, 4) : 1;
+      const scaleY = toRect.height > 0 ? clamp(fromRect.height / toRect.height, 0.25, 4) : 1;
+      const changed = Math.abs(dx) > 0
+        || Math.abs(dy) > 0
+        || Math.abs(scaleX - 1) > 0.01
+        || Math.abs(scaleY - 1) > 0.01;
+
+      if (!changed) {
+        return;
+      }
+
+      animations[panel.id] = {
+        dx,
+        dy,
+        scaleX: Number(scaleX.toFixed(4)),
+        scaleY: Number(scaleY.toFixed(4)),
+        delay: Math.min((orderIndex.get(panel.id) || 0) * 24, canvasArrangeMaxStaggerMs)
+      };
+    });
+
+    window.clearTimeout(canvasArrangeTimerRef.current);
+
+    if (Object.keys(animations).length === 0) {
+      setCanvasArrangeAnimations({});
+      setCanvasArrangeActive(false);
+      return;
+    }
+
+    const longestDelay = Math.max(...Object.values(animations).map((item) => item.delay || 0));
+    setCanvasArrangeAnimations(animations);
+    setCanvasArrangeActive(true);
+    canvasArrangeTimerRef.current = window.setTimeout(() => {
+      setCanvasArrangeAnimations({});
+      setCanvasArrangeActive(false);
+      canvasArrangeTimerRef.current = null;
+    }, canvasArrangeDurationMs + longestDelay + 160);
+  }, []);
+
   const arrangeGrid = useCallback(() => {
     const records = getVisiblePanels();
     if (records.length === 0) {
@@ -6645,11 +9747,12 @@ export default function App() {
       height
     }]));
 
+    startCanvasArrangeAnimation(records, positions);
     setPanels((current) => current.map((panel) => ({
       ...panel,
       ...(positions.get(panel.id) || {})
     })));
-  }, [getVisiblePanels, viewportCenterOnCanvas]);
+  }, [getVisiblePanels, startCanvasArrangeAnimation, viewportCenterOnCanvas]);
 
   const createSessionGrid = useCallback(async (count = 4, config = {}) => {
     const sessionCount = parseGridSessionCount(count);
@@ -6828,6 +9931,7 @@ export default function App() {
       return;
     }
 
+    setImageGenerationOpen(false);
     const now = Date.now();
     const requestedName = String(config.name || '').trim();
     const historyProjectItem = historyProjectRef.current;
@@ -6869,12 +9973,14 @@ export default function App() {
     if (!project) {
       return;
     }
+    setImageGenerationOpen(false);
     commitWorkspace((currentWorkspace) => ({ ...currentWorkspace, activeProjectId: project.id }));
     setCwd(project.path);
     showToast(t('switchedProject', { name: project.name }));
   }, [commitWorkspace, showToast, t]);
 
   const selectNoProject = useCallback(() => {
+    setImageGenerationOpen(false);
     commitWorkspace((currentWorkspace) => ({ ...currentWorkspace, activeProjectId: null }));
     setCwd('');
     showToast(t('switchedProject', { name: t('noProject') }));
@@ -6885,6 +9991,7 @@ export default function App() {
       return;
     }
 
+    setImageGenerationOpen(false);
     commitWorkspace((currentWorkspace) => ({ ...currentWorkspace, canvasMode: mode }));
     showToast(t(mode === 'shared' ? 'switchedCanvasModeShared' : 'switchedCanvasModeProject'));
   }, [commitWorkspace, showToast, t]);
@@ -7178,8 +10285,9 @@ export default function App() {
           onAddSession={openNewSessionPicker}
           onCanvasModeChange={changeCanvasMode}
           onKillAll={killAll}
+          onToggleImageGeneration={toggleImageGeneration}
           onOpenPath={openWorkspacePath}
-          onOpenCodexConfig={() => setCodexOpen(true)}
+          onOpenCodexConfig={openCodexSettings}
           onRefreshSkills={refreshWorkspaceSkills}
           onDeleteProject={deleteProject}
           onReorderProjects={reorderProjects}
@@ -7191,6 +10299,7 @@ export default function App() {
           skillsRootPath={skillsRootPath}
           skillsState={workspaceSkillsState}
           t={t}
+          imageGenerationOpen={imageGenerationOpen}
           onToggleCollapsed={toggleSidebar}
         />
 
@@ -7217,6 +10326,20 @@ export default function App() {
                 onOpenSessionPicker={openNewSessionPicker}
                 t={t}
               />
+              <Button type="button" variant="outline" onClick={() => setAgentsOpen(true)}>
+                <Bot className="h-4 w-4" />
+                {t('agents')}
+              </Button>
+              <Button
+                type="button"
+                variant={sessionReviewOpen ? 'primary' : 'outline'}
+                className="h-9 gap-1.5 px-3"
+                aria-pressed={sessionReviewOpen}
+                onClick={toggleSessionReview}
+              >
+                <SquareTerminal className="h-4 w-4" />
+                {t('sessionReview')}
+              </Button>
             </div>
 
             <Separator orientation="vertical" className="ml-auto h-8" />
@@ -7274,7 +10397,12 @@ export default function App() {
           <main
             ref={viewportRef}
             id="viewport"
-            className={cn('viewport', panning && 'is-panning', pendingCanvasFrame && 'is-creating-frame')}
+            className={cn(
+              'viewport',
+              panning && 'is-panning',
+              pendingCanvasFrame && 'is-creating-frame',
+              canvasArrangeActive && 'is-arranging-canvas'
+            )}
             tabIndex={0}
             style={{
               backgroundSize: `${majorGrid}px ${majorGrid}px, ${majorGrid}px ${majorGrid}px, ${minorGrid}px ${minorGrid}px, ${minorGrid}px ${minorGrid}px`,
@@ -7340,6 +10468,7 @@ export default function App() {
                   runtimeNow={runtimeNow}
                   scale={view.scale}
                   commandTargetId={commandDockTargetId}
+                  dispatchSparkles={commandDockDispatchSparkles}
                   selectedIds={selectedEndpointIds}
                   t={t}
                   onActivate={activateEndpointGroup}
@@ -7365,6 +10494,8 @@ export default function App() {
                   visible={visible}
                   selected={selectedEndpointIds.has(panel.id)}
                   commandTargeted={panel.id === commandDockTargetId}
+                  arrangeAnimation={canvasArrangeAnimations[panel.id] || null}
+                  dispatchSparkleKey={commandDockDispatchSparkles[panel.id] || ''}
                   onActivate={activatePanel}
                   onClose={closeTerminal}
                   onExpand={expandPanel}
@@ -7399,25 +10530,100 @@ export default function App() {
           </main>
 
           <WorkspaceTreeSidebar
+            canInsertToComposer={commandDockVisible}
             currentPath={currentWorkspacePath}
+            normalizeInsertPath={normalizePromptFilePath}
             onClose={() => setWorkspaceTreeOpen(false)}
             onCopy={copyWorkspaceTree}
+            onInsertNode={handleWorkspaceTreeNodeInsert}
+            onInsertSelected={insertSelectedWorkspaceTreePath}
             onOpen={openWorkspaceTree}
             onRefresh={refreshWorkspaceTree}
+            onSelectNode={selectWorkspaceTreeNode}
             open={workspaceTreeOpen}
+            selectedNodeId={workspaceTreeSelectedNode?.id || ''}
+            selectedPath={workspaceTreeSelectedNode?.path || ''}
             state={workspaceTreeState}
             t={t}
           />
+          <SessionReviewSidebar
+            activeId={activeId}
+            commandTargetId={commandDockTargetId}
+            getPanelState={getPanelExecutionState}
+            language={language}
+            onClose={() => setSessionReviewOpen(false)}
+            onCopyAll={copySessionReviewSummary}
+            onCopySession={copySessionReviewRecord}
+            onExportAll={exportSessionReviewPanels}
+            onExportSession={exportTerminal}
+            onFocusSession={focusSessionFromReview}
+            onSetCommandTarget={setCommandTargetFromReview}
+            open={sessionReviewOpen}
+            panels={commandDockPanels}
+            records={sessionReviewRecords}
+            renderProviderBadge={(panel) => (
+              <CliProviderBadge
+                className="px-2 py-0 text-[11px]"
+                language={language}
+                provider={getPanelCliProvider(panel)}
+              />
+            )}
+            renderRuntimeTag={(panel) => (
+              <SessionRuntimeTag panel={panel} now={runtimeNow} t={t} />
+            )}
+            renderStatusTag={(panel, state) => (
+              <SessionStatusTag panel={panel} state={state} t={t} />
+            )}
+            runtimeNow={runtimeNow}
+            t={t}
+          />
+          {imageGenerationOpen && (
+            <ImageGenerationCanvasPage
+              config={imageGenerationConfig}
+              configLoading={imageGenerationConfigLoading}
+              generating={imageGenerationSubmitting}
+              onClear={clearImageGenerationResults}
+              onClose={() => setImageGenerationOpen(false)}
+              onCopyReference={copyImageGenerationReference}
+              onGenerate={generateImageFromCanvas}
+              onOpenFile={openImageGenerationFile}
+              onOpenSettings={openImageGenerationSettings}
+              onPromptChange={setImageGenerationPrompt}
+              prompt={imageGenerationPrompt}
+              results={imageGenerationResults}
+              t={t}
+            />
+          )}
         </div>
       </div>
 
       {commandDockVisible && (
         <FloatingCommandDock
           activeId={activeId}
+          canPanelReceiveInput={canPanelReceiveInput}
           collapsed={commandDockCollapsed}
+          dispatchingTasks={commandDockTaskDispatching}
+          getExecutionStateLabel={getExecutionStateLabel}
+          getPanelExecutionState={getPanelExecutionState}
+          getPanelProviderLabel={(panel) => (
+            getCliProviderBadgeLabel(getPanelCliProvider(panel), language)
+          )}
+          getQuickPromptTitle={(record) => (
+            deriveQuickPromptTitle(record.prompt, t('quickPromptDefaultName'))
+          )}
           inputRef={commandDockInputRef}
-          language={language}
           message={commandDockValue}
+          quickPrompts={quickPrompts}
+          quickPromptsLoading={quickPromptsLoading}
+          quickPromptsPath={quickPromptsPath}
+          renderProviderBadge={(panel) => (
+            <CliProviderBadge
+              className="shrink-0 px-2 py-0 text-[11px]"
+              language={language}
+              provider={getPanelCliProvider(panel)}
+            />
+          )}
+          onDispatchTasks={dispatchCommandDockTasks}
           onExport={exportTerminal}
           onExportCustom={exportTerminalCustom}
           onInputChange={handleCommandDockInputChange}
@@ -7427,16 +10633,27 @@ export default function App() {
           onInputKeyDown={handleCommandDockKeyDown}
           onInputDrop={handleCommandDockDrop}
           onInputPaste={handleCommandDockPaste}
+          onInputScroll={handleCommandDockInputScroll}
+          onInputSelect={handleCommandDockInputSelect}
+          onQuickPromptDelete={deleteCommandDockPrompt}
+          onQuickPromptSave={saveCommandDockPrompt}
+          onQuickPromptSelect={insertQuickPromptIntoCommandDock}
           onSend={sendCommandDockInput}
+          onSkillMentionSelect={insertCommandDockSkillMention}
           onToggleCollapsed={toggleCommandDockCollapsed}
           onTargetChange={selectCommandDockTarget}
           panels={commandDockPanels}
+          skillMention={commandDockSkillMention}
+          skillMentionHasAnyItems={commandDockSkillMentionSourceItems.length > 0}
+          skillMentionItems={commandDockSkillMentionItems}
+          skillMentionLoading={commandDockSkillMentionLoading}
           targetId={commandDockTargetId}
           t={t}
         />
       )}
 
       <CodexConfigDialog
+        initialSettingsTab={codexInitialTab}
         language={language}
         onLanguageChange={setLanguage}
         onOpenChange={setCodexOpen}
@@ -7454,6 +10671,18 @@ export default function App() {
         onSelect={createSessionFromSelection}
         open={newSessionOpen}
         projects={projectsWithHistory}
+        t={t}
+      />
+
+      <AgentsDialog
+        agents={agents}
+        initialCliProviderId={launchCliProviderId}
+        language={language}
+        onAgentsChange={setAgents}
+        onOpenChange={setAgentsOpen}
+        onRunAgent={runAgentTask}
+        open={agentsOpen}
+        showToast={showToast}
         t={t}
       />
 

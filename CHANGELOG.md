@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0](https://github.com/whd3131/cli-in-one/compare/v0.6.0...v0.7.0) (2026-04-26)
+
+
+### Features
+
+* add saved Agents with reusable instructions, avatars, and default CLI selection
+* add Claude Code provider support and editable Claude settings
+* add quick prompt saving, task dispatch, and workspace file mentions to Quick Send
+* add image generation canvas with local result management and helper tool frames
+* add session review and workspace tree sidebars
+
+
+### Bug Fixes
+
+* move image helper tool embeds into a browser-opened local HTML page
+
+
+### Documentation
+
+* update README for Agents, Claude Code, Quick Send prompts, and local storage paths
+
 ## [0.6.0](https://github.com/whd3131/cli-in-one/compare/v0.5.0...v0.6.0) (2026-04-26)
 
 

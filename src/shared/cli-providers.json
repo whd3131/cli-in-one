@@ -74,12 +74,12 @@
       "en": "Cursor"
     },
     "description": {
-      "zh": "在所选目录启动 Cursor CLI：agent .",
-      "en": "Start Cursor CLI in the selected directory with agent ."
+      "zh": "在所选目录启动 Cursor CLI：agent",
+      "en": "Start Cursor CLI in the selected directory with agent"
     },
     "launchCommand": {
-      "project": "agent .",
-      "directory": "agent ."
+      "project": "agent",
+      "directory": "agent"
     },
     "targets": [
       "project",
@@ -87,6 +87,36 @@
     ],
     "detect": {
       "pattern": "(?:^|[\\\\/])agent(?:\\.(?:cmd|exe|bat))?(?:\\s|$)"
+    }
+  },
+  {
+    "id": "claude-code",
+    "displayName": {
+      "zh": "Claude Code CLI",
+      "en": "Claude Code CLI"
+    },
+    "badgeLabel": {
+      "zh": "Claude",
+      "en": "Claude"
+    },
+    "panelTitle": {
+      "zh": "Claude",
+      "en": "Claude"
+    },
+    "description": {
+      "zh": "在所选目录启动 Claude Code：claude",
+      "en": "Start Claude Code in the selected directory with claude"
+    },
+    "launchCommand": {
+      "project": "claude",
+      "directory": "claude"
+    },
+    "targets": [
+      "project",
+      "directory"
+    ],
+    "detect": {
+      "pattern": "(?:^|[\\\\/])claude(?:\\.(?:cmd|exe|bat))?(?:\\s|$)"
     }
   }
 ]
