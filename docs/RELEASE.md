@@ -1,0 +1,52 @@
+# Release Guide
+
+CLI in One uses GitHub Actions, Release Please, electron-builder, and the GitHub CLI.
+
+## How Version Numbers Are Controlled
+
+Version bumps are controlled by Conventional Commits merged into `main`:
+
+| Commit type | Version bump | Example |
+| --- | --- | --- |
+| `fix:` | Patch | `fix: preserve cmd working directory` |
+| `feat:` | Minor | `feat: add saved canvas layouts` |
+| `feat!:` | Major | `feat!: change config file format` |
+| `BREAKING CHANGE:` footer | Major | Use when the breaking change needs more explanation |
+
+Release Please reads those commits, updates `package.json`, `package-lock.json`, `CHANGELOG.md`, and `.release-please-manifest.json`, then opens a release pull request.
+
+## Automatic Release
+
+1. Push or merge feature/fix pull requests into `main`.
+2. Wait for the `Release` workflow to open or update the Release Please pull request.
+3. Merge the Release Please pull request when you are ready to publish.
+4. The same workflow creates a GitHub Release and uploads:
+   - `cli-in-one-<version>-windows-x64-setup.exe`
+   - `cli-in-one-<version>-windows-x64-portable.exe`
+
+The release workflow builds artifacts in the same run because releases created with GitHub's default token do not trigger a second release workflow. electron-builder creates files locally, then `gh release upload` attaches them to the GitHub Release.
+
+## Manual Artifact Rebuild
+
+Use this when a GitHub Release already exists but the uploaded files are missing or need to be rebuilt.
+
+1. Open the repository on GitHub.
+2. Go to `Actions`.
+3. Select `Release Artifacts`.
+4. Click `Run workflow`.
+5. Enter a tag such as `v0.1.0`.
+
+## Local Packaging
+
+```powershell
+npm run pack
+npm run dist:win
+```
+
+Local build output is written to `release/`.
+
+`electron-builder.yml` disables package-time native dependency rebuilds because `node-pty` is validated by `npm install` and the app smoke test. If you later change native dependencies, run `npm run smoke` on Windows before publishing.
+
+## Future Code Signing
+
+The current workflow creates unsigned Windows installers. When you have a code-signing certificate, add the signing secrets required by electron-builder and remove any local-only signing assumptions from the workflow.

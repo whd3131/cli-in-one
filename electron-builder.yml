@@ -1,0 +1,37 @@
+appId: com.dorian.cliinone
+productName: CLI in One
+npmRebuild: false
+
+directories:
+  output: release
+
+files:
+  - package.json
+  - src/main.js
+  - src/preload.js
+  - dist/renderer/**/*
+
+asarUnpack:
+  - node_modules/node-pty/**/*
+  - "**/*.node"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
+nsis:
+  artifactName: cli-in-one-${version}-windows-${arch}-setup.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: CLI in One
+
+portable:
+  artifactName: cli-in-one-${version}-windows-${arch}-portable.${ext}
