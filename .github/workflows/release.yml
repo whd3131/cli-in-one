@@ -69,12 +69,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   macos-artifacts:
-    name: Build macOS release artifacts
+    name: Build macOS release artifacts (${{ matrix.arch }})
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-13
+          - arch: arm64
+            runner: macos-latest
 
     steps:
       - name: Checkout release tag
@@ -92,7 +100,9 @@ jobs:
         run: npm ci
 
       - name: Build macOS artifacts
-        run: npm run dist:mac
+        run: |
+          npm run build:renderer
+          npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never
 
       - name: Upload macOS artifacts to GitHub Release
         shell: bash
