@@ -4,10 +4,16 @@ import {
   Download,
   Maximize2,
   MessageSquarePlus,
-  PanelRightClose,
   SquareTerminal
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle
+} from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import {
   formatSessionReviewTime,
@@ -23,7 +29,7 @@ function ReviewIconButton({ children, label, ...props }) {
   );
 }
 
-export function SessionReviewSidebar({
+export function SessionReviewModal({
   activeId,
   commandTargetId,
   getPanelState,
@@ -48,29 +54,25 @@ export function SessionReviewSidebar({
   const counts = getSessionReviewStatusCounts(visiblePanels, runtimeNow, getPanelState);
   const summary = t('sessionReviewSummaryLine', counts);
 
-  if (!open) {
-    return null;
-  }
-
   return (
-    <aside className="session-review-sidebar" aria-label={t('sessionReviewTitle')}>
-      <section
-        className="session-review-panel"
-        onPointerDown={(event) => event.stopPropagation()}
-        onWheel={(event) => event.stopPropagation()}
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      if (!nextOpen) {
+        onClose?.();
+      }
+    }}>
+      <DialogContent
+        id="sessionReviewDialog"
+        className="session-review-dialog p-0"
       >
-        <header className="session-review-header">
-          <div className="min-w-0">
-            <div className="session-review-title">
-              <SquareTerminal className="h-4 w-4 text-primary" />
-              <span>{t('sessionReviewTitle')}</span>
-            </div>
-            <div className="session-review-description">{t('sessionReviewDescription')}</div>
-          </div>
-          <ReviewIconButton label={t('sessionReviewClose')} variant="ghost" onClick={onClose}>
-            <PanelRightClose className="h-4 w-4" />
-          </ReviewIconButton>
-        </header>
+        <DialogHeader className="session-review-header pr-12">
+          <DialogTitle className="session-review-title">
+            <SquareTerminal className="h-4 w-4 text-primary" />
+            <span>{t('sessionReviewTitle')}</span>
+          </DialogTitle>
+          <DialogDescription className="session-review-description">
+            {t('sessionReviewDescription')}
+          </DialogDescription>
+        </DialogHeader>
 
         <div className="session-review-toolbar">
           <div className="session-review-summary" title={summary}>{summary}</div>
@@ -186,7 +188,7 @@ export function SessionReviewSidebar({
             </div>
           )}
         </div>
-      </section>
-    </aside>
+      </DialogContent>
+    </Dialog>
   );
 }

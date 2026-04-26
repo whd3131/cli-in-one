@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.0](https://github.com/whd3131/cli-in-one/compare/v0.7.0...v0.8.0) (2026-04-27)
+
+
+### Features
+
+* add Copilot and Droid CLI providers with bundled icons
+* add saved CMD startup command presets
+* add draggable Quick Send placement, send history, target search, shortcut settings, and dispatch modes
+* add canvas Todo lists, canvas context menu actions, session tags, and tag-based arrangement
+* add image generation reference images and persisted generation history
+* move session review into a modal opened from Quick Send
+
+
+### Bug Fixes
+
+* tighten workspace tree limits and skipped-directory handling
+* keep terminal metadata in sync after renames and model changes
+
 ## [0.7.0](https://github.com/whd3131/cli-in-one/compare/v0.6.0...v0.7.0) (2026-04-26)
 
 

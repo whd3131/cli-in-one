@@ -1,6 +1,6 @@
 {
   "name": "cli-in-one",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "An Electron infinite-canvas workspace for watching multiple Windows cmd sessions in one view.",
   "main": "src/main.js",
   "scripts": {

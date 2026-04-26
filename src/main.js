@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { fileURLToPath } = require('url');
 const TOML = require('@iarna/toml');
 const cliProviders = require('./shared/cli-providers.json');
 
@@ -38,10 +39,15 @@ const CLAUDE_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh']);
 const CLAUDE_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']);
 const CLAUDE_QUICK_PROFILES_FILE_NAME = 'claude-quick-profiles.json';
 const QUICK_PROMPTS_FILE_NAME = 'quick-prompts.json';
+const COMMAND_PRESETS_FILE_NAME = 'command-presets.json';
 const IMAGE_TOOLS_HTML_FILE_NAME = 'image-tools.html';
 const QUICK_PROMPTS_MAX_ITEMS = 80;
 const QUICK_PROMPT_MAX_LENGTH = 20000;
+const COMMAND_PRESETS_MAX_ITEMS = 80;
+const COMMAND_PRESET_MAX_COMMAND_LENGTH = 20000;
 const IMAGE_API_CONFIG_FILE_NAME = 'image-api-config.json';
+const IMAGE_API_HISTORY_FILE_NAME = 'image-generation-history.json';
+const IMAGE_API_HISTORY_MAX_ITEMS = 80;
 const USAGE_TRACKING_FILE_NAME = 'usage-tracking.json';
 const USAGE_TRACKING_MAX_RECORDS = 2000;
 const IMAGE_API_DEFAULT_MODEL = 'gpt-image-2';
@@ -52,6 +58,8 @@ const IMAGE_API_IMAGE_DOWNLOAD_TIMEOUT_MS = 90 * 1000;
 const IMAGE_API_POLL_TIMEOUT_MS = 8 * 60 * 1000;
 const IMAGE_API_POLL_INITIAL_DELAY_MS = 2000;
 const IMAGE_API_POLL_MAX_DELAY_MS = 10000;
+const IMAGE_API_REFERENCE_IMAGE_MAX_COUNT = 6;
+const IMAGE_API_REFERENCE_IMAGE_MAX_BYTES = 25 * 1024 * 1024;
 const IMAGE_API_TASK_ID_PATTERN = /^[a-zA-Z0-9_.:-]{1,160}$/;
 const RELEASE_REPOSITORY_OWNER = 'whd3131';
 const RELEASE_REPOSITORY_NAME = 'cli-in-one';
@@ -95,21 +103,36 @@ const imageExtensionByMimeType = new Map([
   ['image/svg+xml', '.svg'],
   ['image/webp', '.webp']
 ]);
+const imageMimeTypeByExtension = new Map(
+  Array.from(imageExtensionByMimeType.entries()).map(([mimeType, extension]) => [extension, mimeType])
+);
 const imageExtensions = new Set(imageExtensionByMimeType.values());
-const WORKSPACE_TREE_MAX_DEPTH = 6;
-const WORKSPACE_TREE_MAX_ENTRIES = 2000;
-const WORKSPACE_TREE_MAX_CHILDREN_PER_DIRECTORY = 200;
 const WORKSPACE_SKILL_MAX_DEPTH = 8;
 const WORKSPACE_SKILL_MAX_FILES_PER_SOURCE = 200;
+const WORKSPACE_TREE_MAX_DEPTH = 8;
+const WORKSPACE_TREE_MAX_ENTRIES = 5000;
+const WORKSPACE_TREE_MAX_CHILDREN_PER_DIRECTORY = 500;
+const WORKSPACE_TREE_ABSOLUTE_MAX_DEPTH = 20;
+const WORKSPACE_TREE_ABSOLUTE_MAX_ENTRIES = 20000;
+const WORKSPACE_TREE_ABSOLUTE_MAX_CHILDREN_PER_DIRECTORY = 2000;
 const workspaceTreeIgnoredDirectoryNames = new Set([
+  '.cache',
+  '.cli-in-one',
+  '.files',
   '.git',
-  'node_modules',
   '.next',
   '.nuxt',
-  '.yarn',
-  '.pnpm-store',
+  '.svelte-kit',
   '.turbo',
-  '.cache'
+  '.vite',
+  '__pycache__',
+  'build',
+  'coverage',
+  'dist',
+  'node_modules',
+  'out',
+  'release',
+  'target'
 ]);
 const workspaceSkillFileExtensions = new Set([
   '.json',
@@ -255,8 +278,16 @@ function getQuickPromptsPath() {
   return path.join(getProgramStorageDir(), QUICK_PROMPTS_FILE_NAME);
 }
 
+function getCommandPresetsPath() {
+  return path.join(getProgramStorageDir(), COMMAND_PRESETS_FILE_NAME);
+}
+
 function getImageApiConfigPath() {
   return path.join(getProgramStorageDir(), IMAGE_API_CONFIG_FILE_NAME);
+}
+
+function getImageApiHistoryPath() {
+  return path.join(getProgramStorageDir(), IMAGE_API_HISTORY_FILE_NAME);
 }
 
 async function openImageToolsPage() {
@@ -932,6 +963,10 @@ function resolveCwd(cwd) {
   return getUserHomeDir();
 }
 
+function normalizeTerminalCommandInput(command) {
+  return String(command || '').replace(/\r\n/g, '\r').replace(/\n/g, '\r');
+}
+
 function tokenizeCommandLine(commandLine) {
   const input = String(commandLine || '').trim();
   if (!input) {
@@ -1170,10 +1205,6 @@ function resolveExistingDirectoryOrThrow(dirPath) {
   return resolvedPath;
 }
 
-function shouldIgnoreWorkspaceTreeDirectory(name) {
-  return workspaceTreeIgnoredDirectoryNames.has(String(name || '').trim().toLowerCase());
-}
-
 function compareWorkspaceTreeEntries(left, right) {
   const leftIsDirectory = left.isDirectory();
   const rightIsDirectory = right.isDirectory();
@@ -1188,8 +1219,51 @@ function compareWorkspaceTreeEntries(left, right) {
   });
 }
 
-function formatWorkspaceTreeMoreLabel(count) {
-  return `... [${count} more omitted]`;
+function normalizeWorkspaceTreeRelativePath(relativePath) {
+  return String(relativePath || '').split(path.sep).join('/');
+}
+
+function coerceWorkspaceTreeLimit(value, fallback, minimum, maximum) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(Math.trunc(numericValue), minimum), maximum);
+}
+
+function getWorkspaceTreeReadOptions(options = {}) {
+  return {
+    includeRoot: options.includeRoot !== false,
+    includeText: options.includeText === true,
+    ignoreHeavyDirectories: options.ignoreHeavyDirectories !== false,
+    maxChildrenPerDirectory: coerceWorkspaceTreeLimit(
+      options.maxChildrenPerDirectory,
+      WORKSPACE_TREE_MAX_CHILDREN_PER_DIRECTORY,
+      20,
+      WORKSPACE_TREE_ABSOLUTE_MAX_CHILDREN_PER_DIRECTORY
+    ),
+    maxDepth: coerceWorkspaceTreeLimit(
+      options.maxDepth,
+      WORKSPACE_TREE_MAX_DEPTH,
+      1,
+      WORKSPACE_TREE_ABSOLUTE_MAX_DEPTH
+    ),
+    maxEntries: coerceWorkspaceTreeLimit(
+      options.maxEntries,
+      WORKSPACE_TREE_MAX_ENTRIES,
+      100,
+      WORKSPACE_TREE_ABSOLUTE_MAX_ENTRIES
+    )
+  };
+}
+
+function shouldIgnoreWorkspaceTreeDirectory(entryName, readOptions) {
+  if (!readOptions.ignoreHeavyDirectories) {
+    return false;
+  }
+
+  return workspaceTreeIgnoredDirectoryNames.has(String(entryName || '').toLowerCase());
 }
 
 function normalizeWorkspaceSkillRelativePath(relativePath) {
@@ -1359,29 +1433,36 @@ async function readWorkspaceSkillSourceSnapshot(rootPath, source) {
 
 async function readWorkspaceTreeSnapshot(options = {}) {
   const cwd = resolveExistingDirectoryOrThrow(options.cwd);
+  const readOptions = getWorkspaceTreeReadOptions(options);
   const lines = [];
   const state = {
     directoryCount: 0,
-    fileCount: 0,
     entryCount: 0,
+    fileCount: 0,
     omittedCount: 0,
     truncated: false
   };
   const rootLabel = path.basename(cwd) || cwd;
-  const rootNode = {
+  const rootNode = readOptions.includeRoot ? {
     id: cwd,
     name: rootLabel,
     path: cwd,
     relativePath: '',
     type: 'directory',
     children: []
-  };
+  } : null;
 
   const appendTreeLine = (prefix, isLast, label) => {
-    lines.push(`${prefix}${isLast ? '└── ' : '├── '}${label}`);
+    if (readOptions.includeText) {
+      lines.push(`${prefix}${isLast ? '└── ' : '├── '}${label}`);
+    }
   };
 
   const appendNoticeNode = (parentNode, notice) => {
+    if (!parentNode) {
+      return;
+    }
+
     parentNode.children.push({
       id: `${parentNode.path || cwd}:${notice.type}:${parentNode.children.length}`,
       type: notice.type,
@@ -1392,11 +1473,22 @@ async function readWorkspaceTreeSnapshot(options = {}) {
     });
   };
 
-  const normalizeRelativeWorkspaceTreePath = (relativePath) => (
-    String(relativePath || '').split(path.sep).join('/')
-  );
+  const appendOmittedNotice = (prefix, parentNode, omittedCount) => {
+    if (omittedCount <= 0) {
+      return;
+    }
 
-  const walk = async (directoryPath, prefix, depth, parentNode, relativeDirectoryPath = '') => {
+    state.omittedCount += omittedCount;
+    state.truncated = true;
+    appendTreeLine(prefix, true, `[omitted: ${omittedCount}]`);
+    appendNoticeNode(parentNode, {
+      type: 'omitted',
+      name: `[omitted: ${omittedCount}]`,
+      omittedCount
+    });
+  };
+
+  const walk = async (directoryPath, prefix, parentNode, relativeDirectoryPath = '', depth = 0) => {
     let entries = [];
 
     try {
@@ -1413,48 +1505,27 @@ async function readWorkspaceTreeSnapshot(options = {}) {
     }
 
     entries.sort(compareWorkspaceTreeEntries);
-
-    const omittedChildrenCount = Math.max(
-      0,
-      entries.length - WORKSPACE_TREE_MAX_CHILDREN_PER_DIRECTORY
-    );
-    const visibleEntries = omittedChildrenCount > 0
-      ? entries.slice(0, WORKSPACE_TREE_MAX_CHILDREN_PER_DIRECTORY)
-      : entries;
-
-    if (omittedChildrenCount > 0) {
-      state.omittedCount += omittedChildrenCount;
-      state.truncated = true;
-    }
+    const visibleEntries = entries.slice(0, readOptions.maxChildrenPerDirectory);
+    const directoryOmittedCount = Math.max(0, entries.length - visibleEntries.length);
 
     for (let index = 0; index < visibleEntries.length; index += 1) {
-      if (state.entryCount >= WORKSPACE_TREE_MAX_ENTRIES) {
-        const remainingVisibleCount = visibleEntries.length - index;
-        const remainingCount = remainingVisibleCount + omittedChildrenCount;
-        if (remainingCount > 0) {
-          const label = formatWorkspaceTreeMoreLabel(remainingCount);
-          appendTreeLine(prefix, true, label);
-          appendNoticeNode(parentNode, {
-            type: 'omitted',
-            name: label,
-            omittedCount: remainingCount
-          });
-          state.omittedCount += remainingVisibleCount;
-        }
-        state.truncated = true;
+      if (state.entryCount >= readOptions.maxEntries) {
+        appendOmittedNotice(prefix, parentNode, visibleEntries.length - index + directoryOmittedCount);
         return true;
       }
 
       const entry = visibleEntries[index];
-      const isLastVisible = index === visibleEntries.length - 1;
-      const isLast = isLastVisible && omittedChildrenCount === 0;
+      const isLast = index === visibleEntries.length - 1 && directoryOmittedCount === 0;
       const nextPrefix = `${prefix}${isLast ? '    ' : '│   '}`;
       const entryPath = path.join(directoryPath, entry.name);
       const relativePath = relativeDirectoryPath
         ? path.join(relativeDirectoryPath, entry.name)
         : entry.name;
+      const normalizedRelativePath = normalizeWorkspaceTreeRelativePath(relativePath);
       const entryIsDirectory = entry.isDirectory();
       const entryIsLink = entry.isSymbolicLink();
+      const entryIsIgnored = entryIsDirectory && shouldIgnoreWorkspaceTreeDirectory(entry.name, readOptions);
+      const entryExceedsDepth = entryIsDirectory && depth + 1 > readOptions.maxDepth;
       const labelParts = [entry.name];
 
       if (entryIsDirectory) {
@@ -1463,46 +1534,53 @@ async function readWorkspaceTreeSnapshot(options = {}) {
       if (entryIsLink) {
         labelParts.push(' [link]');
       }
-      if (entryIsDirectory && shouldIgnoreWorkspaceTreeDirectory(entry.name)) {
-        labelParts.push(' [ignored]');
+      if (entryIsIgnored) {
+        labelParts.push(' [skipped]');
       }
 
       appendTreeLine(prefix, isLast, labelParts.join(''));
       state.entryCount += 1;
 
-      const entryNode = {
+      const entryNode = readOptions.includeRoot ? {
         id: entryPath,
         name: entry.name,
         path: entryPath,
-        relativePath: normalizeRelativeWorkspaceTreePath(relativePath),
+        relativePath: normalizedRelativePath,
         type: entryIsDirectory ? 'directory' : entryIsLink ? 'link' : 'file',
-        ignored: entryIsDirectory && shouldIgnoreWorkspaceTreeDirectory(entry.name),
+        ignored: entryIsIgnored,
         link: entryIsLink,
         children: []
-      };
-      parentNode.children.push(entryNode);
+      } : null;
+      parentNode?.children.push(entryNode);
 
       if (entryIsDirectory) {
         state.directoryCount += 1;
 
-        if (shouldIgnoreWorkspaceTreeDirectory(entry.name) || entryIsLink) {
-          continue;
-        }
-
-        if (depth + 1 > WORKSPACE_TREE_MAX_DEPTH) {
-          const label = '... [depth limit]';
-          appendTreeLine(nextPrefix, true, label);
-          appendNoticeNode(entryNode, {
-            type: 'depth-limit',
-            name: label
-          });
+        if (entryIsIgnored) {
           state.omittedCount += 1;
           state.truncated = true;
           continue;
         }
 
-        const shouldStop = await walk(entryPath, nextPrefix, depth + 1, entryNode, relativePath);
-        if (shouldStop) {
+        if (entryIsLink) {
+          continue;
+        }
+
+        if (entryExceedsDepth) {
+          state.omittedCount += 1;
+          state.truncated = true;
+          appendNoticeNode(entryNode, {
+            type: 'depth-limit',
+            name: '[depth limit]'
+          });
+          if (readOptions.includeText) {
+            appendTreeLine(nextPrefix, true, '[depth limit]');
+          }
+          continue;
+        }
+
+        const stopped = await walk(entryPath, nextPrefix, entryNode, relativePath, depth + 1);
+        if (stopped) {
           return true;
         }
         continue;
@@ -1511,32 +1589,23 @@ async function readWorkspaceTreeSnapshot(options = {}) {
       state.fileCount += 1;
     }
 
-    if (omittedChildrenCount > 0) {
-      const label = formatWorkspaceTreeMoreLabel(omittedChildrenCount);
-      appendTreeLine(prefix, true, label);
-      appendNoticeNode(parentNode, {
-        type: 'omitted',
-        name: label,
-        omittedCount: omittedChildrenCount
-      });
-    }
-
+    appendOmittedNotice(prefix, parentNode, directoryOmittedCount);
     return false;
   };
 
-  lines.push(rootLabel.endsWith(path.sep) ? rootLabel : `${rootLabel}${path.sep}`);
-  await walk(cwd, '', 1, rootNode);
+  if (readOptions.includeText) {
+    lines.push(rootLabel.endsWith(path.sep) ? rootLabel : `${rootLabel}${path.sep}`);
+  }
+  await walk(cwd, '', rootNode);
 
   return {
     cwd,
     root: rootNode,
-    text: lines.join('\n'),
+    text: readOptions.includeText ? lines.join('\n') : '',
     directoryCount: state.directoryCount,
     fileCount: state.fileCount,
     omittedCount: state.omittedCount,
-    truncated: state.truncated,
-    maxDepth: WORKSPACE_TREE_MAX_DEPTH,
-    maxEntries: WORKSPACE_TREE_MAX_ENTRIES
+    truncated: state.truncated
   };
 }
 
@@ -2080,6 +2149,24 @@ function inferImageExtension(fileName, mimeType) {
   return '.png';
 }
 
+function inferImageMimeType(fileName, mimeType) {
+  const normalizedMimeType = typeof mimeType === 'string'
+    ? mimeType.trim().toLowerCase().split(';')[0].trim()
+    : '';
+  if (normalizedMimeType.startsWith('image/')) {
+    return normalizedMimeType;
+  }
+
+  const originalExtension = typeof fileName === 'string'
+    ? path.extname(fileName).trim().toLowerCase()
+    : '';
+  if (originalExtension === '.jpg' || originalExtension === '.jpeg') {
+    return 'image/jpeg';
+  }
+
+  return imageMimeTypeByExtension.get(originalExtension) || 'image/png';
+}
+
 function isSupportedImageAsset(fileName, mimeType) {
   const normalizedMimeType = typeof mimeType === 'string'
     ? mimeType.trim().toLowerCase().split(';')[0].trim()
@@ -2089,6 +2176,113 @@ function isSupportedImageAsset(fileName, mimeType) {
     : '';
 
   return imageExtensions.has(originalExtension) || imageExtensionByMimeType.has(normalizedMimeType);
+}
+
+function isSupportedImageFilePath(fileName) {
+  return /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(asString(fileName));
+}
+
+function getImageApiReferenceValue(reference) {
+  if (reference && typeof reference === 'object' && !Array.isArray(reference)) {
+    return asString(
+      reference.url
+      || reference.path
+      || reference.normalizedPath
+      || reference.sourceUrl
+      || reference.href
+    ).trim();
+  }
+
+  return asString(reference).trim();
+}
+
+function resolveLocalImageReferencePath(value) {
+  const rawValue = asString(value).trim();
+  if (!rawValue) {
+    return '';
+  }
+
+  if (/^file:/i.test(rawValue)) {
+    try {
+      return fileURLToPath(rawValue);
+    } catch {
+      return '';
+    }
+  }
+
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(rawValue) && !/^[a-zA-Z]:[\\/]/.test(rawValue)) {
+    return '';
+  }
+
+  return path.isAbsolute(rawValue) ? rawValue : '';
+}
+
+async function normalizeImageApiReferenceImage(reference) {
+  const rawValue = getImageApiReferenceValue(reference);
+  if (!rawValue) {
+    return '';
+  }
+
+  if (/^data:image\/[^;,]+;base64,/i.test(rawValue)) {
+    return rawValue;
+  }
+
+  const filePath = resolveLocalImageReferencePath(rawValue);
+  if (!filePath && /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(rawValue) && !/^[a-zA-Z]:[\\/]/.test(rawValue)) {
+    return rawValue;
+  }
+  if (!filePath) {
+    return rawValue;
+  }
+
+  const stats = await fs.promises.stat(filePath).catch(() => null);
+  if (!stats?.isFile()) {
+    throw new Error(`参考图不存在：${filePath}`);
+  }
+  if (stats.size > IMAGE_API_REFERENCE_IMAGE_MAX_BYTES) {
+    throw new Error(`参考图不能超过 ${Math.floor(IMAGE_API_REFERENCE_IMAGE_MAX_BYTES / 1024 / 1024)} MB：${path.basename(filePath)}`);
+  }
+
+  if (!isSupportedImageFilePath(filePath)) {
+    throw new Error(`参考图不是支持的图片文件：${filePath}`);
+  }
+  const mimeType = inferImageMimeType(filePath);
+
+  const buffer = await fs.promises.readFile(filePath);
+  if (buffer.length === 0) {
+    throw new Error(`参考图内容为空：${filePath}`);
+  }
+
+  return `data:${mimeType};base64,${buffer.toString('base64')}`;
+}
+
+async function normalizeImageApiReferenceImages(references) {
+  const sourceReferences = Array.isArray(references) ? references : [];
+  const normalizedReferences = [];
+  const seen = new Set();
+
+  for (const reference of sourceReferences) {
+    const normalizedReference = await normalizeImageApiReferenceImage(reference);
+    if (!normalizedReference) {
+      continue;
+    }
+
+    const key = normalizedReference.startsWith('data:')
+      ? normalizedReference.slice(0, 200)
+      : normalizedReference;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    normalizedReferences.push(normalizedReference);
+
+    if (normalizedReferences.length >= IMAGE_API_REFERENCE_IMAGE_MAX_COUNT) {
+      break;
+    }
+  }
+
+  return normalizedReferences;
 }
 
 async function saveCommandDockImageAsset(options = {}) {
@@ -2297,6 +2491,149 @@ async function writeImageApiConfig(payload = {}) {
   }
 
   return redactImageApiConfig(nextConfig);
+}
+
+function normalizeImageApiHistoryStatus(value, fallback = 'success') {
+  return asString(value, fallback).trim().toLowerCase() || fallback;
+}
+
+function normalizeImageApiHistoryNumber(value, fallback = null) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizeImageApiHistoryItem(record, index = 0) {
+  if (!record || typeof record !== 'object') {
+    return null;
+  }
+
+  const pathValue = asString(record.path).trim();
+  const normalizedPath = asString(record.normalizedPath, pathValue).replace(/\\/g, '/').trim();
+  const rawKind = asString(record.kind).trim().toLowerCase();
+  const kind = rawKind === 'task' && !pathValue && !normalizedPath ? 'task' : 'image';
+  const status = normalizeImageApiHistoryStatus(record.status, kind === 'task' ? 'failed' : 'success');
+
+  if (kind === 'task' && !IMAGE_API_FAILED_STATUSES.has(status)) {
+    return null;
+  }
+
+  if (kind === 'image' && !pathValue && !normalizedPath) {
+    return null;
+  }
+
+  const createdAt = normalizeImageApiHistoryNumber(record.createdAt, Date.now());
+  const updatedAt = normalizeImageApiHistoryNumber(record.updatedAt, createdAt);
+  const id = asString(record.id).trim()
+    || `${kind}-${createdAt}-${index}-${crypto.randomBytes(3).toString('hex')}`;
+  const count = Number.parseInt(record.n, 10);
+  const referenceImageCount = Number.parseInt(record.referenceImageCount, 10);
+
+  return {
+    id,
+    kind,
+    taskId: asString(record.taskId).trim(),
+    status,
+    createdAt,
+    updatedAt,
+    finishedAt: normalizeImageApiHistoryNumber(record.finishedAt, null),
+    model: asString(record.model).trim(),
+    n: Number.isFinite(count) ? Math.min(4, Math.max(1, count)) : null,
+    size: asString(record.size).trim(),
+    referenceImageCount: Number.isFinite(referenceImageCount) ? Math.max(0, referenceImageCount) : 0,
+    name: asString(record.name).trim(),
+    normalizedPath,
+    path: pathValue || normalizedPath,
+    prompt: asString(record.prompt),
+    error: asString(record.error).trim()
+  };
+}
+
+function normalizeImageApiHistoryStore(raw = {}) {
+  const sourceItems = Array.isArray(raw)
+    ? raw
+    : Array.isArray(raw?.items) ? raw.items : [];
+  const items = [];
+  const seenIds = new Set();
+
+  sourceItems.forEach((record, index) => {
+    const normalized = normalizeImageApiHistoryItem(record, index);
+    if (!normalized) {
+      return;
+    }
+
+    if (seenIds.has(normalized.id)) {
+      normalized.id = `${normalized.id}-${crypto.randomBytes(3).toString('hex')}`;
+    }
+    seenIds.add(normalized.id);
+    items.push(normalized);
+  });
+
+  return {
+    version: 1,
+    items: items.slice(0, IMAGE_API_HISTORY_MAX_ITEMS)
+  };
+}
+
+function toImageApiHistoryPayload(store) {
+  return {
+    path: getImageApiHistoryPath(),
+    version: 1,
+    items: store.items
+  };
+}
+
+async function readImageApiHistoryStore() {
+  const historyPath = getImageApiHistoryPath();
+
+  try {
+    const content = await fs.promises.readFile(historyPath, 'utf8');
+    return normalizeImageApiHistoryStore(JSON.parse(content));
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return normalizeImageApiHistoryStore({});
+    }
+
+    if (error instanceof SyntaxError) {
+      throw new Error(`生图历史文件不是有效 JSON：${error.message}`);
+    }
+
+    throw error;
+  }
+}
+
+async function writeImageApiHistoryStore(store) {
+  const normalized = normalizeImageApiHistoryStore(store);
+  const historyPath = getImageApiHistoryPath();
+  const tempPath = path.join(
+    path.dirname(historyPath),
+    `${IMAGE_API_HISTORY_FILE_NAME}.${process.pid}.${Date.now()}.tmp`
+  );
+
+  await fs.promises.mkdir(path.dirname(historyPath), { recursive: true });
+
+  try {
+    await fs.promises.writeFile(tempPath, `${JSON.stringify(normalized, null, 2)}\n`, 'utf8');
+    await fs.promises.rename(tempPath, historyPath);
+  } catch (error) {
+    await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+
+  return normalized;
+}
+
+async function listImageApiHistory() {
+  return toImageApiHistoryPayload(await readImageApiHistoryStore());
+}
+
+async function writeImageApiHistory(payload = {}) {
+  const store = await writeImageApiHistoryStore(payload || {});
+  return toImageApiHistoryPayload(store);
+}
+
+async function clearImageApiHistory() {
+  const store = await writeImageApiHistoryStore({ items: [] });
+  return toImageApiHistoryPayload(store);
 }
 
 function buildImageApiUrls(baseUrl) {
@@ -2513,6 +2850,9 @@ function serializeImageApiTask(task) {
     model: asString(task?.model),
     n: Number.isFinite(Number.parseInt(task?.n, 10)) ? Number.parseInt(task?.n, 10) : null,
     size: asString(task?.size),
+    referenceImageCount: Number.isFinite(Number.parseInt(task?.referenceImageCount, 10))
+      ? Number.parseInt(task?.referenceImageCount, 10)
+      : 0,
     images: Array.isArray(task?.images) ? task.images : [],
     imageUrls: Array.isArray(task?.imageUrls) ? task.imageUrls : [],
     creditCost: task?.creditCost ?? null,
@@ -2764,9 +3104,7 @@ async function generateImageWithApi(options = {}, context = {}) {
     n: normalizeImageApiCount(config.n),
     size: config.size || IMAGE_API_DEFAULT_SIZE
   };
-  const referenceImages = Array.isArray(options.referenceImageUrls)
-    ? options.referenceImageUrls.map((url) => asString(url).trim()).filter(Boolean)
-    : [];
+  const referenceImages = await normalizeImageApiReferenceImages(options.referenceImageUrls);
   if (referenceImages.length > 0) {
     body.reference_images = referenceImages;
   }
@@ -2783,6 +3121,7 @@ async function generateImageWithApi(options = {}, context = {}) {
     model: body.model,
     n: body.n,
     size: body.size,
+    referenceImageCount: referenceImages.length,
     status: isImageApiTaskSuccessful(dispatched, config)
       ? 'saving'
       : (asString(dispatched.status || 'queued') || 'queued'),
@@ -3054,13 +3393,42 @@ async function createTerminalSession(webContents, options = {}) {
     setTimeout(() => {
       const session = sessions.get(id);
       if (session) {
-        writeToSessionProcess(session, `${initialCommand}\r`);
+        writeToSessionProcess(session, `${normalizeTerminalCommandInput(initialCommand)}\r`);
       }
     }, process.platform === 'win32' ? 450 : 300);
   }
 
   const { transcriptChunks, ...publicMeta } = meta;
   return publicMeta;
+}
+
+function updateTerminalSessionMeta(id, patch = {}) {
+  const session = sessions.get(id);
+  if (!session || !patch || typeof patch !== 'object') {
+    return null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'title')) {
+    const title = asString(patch.title).trim();
+    if (title) {
+      session.title = title;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'codexModel')) {
+    session.codexModel = asString(patch.codexModel).trim();
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'codexProviderName')) {
+    session.codexProviderName = asString(patch.codexProviderName).trim();
+  }
+
+  return {
+    id: session.id,
+    title: session.title,
+    codexModel: session.codexModel || '',
+    codexProviderName: session.codexProviderName || ''
+  };
 }
 
 function writeToSessionProcess(session, data) {
@@ -4216,6 +4584,215 @@ async function deleteQuickPrompt(id) {
   };
 }
 
+function createCommandPresetId() {
+  return crypto.randomUUID();
+}
+
+function normalizeCommandPresetCommand(value) {
+  return asString(value)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .trim()
+    .slice(0, COMMAND_PRESET_MAX_COMMAND_LENGTH);
+}
+
+function deriveCommandPresetName(command, fallback = 'CMD 命令') {
+  const firstLine = normalizeCommandPresetCommand(command)
+    .split('\n')
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  return (firstLine || fallback).replace(/\s+/g, ' ').slice(0, 120);
+}
+
+function normalizeCommandPresetName(value, command, fallback) {
+  const trimmed = asString(value).trim();
+  return (trimmed || deriveCommandPresetName(command, fallback)).slice(0, 120);
+}
+
+function normalizeCommandPresetRecord(record, index) {
+  const command = normalizeCommandPresetCommand(record?.command ?? record?.initialCommand);
+  if (!command) {
+    return null;
+  }
+
+  const id = asString(record?.id).trim() || createCommandPresetId();
+  const now = Date.now();
+  const createdAt = Number.isFinite(record?.createdAt) ? record.createdAt : now + index;
+  const updatedAt = Number.isFinite(record?.updatedAt) ? record.updatedAt : createdAt;
+
+  return {
+    id,
+    name: normalizeCommandPresetName(record?.name ?? record?.title, command, `CMD 命令 ${index + 1}`),
+    command,
+    createdAt,
+    updatedAt
+  };
+}
+
+function normalizeCommandPresetStore(raw = {}) {
+  const sourcePresets = Array.isArray(raw)
+    ? raw
+    : Array.isArray(raw?.presets) ? raw.presets : [];
+  const presets = [];
+  const seenIds = new Set();
+
+  sourcePresets.forEach((record, index) => {
+    try {
+      const normalized = normalizeCommandPresetRecord(record, index);
+      if (!normalized) {
+        return;
+      }
+
+      if (seenIds.has(normalized.id)) {
+        normalized.id = createCommandPresetId();
+      }
+      seenIds.add(normalized.id);
+      presets.push(normalized);
+    } catch {
+      // Ignore invalid saved commands instead of blocking new terminal creation.
+    }
+  });
+
+  const activeId = presets.some((preset) => preset.id === raw?.activeId)
+    ? raw.activeId
+    : '';
+
+  return {
+    version: 1,
+    activeId,
+    presets: presets.slice(0, COMMAND_PRESETS_MAX_ITEMS)
+  };
+}
+
+function toCommandPresetStorePayload(store) {
+  return {
+    path: getCommandPresetsPath(),
+    version: 1,
+    activeId: store.activeId || '',
+    presets: store.presets
+  };
+}
+
+async function readCommandPresetStore() {
+  const storePath = getCommandPresetsPath();
+
+  try {
+    const content = await fs.promises.readFile(storePath, 'utf8');
+    return normalizeCommandPresetStore(JSON.parse(content));
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return normalizeCommandPresetStore({});
+    }
+
+    if (error instanceof SyntaxError) {
+      throw new Error(`CMD 命令预置文件不是有效 JSON：${error.message}`);
+    }
+
+    throw error;
+  }
+}
+
+async function writeCommandPresetStore(store) {
+  const normalized = normalizeCommandPresetStore(store);
+  const storePath = getCommandPresetsPath();
+  const tempPath = path.join(
+    path.dirname(storePath),
+    `${COMMAND_PRESETS_FILE_NAME}.${process.pid}.${Date.now()}.tmp`
+  );
+
+  await fs.promises.mkdir(path.dirname(storePath), { recursive: true });
+
+  try {
+    await fs.promises.writeFile(tempPath, `${JSON.stringify(normalized, null, 2)}\n`, 'utf8');
+    await fs.promises.rename(tempPath, storePath);
+  } catch (error) {
+    await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+
+  return normalized;
+}
+
+async function listCommandPresets() {
+  return toCommandPresetStorePayload(await readCommandPresetStore());
+}
+
+async function saveCommandPreset(payload = {}) {
+  const store = await readCommandPresetStore();
+  const command = normalizeCommandPresetCommand(payload.command ?? payload.initialCommand);
+  if (!command) {
+    throw new Error('CMD 命令不能为空。');
+  }
+
+  const requestedId = asString(payload.id).trim();
+  const existingIndex = requestedId
+    ? store.presets.findIndex((record) => record.id === requestedId)
+    : -1;
+  const existing = existingIndex >= 0 ? store.presets[existingIndex] : null;
+  const record = {
+    id: existing?.id || requestedId || createCommandPresetId(),
+    name: normalizeCommandPresetName(payload.name ?? payload.title, command, existing?.name || 'CMD 命令'),
+    command,
+    createdAt: existing?.createdAt || Date.now(),
+    updatedAt: Date.now()
+  };
+
+  const presets = [...store.presets];
+  if (existingIndex >= 0) {
+    presets[existingIndex] = record;
+  } else {
+    presets.unshift(record);
+  }
+
+  const nextStore = await writeCommandPresetStore({
+    ...store,
+    activeId: record.id,
+    presets: presets.slice(0, COMMAND_PRESETS_MAX_ITEMS)
+  });
+
+  return {
+    ...toCommandPresetStorePayload(nextStore),
+    savedPreset: record
+  };
+}
+
+async function selectCommandPreset(id) {
+  const store = await readCommandPresetStore();
+  const presetId = asString(id).trim();
+  if (presetId && !store.presets.some((record) => record.id === presetId)) {
+    throw new Error('选择的 CMD 命令预置不存在。');
+  }
+
+  const nextStore = await writeCommandPresetStore({
+    ...store,
+    activeId: presetId
+  });
+
+  return toCommandPresetStorePayload(nextStore);
+}
+
+async function deleteCommandPreset(id) {
+  const store = await readCommandPresetStore();
+  const presetId = asString(id).trim();
+  const existing = store.presets.find((record) => record.id === presetId);
+
+  if (!existing) {
+    throw new Error('选择的 CMD 命令预置不存在。');
+  }
+
+  const nextStore = await writeCommandPresetStore({
+    ...store,
+    activeId: store.activeId === presetId ? '' : store.activeId,
+    presets: store.presets.filter((record) => record.id !== presetId)
+  });
+
+  return {
+    ...toCommandPresetStorePayload(nextStore),
+    deletedPreset: existing
+  };
+}
+
 function getCodexEditableFile(kind) {
   if (kind === 'auth') {
     return {
@@ -4877,6 +5454,22 @@ app.whenReady().then(async () => {
     return deleteQuickPrompt(id);
   });
 
+  ipcMain.handle('command-presets:list', () => {
+    return listCommandPresets();
+  });
+
+  ipcMain.handle('command-presets:save', (_event, payload) => {
+    return saveCommandPreset(payload || {});
+  });
+
+  ipcMain.handle('command-presets:select', (_event, id) => {
+    return selectCommandPreset(id);
+  });
+
+  ipcMain.handle('command-presets:delete', (_event, id) => {
+    return deleteCommandPreset(id);
+  });
+
   ipcMain.handle('agents:save-avatar', (_event, payload) => {
     return saveAgentAvatarAsset(payload || {});
   });
@@ -4889,12 +5482,28 @@ app.whenReady().then(async () => {
     return writeImageApiConfig(payload || {});
   });
 
+  ipcMain.handle('image-api:list-history', () => {
+    return listImageApiHistory();
+  });
+
+  ipcMain.handle('image-api:write-history', (_event, payload) => {
+    return writeImageApiHistory(payload || {});
+  });
+
+  ipcMain.handle('image-api:clear-history', () => {
+    return clearImageApiHistory();
+  });
+
   ipcMain.handle('image-api:generate', (event, payload) => {
     return generateImageWithApi(payload || {}, { webContents: event.sender });
   });
 
   ipcMain.handle('terminal:create', (event, options) => {
     return createTerminalSession(event.sender, options);
+  });
+
+  ipcMain.handle('terminal:update-meta', (_event, id, patch) => {
+    return updateTerminalSessionMeta(id, patch || {});
   });
 
   ipcMain.handle('terminal:kill', (_event, id) => {

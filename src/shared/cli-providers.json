@@ -60,6 +60,66 @@
     }
   },
   {
+    "id": "droid",
+    "displayName": {
+      "zh": "Droid CLI",
+      "en": "Droid CLI"
+    },
+    "badgeLabel": {
+      "zh": "Droid",
+      "en": "Droid"
+    },
+    "panelTitle": {
+      "zh": "Droid",
+      "en": "Droid"
+    },
+    "description": {
+      "zh": "在所选目录启动 Droid CLI：droid",
+      "en": "Start Droid CLI in the selected directory with droid"
+    },
+    "launchCommand": {
+      "project": "droid",
+      "directory": "droid"
+    },
+    "targets": [
+      "project",
+      "directory"
+    ],
+    "detect": {
+      "pattern": "(?:^|[\\\\/])droid(?:\\.(?:cmd|exe|bat))?(?:\\s|$)"
+    }
+  },
+  {
+    "id": "copilot",
+    "displayName": {
+      "zh": "GitHub Copilot CLI",
+      "en": "GitHub Copilot CLI"
+    },
+    "badgeLabel": {
+      "zh": "Copilot",
+      "en": "Copilot"
+    },
+    "panelTitle": {
+      "zh": "Copilot",
+      "en": "Copilot"
+    },
+    "description": {
+      "zh": "在所选目录启动 GitHub Copilot CLI：copilot",
+      "en": "Start GitHub Copilot CLI in the selected directory with copilot"
+    },
+    "launchCommand": {
+      "project": "copilot",
+      "directory": "copilot"
+    },
+    "targets": [
+      "project",
+      "directory"
+    ],
+    "detect": {
+      "pattern": "(?:^|[\\\\/])copilot(?:\\.(?:cmd|exe|bat))?(?:\\s|$)"
+    }
+  },
+  {
     "id": "cursor-agent",
     "displayName": {
       "zh": "Cursor CLI",

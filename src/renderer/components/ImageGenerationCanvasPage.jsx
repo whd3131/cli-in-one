@@ -3,6 +3,7 @@ import {
   Copy,
   ExternalLink,
   ImagePlus,
+  Images,
   Minus,
   Move,
   PanelLeft,
@@ -11,6 +12,8 @@ import {
   Settings2,
   SlidersHorizontal,
   Trash2,
+  Upload,
+  X,
   ZoomIn
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -41,6 +44,7 @@ const imageGenerationToolFrames = [
 
 const imageGenerationToolPanelHeight = 260;
 const imageGenerationResultStartY = imageGenerationToolPanelHeight + 60;
+const imageGenerationReferenceImageMaxCount = 6;
 
 const failedStatuses = new Set([
   'cancelled',
@@ -58,6 +62,58 @@ function clamp(value, min, max) {
 
 function closestElement(target, selector) {
   return target instanceof Element ? target.closest(selector) : null;
+}
+
+function isImageFile(file) {
+  if (!file) {
+    return false;
+  }
+
+  const mimeType = String(file.type || '').trim().toLowerCase();
+  if (mimeType.startsWith('image/')) {
+    return true;
+  }
+
+  return /\.(apng|avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(String(file.name || '').trim());
+}
+
+function extractImageFilesFromDataTransfer(dataTransfer) {
+  if (!dataTransfer) {
+    return [];
+  }
+
+  const itemFiles = Array.from(dataTransfer.items || [])
+    .filter((item) => item?.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter((file) => file && isImageFile(file));
+  if (itemFiles.length > 0) {
+    return itemFiles;
+  }
+
+  return Array.from(dataTransfer.files || []).filter((file) => isImageFile(file));
+}
+
+function normalizeReferenceImageItem(item) {
+  const path = String(item?.path || item?.normalizedPath || '').trim();
+  const normalizedPath = String(item?.normalizedPath || path).replace(/\\/g, '/');
+  if (!path && !normalizedPath) {
+    return null;
+  }
+
+  const name = String(
+    item?.name
+    || normalizedPath.split('/').filter(Boolean).pop()
+    || path.split(/[\\/]/).filter(Boolean).pop()
+    || ''
+  ).trim();
+
+  return {
+    id: String(item?.id || `${normalizedPath || path}-${Date.now()}`).trim(),
+    name,
+    normalizedPath,
+    path: path || normalizedPath,
+    url: String(item?.url || '').trim()
+  };
 }
 
 function bindPointerSession(onPointerMove, onPointerEnd) {
@@ -190,6 +246,7 @@ function ImageGenerationResultCard({
   onCopyReference,
   onMove,
   onOpenFile,
+  onUseAsReference,
   t
 }) {
   const [failedPreview, setFailedPreview] = useState(false);
@@ -212,6 +269,7 @@ function ImageGenerationResultCard({
   const metaItems = [
     item.model,
     ratioLabel ? t('imageGenerationAspectSummary', { ratio: ratioLabel }) : '',
+    item.referenceImageCount ? t('imageGenerationReferenceSummary', { count: item.referenceImageCount }) : '',
     item.kind === 'task' && item.n ? t('imageGenerationRequestedCount', { count: item.n }) : ''
   ].filter(Boolean);
   const title = [titleText, detailText, ...metaItems].filter(Boolean).join('\n');
@@ -298,6 +356,15 @@ function ImageGenerationResultCard({
       </div>
 
       <div className="image-generation-card-actions">
+        <ImageGenerationIconButton
+          label={t('imageGenerationUseAsReference')}
+          variant="ghost"
+          className="h-8 w-8"
+          disabled={!item.path || pending || failed}
+          onClick={() => onUseAsReference?.(item)}
+        >
+          <ImagePlus className="h-3.5 w-3.5" />
+        </ImageGenerationIconButton>
         <ImageGenerationIconButton
           label={t('imageGenerationCopyReference')}
           variant="ghost"
@@ -422,6 +489,156 @@ function ImageGenerationToolPanel({
   );
 }
 
+function ImageGenerationReferencePanel({
+  disabled,
+  inputRef,
+  referenceImages,
+  onAddFiles,
+  onClear,
+  onRemove,
+  t
+}) {
+  const [dragOver, setDragOver] = useState(false);
+  const images = Array.isArray(referenceImages) ? referenceImages : [];
+  const hasImages = images.length > 0;
+  const referenceLimitReached = images.length >= imageGenerationReferenceImageMaxCount;
+
+  const openFilePicker = () => {
+    if (disabled || referenceLimitReached) {
+      return;
+    }
+
+    inputRef?.current?.click();
+  };
+
+  const handleInputChange = (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (files.length > 0) {
+      void onAddFiles?.(files);
+    }
+  };
+
+  const handleDragOver = (event) => {
+    if (disabled || referenceLimitReached || !Array.from(event.dataTransfer?.types || []).includes('Files')) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    setDragOver(true);
+  };
+
+  const handleDragLeave = (event) => {
+    if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) {
+      return;
+    }
+
+    setDragOver(false);
+  };
+
+  const handleDrop = (event) => {
+    if (disabled || referenceLimitReached) {
+      return;
+    }
+
+    const files = extractImageFilesFromDataTransfer(event.dataTransfer);
+    if (files.length === 0) {
+      setDragOver(false);
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    setDragOver(false);
+    void onAddFiles?.(files);
+  };
+
+  return (
+    <div
+      className={cn('image-generation-reference-panel', dragOver && 'is-drag-over')}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="sr-only"
+        tabIndex={-1}
+        onChange={handleInputChange}
+      />
+
+      {hasImages ? (
+        <div className="image-generation-reference-list">
+          {images.map((image) => (
+            <div
+              key={image.id}
+              className="image-generation-reference-item"
+              title={image.normalizedPath || image.path || image.name}
+            >
+              <div className="image-generation-reference-thumb">
+                {image.url ? (
+                  <img alt="" draggable="false" src={image.url} />
+                ) : (
+                  <Images className="h-4 w-4" />
+                )}
+              </div>
+              <div className="image-generation-reference-copy">
+                <span>{image.name || t('imageGenerationReferenceImage')}</span>
+                <span>{image.normalizedPath || image.path}</span>
+              </div>
+              <ImageGenerationIconButton
+                label={t('imageGenerationReferenceRemove')}
+                type="button"
+                variant="ghost"
+                className="h-7 w-7"
+                disabled={disabled}
+                onClick={() => onRemove?.(image.id)}
+              >
+                <X className="h-3.5 w-3.5" />
+              </ImageGenerationIconButton>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="image-generation-reference-empty">
+          <Images className="h-4 w-4" />
+          <span>{t('imageGenerationReferenceEmpty')}</span>
+        </div>
+      )}
+
+      <div className="image-generation-reference-actions">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 flex-1 gap-1.5 px-2"
+          disabled={disabled || referenceLimitReached}
+          onClick={openFilePicker}
+        >
+          <Upload className="h-3.5 w-3.5" />
+          {t('imageGenerationReferenceAdd')}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-8 gap-1.5 px-2"
+          disabled={disabled || !hasImages}
+          onClick={onClear}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          {t('imageGenerationReferenceClear')}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function ImageGenerationCanvasPage({
   config,
   configLoading,
@@ -433,15 +650,18 @@ export function ImageGenerationCanvasPage({
   onOpenFile,
   onOpenSettings,
   onPromptChange,
+  onReferenceImagesAdd,
   prompt,
   results,
   t
 }) {
   const viewportRef = useRef(null);
+  const referenceInputRef = useRef(null);
   const [view, setView] = useState(createDefaultImageCanvasView);
   const [panning, setPanning] = useState(false);
   const [itemLayout, setItemLayout] = useState({});
   const [toolLayout, setToolLayout] = useState(getDefaultToolPanelLayout);
+  const [referenceImages, setReferenceImages] = useState([]);
   const [model, setModel] = useState('gpt-image-2');
   const [size, setSize] = useState('1024x1024');
   const [count, setCount] = useState(1);
@@ -457,6 +677,9 @@ export function ImageGenerationCanvasPage({
     ? (activeAspect.labelKey ? t(activeAspect.labelKey) : activeAspect.label)
     : getReducedRatioLabel(normalizedSize);
   const hasPendingResults = visibleResults.some((item) => getItemFlags(item).pending);
+  const referenceImagePaths = referenceImages
+    .map((image) => image.path || image.normalizedPath)
+    .filter(Boolean);
   const modelChoices = useMemo(() => (
     modelOptions.includes(normalizedModel)
       ? modelOptions
@@ -622,6 +845,77 @@ export function ImageGenerationCanvasPage({
     setView(createDefaultImageCanvasView());
   }, [visibleResults]);
 
+  const appendReferenceImages = useCallback((items) => {
+    const normalizedItems = (Array.isArray(items) ? items : [])
+      .map((item) => normalizeReferenceImageItem(item))
+      .filter(Boolean);
+    if (normalizedItems.length === 0) {
+      return;
+    }
+
+    setReferenceImages((current) => {
+      const seen = new Set();
+      const next = [];
+      const addItem = (item) => {
+        const key = item.path || item.normalizedPath || item.id;
+        if (!key || seen.has(key)) {
+          return;
+        }
+
+        seen.add(key);
+        next.push(item);
+      };
+
+      current.forEach(addItem);
+      normalizedItems.forEach(addItem);
+      return next.slice(0, imageGenerationReferenceImageMaxCount);
+    });
+  }, []);
+
+  const addReferenceFiles = useCallback(async (files) => {
+    const availableSlots = imageGenerationReferenceImageMaxCount - referenceImages.length;
+    if (availableSlots <= 0) {
+      return;
+    }
+
+    const imageFiles = Array.from(files || [])
+      .filter((file) => isImageFile(file))
+      .slice(0, availableSlots);
+    if (imageFiles.length === 0 || typeof onReferenceImagesAdd !== 'function') {
+      return;
+    }
+
+    const savedImages = await onReferenceImagesAdd(imageFiles);
+    appendReferenceImages(savedImages);
+  }, [appendReferenceImages, onReferenceImagesAdd, referenceImages.length]);
+
+  const removeReferenceImage = useCallback((id) => {
+    setReferenceImages((current) => current.filter((image) => image.id !== id));
+  }, []);
+
+  const clearReferenceImages = useCallback(() => {
+    setReferenceImages([]);
+  }, []);
+
+  const useImageAsReference = useCallback((item) => {
+    appendReferenceImages([item]);
+  }, [appendReferenceImages]);
+
+  const handleControlsPaste = useCallback((event) => {
+    if (generating) {
+      return;
+    }
+
+    const imageFiles = extractImageFilesFromDataTransfer(event.clipboardData);
+    if (imageFiles.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    void addReferenceFiles(imageFiles);
+  }, [addReferenceFiles, generating]);
+
   const submitPrompt = (event) => {
     event.preventDefault();
     if (!trimmedPrompt || generating) {
@@ -632,7 +926,8 @@ export function ImageGenerationCanvasPage({
       prompt: trimmedPrompt,
       model: normalizedModel,
       n: normalizedCount,
-      size: normalizedSize
+      size: normalizedSize,
+      referenceImageUrls: referenceImagePaths
     });
   };
 
@@ -681,7 +976,7 @@ export function ImageGenerationCanvasPage({
         onPointerDown={startViewportPan}
         onWheel={handleWheel}
       >
-        <form className="image-generation-controls" onSubmit={submitPrompt}>
+        <form className="image-generation-controls" onPaste={handleControlsPaste} onSubmit={submitPrompt}>
           <div className="image-generation-controls-header">
             <div className="image-generation-controls-title">
               <SlidersHorizontal className="h-4 w-4 text-primary" />
@@ -739,6 +1034,24 @@ export function ImageGenerationCanvasPage({
                 <option key={option} value={option} />
               ))}
             </datalist>
+          </div>
+
+          <div className="image-generation-field">
+            <div className="image-generation-label-row">
+              <Label className="text-xs font-medium text-muted-foreground">
+                {t('imageGenerationReferenceImages')}
+              </Label>
+              <span>{t('imageGenerationReferenceCount', { count: referenceImages.length })}</span>
+            </div>
+            <ImageGenerationReferencePanel
+              disabled={generating}
+              inputRef={referenceInputRef}
+              referenceImages={referenceImages}
+              onAddFiles={addReferenceFiles}
+              onClear={clearReferenceImages}
+              onRemove={removeReferenceImage}
+              t={t}
+            />
           </div>
 
           <div className="image-generation-field">
@@ -844,6 +1157,7 @@ export function ImageGenerationCanvasPage({
               onCopyReference={onCopyReference}
               onMove={moveItem}
               onOpenFile={onOpenFile}
+              onUseAsReference={useImageAsReference}
               t={t}
             />
           ))}

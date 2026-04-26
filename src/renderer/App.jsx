@@ -1,12 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import {
+  BrainCircuit,
   Bot,
   Check,
   ChevronDown,
   ChevronRight,
+  ClipboardCopy,
+  ClipboardPaste,
   Cpu,
   ExternalLink,
   FolderOpen,
@@ -15,6 +19,7 @@ import {
   Grid2X2,
   ImagePlus,
   Languages,
+  ListTodo,
   LayoutGrid,
   Maximize2,
   MessageSquarePlus,
@@ -24,6 +29,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  PencilLine,
   Pin,
   Play,
   Plus,
@@ -34,6 +40,7 @@ import {
   Sparkles,
   SquareTerminal,
   Sun,
+  Tags,
   Trash2,
   X,
   ZoomIn
@@ -43,7 +50,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { FloatingCommandDock } from '@/components/FloatingCommandDock';
 import { ImageGenerationCanvasPage } from '@/components/ImageGenerationCanvasPage';
-import { SessionReviewSidebar } from '@/components/SessionReviewSidebar';
+import { SessionReviewModal } from '@/components/SessionReviewModal';
 import { WorkspaceTreeSidebar } from '@/components/WorkspaceTreeSidebar';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -67,13 +74,16 @@ import {
 } from '@/lib/commandDockTasks';
 import {
   appendSessionReviewOutput,
-  buildSessionReviewSummaryText
+  buildSessionReviewSummaryText,
+  getSessionReviewStatusCounts
 } from '@/lib/sessionReview';
 import { getWorkspaceTreeInsertPath } from '@/lib/workspaceTree';
 import cliProviderRegistry from '../shared/cli-providers.json';
 import claudeIconSvg from '../../static/claude.svg?raw';
 import codexIconSvg from '../../static/codex-color.svg?raw';
+import copilotIconSvg from '../../static/copilot.svg?raw';
 import cursorIconSvg from '../../static/cursor.svg?raw';
+import droidIconSvg from '../../static/droid.svg?raw';
 
 const bridge = window.cliBridge;
 const settingsKey = 'cli-in-one.settings.v3';
@@ -85,7 +95,9 @@ const releasePageUrl = 'https://github.com/whd3131/cli-in-one/releases';
 const cliProviderIconMarkup = {
   'claude-code': claudeIconSvg,
   codex: codexIconSvg,
-  'cursor-agent': cursorIconSvg
+  copilot: copilotIconSvg,
+  'cursor-agent': cursorIconSvg,
+  droid: droidIconSvg
 };
 const canvasModes = new Set(['shared', 'project']);
 const sharedCanvasKey = '__shared__';
@@ -97,6 +109,14 @@ const canvasFrameMinWidth = 220;
 const canvasFrameMinHeight = 140;
 const canvasFrameDefaultWidth = 360;
 const canvasFrameDefaultHeight = 200;
+const canvasContextMenuWidth = 220;
+const canvasContextMenuHeight = 136;
+const canvasTodoMinWidth = 280;
+const canvasTodoMinHeight = 240;
+const canvasTodoDefaultWidth = 340;
+const canvasTodoDefaultHeight = 420;
+const terminalContextMenuWidth = 280;
+const terminalContextMenuEstimatedHeight = 360;
 const zoomPresetScales = [0.5, 1, 1.5, 2];
 const systemStatsRefreshMs = 2000;
 const memoryUsageWarningThreshold = 0.85;
@@ -105,17 +125,140 @@ const panelIdleThresholdMs = 12000;
 const panelActivityFlushMs = 120;
 const agentTaskSubmitDelayMs = 1800;
 const commandDockTaskSubmitDelayMs = 1800;
-const commandDockDispatchSparkleMs = 4600;
+const commandDockDispatchSparkleMs = 5200;
+const commandDockHistoryLimit = 10;
+const commandDockShortcutOptions = [
+  { id: 'enter', label: 'Enter', ctrlKey: false, shiftKey: false, altKey: false, metaKey: false },
+  { id: 'ctrlEnter', label: 'Ctrl+Enter', ctrlKey: true, shiftKey: false, altKey: false, metaKey: false },
+  { id: 'altEnter', label: 'Alt+Enter', ctrlKey: false, shiftKey: false, altKey: true, metaKey: false },
+  { id: 'ctrlShiftEnter', label: 'Ctrl+Shift+Enter', ctrlKey: true, shiftKey: true, altKey: false, metaKey: false }
+];
+const commandDockShortcutOptionIds = new Set(commandDockShortcutOptions.map((option) => option.id));
+const commandDockDefaultShortcuts = {
+  sendShortcut: 'enter',
+  dispatchShortcut: 'ctrlEnter'
+};
 const canvasArrangeDurationMs = 760;
 const canvasArrangeMaxStaggerMs = 180;
 const formSelectClassName = 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50';
+
+function normalizeCommandDockDispatchMode(value) {
+  return value === 'new' ? 'new' : 'reuse';
+}
+
+function normalizeCommandDockShortcut(value, fallback = commandDockDefaultShortcuts.sendShortcut) {
+  const normalized = String(value || '').trim();
+  return commandDockShortcutOptionIds.has(normalized) ? normalized : fallback;
+}
+
+function getCommandDockShortcutFallback(excludedShortcut, preferredShortcut) {
+  const preferred = normalizeCommandDockShortcut(preferredShortcut, commandDockDefaultShortcuts.dispatchShortcut);
+  if (preferred !== excludedShortcut) {
+    return preferred;
+  }
+
+  return commandDockShortcutOptions.find((option) => option.id !== excludedShortcut)?.id
+    || commandDockDefaultShortcuts.dispatchShortcut;
+}
+
+function normalizeCommandDockShortcutSettings(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const sendShortcut = normalizeCommandDockShortcut(
+    source.sendShortcut,
+    commandDockDefaultShortcuts.sendShortcut
+  );
+  let dispatchShortcut = normalizeCommandDockShortcut(
+    source.dispatchShortcut,
+    commandDockDefaultShortcuts.dispatchShortcut
+  );
+
+  if (sendShortcut === dispatchShortcut) {
+    dispatchShortcut = getCommandDockShortcutFallback(
+      sendShortcut,
+      commandDockDefaultShortcuts.dispatchShortcut
+    );
+  }
+
+  return {
+    sendShortcut,
+    dispatchShortcut
+  };
+}
+
+function updateCommandDockShortcutSetting(current, action, value) {
+  const next = normalizeCommandDockShortcutSettings(current);
+  const actionKey = action === 'dispatch' ? 'dispatchShortcut' : 'sendShortcut';
+  const otherKey = actionKey === 'sendShortcut' ? 'dispatchShortcut' : 'sendShortcut';
+  const previousActionShortcut = next[actionKey];
+  const nextShortcut = normalizeCommandDockShortcut(value, previousActionShortcut);
+
+  next[actionKey] = nextShortcut;
+  if (next[otherKey] === nextShortcut) {
+    next[otherKey] = previousActionShortcut !== nextShortcut
+      ? previousActionShortcut
+      : getCommandDockShortcutFallback(nextShortcut, commandDockDefaultShortcuts[otherKey]);
+  }
+
+  return normalizeCommandDockShortcutSettings(next);
+}
+
+function getCommandDockShortcutLabel(value) {
+  const shortcut = normalizeCommandDockShortcut(value);
+  return commandDockShortcutOptions.find((option) => option.id === shortcut)?.label || 'Enter';
+}
+
+function normalizeCommandDockHistory(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const history = [];
+  for (const item of value) {
+    const entry = String(item || '');
+    if (!entry.trim() || history.includes(entry)) {
+      continue;
+    }
+
+    history.push(entry);
+    if (history.length >= commandDockHistoryLimit) {
+      break;
+    }
+  }
+
+  return history;
+}
+
+function addCommandDockHistoryEntry(history, value) {
+  const entry = String(value || '');
+  if (!entry.trim()) {
+    return normalizeCommandDockHistory(history);
+  }
+
+  return [
+    entry,
+    ...normalizeCommandDockHistory(history).filter((item) => item !== entry)
+  ].slice(0, commandDockHistoryLimit);
+}
+
+function normalizeCommandPresetCommandInput(value) {
+  return String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+}
+
+function deriveCommandPresetTitle(command, fallback = 'CMD command') {
+  const firstLine = normalizeCommandPresetCommandInput(command)
+    .split('\n')
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  return (firstLine || fallback).replace(/\s+/g, ' ').slice(0, 120);
+}
 
 function createDefaultView() {
   return { x: 80, y: 80, scale: 1 };
 }
 
 const cliProviders = Array.isArray(cliProviderRegistry) ? cliProviderRegistry : [];
-const sessionLauncherProviderOrder = ['codex', 'claude-code', 'cursor-agent', 'shell'];
+const sessionLauncherProviderOrder = ['codex', 'copilot', 'droid', 'claude-code', 'cursor-agent', 'shell'];
 const cliProviderMap = new Map(
   cliProviders
     .filter((provider) => provider && typeof provider.id === 'string' && provider.id.trim())
@@ -464,6 +607,18 @@ const workspaceSkillSources = [
 ];
 const gridSessionCountMin = 1;
 const gridSessionCountMax = 24;
+const sessionTagMaxLength = 32;
+const sessionTagNoneValue = '__session_tag_none__';
+const sessionTagCustomValue = '__session_tag_custom__';
+const sessionTagPresets = [
+  { id: 'important', labelKey: 'sessionTagImportant', aliases: ['important', '重要'] },
+  { id: 'normal', labelKey: 'sessionTagNormal', aliases: ['normal', '一般'] },
+  { id: 'test', labelKey: 'sessionTagTest', aliases: ['test', 'testing', '测试'] },
+  { id: 'review', labelKey: 'sessionTagReview', aliases: ['review', '审查'] },
+  { id: 'investigation', labelKey: 'sessionTagInvestigation', aliases: ['investigation', 'investigate', '调查'] },
+  { id: 'documentation', labelKey: 'sessionTagDocumentation', aliases: ['documentation', 'docs', 'doc', '编写文档'] }
+];
+const sessionTagPresetIds = new Set(sessionTagPresets.map((tag) => tag.id));
 
 const messages = {
   zh: {
@@ -536,6 +691,26 @@ const messages = {
     addCommandDialogDescription: '先配置启动目录，确认后再创建 CMD 会话。',
     addCommandConfirm: '创建 CMD',
     addCommandDirectoryHint: '会话会在这个目录启动，并加入当前工作区。',
+    commandPreset: '命令预置',
+    commandPresetNone: '不使用预置',
+    commandPresetCommand: '启动命令',
+    commandPresetPlaceholder: '例如：pnpm dev:console',
+    commandPresetHint: '留空只启动空 CMD；填写后创建 CMD 时会自动输入并执行。',
+    commandPresetDefaultBadge: '默认',
+    commandPresetSave: '保存预置',
+    commandPresetSetDefault: '设为默认',
+    commandPresetDelete: '删除预置',
+    commandPresetNamePrompt: '输入命令预置名称',
+    commandPresetNameRequired: '命令预置名称不能为空。',
+    commandPresetCommandRequired: '请先输入启动命令。',
+    commandPresetSaved: '命令预置已保存：{name}',
+    commandPresetDeleted: '命令预置已删除：{name}',
+    commandPresetSelected: '默认命令预置已切换：{name}',
+    commandPresetDeleteConfirm: '确认删除命令预置“{name}”？',
+    commandPresetLoadFailed: '读取命令预置失败：{message}',
+    commandPresetSaveFailed: '保存命令预置失败：{message}',
+    commandPresetDeleteFailed: '删除命令预置失败：{message}',
+    commandPresetSelectFailed: '切换默认命令预置失败：{message}',
     dialogPathRequired: '请先选择目录。',
     addSessionGrid: '批量会话',
     quickGrid2x2: '2x2',
@@ -569,6 +744,8 @@ const messages = {
     cpuUsage: 'CPU',
     memoryUsage: '内存',
     systemStatsUnavailable: '系统状态不可用',
+    topbarRunningSessions: '跨项目进行中',
+    topbarSessionStatsTitle: '跨项目会话：{total} 个会话，{running} 进行中，{idle} 闲置，{completed} 已完成，{error} 异常',
     runningModePipe: '管道模式',
     runtimeStarting: '启动中',
     session: '会话',
@@ -581,6 +758,16 @@ const messages = {
     minimizeSession: '缩成端点',
     expandSession: '展开会话',
     renameSession: '修改会话名称',
+    renameSessionPrompt: '输入新的会话名称',
+    sessionContextMenu: '会话菜单',
+    copySelection: '复制选区',
+    pasteClipboard: '粘贴剪贴板',
+    switchSessionModel: '切换模型',
+    customModel: '自定义模型...',
+    modelPrompt: '输入模型名称',
+    modelRequired: '模型名称不能为空。',
+    modelSwitchUnavailable: '这个会话当前不支持模型切换。',
+    canvasContextMenu: '画布菜单',
     addCanvasFrame: '说明框',
     addCanvasFrameArmed: '拖拽画框',
     canvasFrameHint: '在空白画布拖拽一下，创建一个只给人看的说明框。',
@@ -590,25 +777,62 @@ const messages = {
     deleteCanvasFrame: '删除说明框',
     canvasFrameDefaultTitle: '流程说明',
     canvasFrameTitlePlaceholder: '这组 CMD 在做什么',
+    addCanvasTodo: 'Todo',
+    canvasTodoAdded: 'Todo 已钉到画布',
+    moveCanvasTodo: '移动 Todo',
+    resizeCanvasTodo: '调整 Todo 大小',
+    renameCanvasTodo: '修改 Todo 标题',
+    deleteCanvasTodo: '删除 Todo',
+    pinCanvasTodo: '置顶 Todo',
+    unpinCanvasTodo: '取消置顶 Todo',
+    canvasTodoDefaultTitle: 'Todo List',
+    canvasTodoTitlePlaceholder: 'Todo 标题',
+    canvasTodoAddPlaceholder: '新增待办',
+    canvasTodoItemPlaceholder: '待办内容',
+    canvasTodoEmpty: '还没有待办。',
+    canvasTodoProgress: '{done}/{total} 完成',
+    canvasTodoProgressEmpty: '0 个待办',
     groupEndpoints: '分组端点',
     ungroupEndpoints: '取消分组',
     endpointGroup: '端点组',
     groupEndpointsUnavailable: '至少需要两个已收起端点。',
+    sessionTag: 'Tag',
+    sessionTagNone: '无标签',
+    sessionTagCustom: '自定义...',
+    sessionTagCustomPrompt: '输入自定义 tag',
+    sessionTagImportant: '重要',
+    sessionTagNormal: '一般',
+    sessionTagTest: '测试',
+    sessionTagReview: '审查',
+    sessionTagInvestigation: '调查',
+    sessionTagDocumentation: '编写文档',
+    arrangeByTag: '按 Tag',
+    arrangeByTagEmpty: '当前会话还没有 tag，会按未打标区域整理。',
     taskRunning: '进行中',
     taskIdle: '闲置',
     taskCompleted: '已完成',
     taskError: '异常',
+    sessionIdleToast: '会话「{name}」已闲置',
+    floatingComposerDrag: '拖拽移动快捷发送，双击回到底部',
     floatingComposerTitle: '快捷发送',
     floatingComposerSubtitle: '发送到：{name}',
     floatingComposerTarget: '目标会话',
+    floatingComposerTargetSelector: '切换发送目标',
+    floatingComposerTargetCount: '{count} 个会话',
+    floatingComposerTargetMenu: '选择发送目标',
+    floatingComposerTargetSearch: '搜索会话、CLI 或路径',
+    floatingComposerTargetNoMatch: '没有匹配的会话。',
     floatingComposerUnavailable: '当前画布没有可接收输入的会话。',
     floatingComposerPlaceholder: '输入内容后发送到 {name}',
-    floatingComposerHint: 'Enter 发送，Ctrl+Enter 分发任务，Shift+Enter 换行，粘贴或拖拽图片会保存到程序目录的 .files',
+    floatingComposerHint: '{sendShortcut} 发送，{dispatchShortcut} 分发任务，Shift+Enter 换行，粘贴或拖拽图片会保存到程序目录的 .files',
     floatingComposerCurrent: '当前',
     floatingComposerSend: '发送',
     floatingComposerCollapse: '收起快捷发送',
     floatingComposerExpand: '展开快捷发送',
     floatingComposerSent: '已发送到 {name}',
+    floatingComposerHistory: '发送历史',
+    floatingComposerHistoryEmpty: '暂无发送历史',
+    floatingComposerHistoryUntitled: '空内容',
     floatingComposerImageReference: '图片({path})',
     floatingComposerImagesAdded: '已添加 {count} 张图片',
     floatingComposerImageMissingDir: '未找到可保存图片的目录。',
@@ -632,6 +856,17 @@ const messages = {
     imageGenerationCustomAspect: '当前自定义比例：{ratio}',
     imageGenerationCountLabel: '生成张数',
     imageGenerationRequestedCount: '请求 {count} 张',
+    imageGenerationReferenceImages: '参考图',
+    imageGenerationReferenceCount: '已选 {count} 张',
+    imageGenerationReferenceImage: '参考图',
+    imageGenerationReferenceEmpty: '暂无参考图',
+    imageGenerationReferenceAdd: '添加参考图',
+    imageGenerationReferenceClear: '清空',
+    imageGenerationReferenceRemove: '移除参考图',
+    imageGenerationReferenceSummary: '参考图 {count}',
+    imageGenerationUseAsReference: '用作参考图',
+    imageGenerationReferenceAdded: '已添加 {count} 张参考图',
+    imageGenerationReferenceSaveFailed: '参考图保存失败：{message}',
     imageGenerationResetCanvas: '重置画布',
     imageGenerationCanvasEmpty: '生成结果会出现在画布上。',
     imageGenerationConfigLoading: '正在加载配置',
@@ -652,12 +887,22 @@ const messages = {
     imageGenerationTaskFailedTitle: '生成失败',
     imageGenerationFailed: '生成图片失败：{message}',
     imageGenerationNoLocalPath: '图像 API 没有返回本地图片路径。',
+    imageGenerationHistoryLoadFailed: '读取生图历史失败：{message}',
+    imageGenerationHistorySaveFailed: '保存生图历史失败：{message}',
     imageGenerationUnknownError: '未知错误',
     floatingComposerDispatchTasks: '分发任务',
     floatingComposerDispatchingTasks: '分发中',
-    floatingComposerDispatchTasksTitle: '按行分发任务：优先使用闲置会话，不够时自动新建会话（Ctrl+Enter）',
+    floatingComposerDispatchMode: '分发模式',
+    floatingComposerDispatchModeReuse: '复用',
+    floatingComposerDispatchModeNew: '新开',
+    floatingComposerDispatchModeReuseTooltip: '复用模式：按行分发任务时优先发送到闲置会话，不够时自动新建会话。',
+    floatingComposerDispatchModeNewTooltip: '新开模式：按行分发任务时每条任务都会创建一个新会话，不占用现有会话。',
+    floatingComposerDispatchTasksTitle: '按行分发任务：使用当前分发模式执行（{dispatchShortcut}）',
+    floatingComposerDispatchTasksTitleReuse: '按行分发任务：优先使用闲置会话，不够时自动新建会话（{dispatchShortcut}）',
+    floatingComposerDispatchTasksTitleNew: '按行分发任务：每条任务都会新开一个会话（{dispatchShortcut}）',
     floatingComposerDispatchEmpty: '先在快捷发送里按行写任务。',
     floatingComposerDispatchDone: '已分发 {count} 个任务，复用 {reused} 个闲置会话，新建 {created} 个会话。目标：{targets}',
+    floatingComposerDispatchReuseEnterHint: '看到闪亮外框的复用会话时，请到对应 CMD 会话里按一次 Enter，让任务开始输出。',
     floatingComposerDispatchFailed: '任务分发失败：{message}',
     quickPrompts: '常用 prompt',
     quickPromptDefaultName: '常用 prompt',
@@ -688,6 +933,10 @@ const messages = {
     resize: '调整大小',
     preferences: '偏好',
     appearance: '外观',
+    commandDockShortcuts: '快捷发送快捷键',
+    commandDockSendShortcut: '发送快捷键',
+    commandDockDispatchShortcut: '分发任务快捷键',
+    commandDockShortcutHint: '两个动作不能使用同一个快捷键；选择重复项时会自动交换。Shift+Enter 保留为换行。',
     light: '浅色',
     dark: '深色',
     language: '语言',
@@ -848,7 +1097,7 @@ const messages = {
     quickProfileDeleted: '配置方案已删除：{name}',
     quickProfileSwitched: '已载入配置方案：{name}',
     workspaceTreeTitle: '当前工作区文件树',
-    workspaceTreeDescription: '查看当前目录结构，已自动跳过 .git、node_modules 等大型目录。',
+    workspaceTreeDescription: '查看当前目录结构，会跳过大型生成目录并限制读取规模。',
     workspaceTreeSummary: '{directories} 个目录，{files} 个文件',
     workspaceTreeSummaryWithOmitted: '{directories} 个目录，{files} 个文件，省略 {omitted} 项',
     workspaceTreeLoading: '正在读取文件树…',
@@ -956,6 +1205,26 @@ const messages = {
     addCommandDialogDescription: 'Choose the launch directory before creating the CMD session.',
     addCommandConfirm: 'Create CMD',
     addCommandDirectoryHint: 'The session will start in this directory and appear in the current workspace.',
+    commandPreset: 'Command preset',
+    commandPresetNone: 'No preset',
+    commandPresetCommand: 'Startup command',
+    commandPresetPlaceholder: 'For example: pnpm dev:console',
+    commandPresetHint: 'Leave empty to start a blank CMD; when filled, the command is typed and submitted on creation.',
+    commandPresetDefaultBadge: 'Default',
+    commandPresetSave: 'Save preset',
+    commandPresetSetDefault: 'Set default',
+    commandPresetDelete: 'Delete preset',
+    commandPresetNamePrompt: 'Enter command preset name',
+    commandPresetNameRequired: 'Command preset name is required.',
+    commandPresetCommandRequired: 'Enter a startup command first.',
+    commandPresetSaved: 'Command preset saved: {name}',
+    commandPresetDeleted: 'Command preset deleted: {name}',
+    commandPresetSelected: 'Default command preset switched: {name}',
+    commandPresetDeleteConfirm: 'Delete command preset "{name}"?',
+    commandPresetLoadFailed: 'Failed to read command presets: {message}',
+    commandPresetSaveFailed: 'Failed to save command preset: {message}',
+    commandPresetDeleteFailed: 'Failed to delete command preset: {message}',
+    commandPresetSelectFailed: 'Failed to switch default command preset: {message}',
     dialogPathRequired: 'Choose a directory first.',
     addSessionGrid: 'Batch sessions',
     quickGrid2x2: '2x2',
@@ -989,6 +1258,8 @@ const messages = {
     cpuUsage: 'CPU',
     memoryUsage: 'Memory',
     systemStatsUnavailable: 'System stats unavailable',
+    topbarRunningSessions: 'Cross-project running',
+    topbarSessionStatsTitle: 'Cross-project sessions: {total} total, {running} running, {idle} idle, {completed} completed, {error} error',
     runningModePipe: 'Pipe mode',
     runtimeStarting: 'Starting',
     session: 'Session',
@@ -1001,6 +1272,16 @@ const messages = {
     minimizeSession: 'Minimize to endpoint',
     expandSession: 'Expand session',
     renameSession: 'Rename session',
+    renameSessionPrompt: 'Enter the new session name',
+    sessionContextMenu: 'Session menu',
+    copySelection: 'Copy selection',
+    pasteClipboard: 'Paste clipboard',
+    switchSessionModel: 'Switch model',
+    customModel: 'Custom model...',
+    modelPrompt: 'Enter model name',
+    modelRequired: 'Model name is required.',
+    modelSwitchUnavailable: 'This session cannot switch models right now.',
+    canvasContextMenu: 'Canvas menu',
     addCanvasFrame: 'Frame',
     addCanvasFrameArmed: 'Draw frame',
     canvasFrameHint: 'Drag on empty canvas to create a human-only annotation frame.',
@@ -1010,25 +1291,62 @@ const messages = {
     deleteCanvasFrame: 'Delete frame',
     canvasFrameDefaultTitle: 'Workflow note',
     canvasFrameTitlePlaceholder: 'What these CMDs are doing',
+    addCanvasTodo: 'Todo',
+    canvasTodoAdded: 'Todo pinned to canvas',
+    moveCanvasTodo: 'Move Todo',
+    resizeCanvasTodo: 'Resize Todo',
+    renameCanvasTodo: 'Rename Todo',
+    deleteCanvasTodo: 'Delete Todo',
+    pinCanvasTodo: 'Pin Todo',
+    unpinCanvasTodo: 'Unpin Todo',
+    canvasTodoDefaultTitle: 'Todo List',
+    canvasTodoTitlePlaceholder: 'Todo title',
+    canvasTodoAddPlaceholder: 'Add a task',
+    canvasTodoItemPlaceholder: 'Task',
+    canvasTodoEmpty: 'No tasks yet.',
+    canvasTodoProgress: '{done}/{total} done',
+    canvasTodoProgressEmpty: '0 tasks',
     groupEndpoints: 'Group endpoints',
     ungroupEndpoints: 'Ungroup endpoints',
     endpointGroup: 'Endpoint group',
     groupEndpointsUnavailable: 'At least two minimized endpoints are required.',
+    sessionTag: 'Tag',
+    sessionTagNone: 'No tag',
+    sessionTagCustom: 'Custom...',
+    sessionTagCustomPrompt: 'Enter a custom tag',
+    sessionTagImportant: 'Important',
+    sessionTagNormal: 'Normal',
+    sessionTagTest: 'Test',
+    sessionTagReview: 'Review',
+    sessionTagInvestigation: 'Investigation',
+    sessionTagDocumentation: 'Docs',
+    arrangeByTag: 'By Tag',
+    arrangeByTagEmpty: 'No sessions have tags yet; arranging them as untagged.',
     taskRunning: 'Running',
     taskIdle: 'Idle',
     taskCompleted: 'Completed',
     taskError: 'Error',
+    sessionIdleToast: 'Session "{name}" is idle.',
+    floatingComposerDrag: 'Drag quick send, double-click to return to bottom',
     floatingComposerTitle: 'Quick send',
     floatingComposerSubtitle: 'Send to: {name}',
     floatingComposerTarget: 'Target session',
+    floatingComposerTargetSelector: 'Switch send target',
+    floatingComposerTargetCount: '{count} sessions',
+    floatingComposerTargetMenu: 'Choose send target',
+    floatingComposerTargetSearch: 'Search sessions, CLI, or path',
+    floatingComposerTargetNoMatch: 'No matching sessions.',
     floatingComposerUnavailable: 'No live session on this canvas can receive input.',
     floatingComposerPlaceholder: 'Type here and send to {name}',
-    floatingComposerHint: 'Enter to send, Ctrl+Enter to dispatch tasks, Shift+Enter for newline, paste or drop images to save them into the app .files folder',
+    floatingComposerHint: '{sendShortcut} to send, {dispatchShortcut} to dispatch tasks, Shift+Enter for newline, paste or drop images to save them into the app .files folder',
     floatingComposerCurrent: 'Current',
     floatingComposerSend: 'Send',
     floatingComposerCollapse: 'Collapse quick send',
     floatingComposerExpand: 'Expand quick send',
     floatingComposerSent: 'Sent to {name}',
+    floatingComposerHistory: 'Sent history',
+    floatingComposerHistoryEmpty: 'No sent history',
+    floatingComposerHistoryUntitled: 'Empty content',
     floatingComposerImageReference: 'image({path})',
     floatingComposerImagesAdded: 'Added {count} image(s)',
     floatingComposerImageMissingDir: 'No directory is available for saving images.',
@@ -1052,6 +1370,17 @@ const messages = {
     imageGenerationCustomAspect: 'Current custom ratio: {ratio}',
     imageGenerationCountLabel: 'Image count',
     imageGenerationRequestedCount: 'Requested {count}',
+    imageGenerationReferenceImages: 'Reference images',
+    imageGenerationReferenceCount: '{count} selected',
+    imageGenerationReferenceImage: 'Reference image',
+    imageGenerationReferenceEmpty: 'No reference images',
+    imageGenerationReferenceAdd: 'Add reference',
+    imageGenerationReferenceClear: 'Clear',
+    imageGenerationReferenceRemove: 'Remove reference image',
+    imageGenerationReferenceSummary: '{count} reference image(s)',
+    imageGenerationUseAsReference: 'Use as reference',
+    imageGenerationReferenceAdded: 'Added {count} reference image(s)',
+    imageGenerationReferenceSaveFailed: 'Failed to save reference image: {message}',
     imageGenerationResetCanvas: 'Reset canvas',
     imageGenerationCanvasEmpty: 'Generated images will appear on the canvas.',
     imageGenerationConfigLoading: 'Loading config',
@@ -1072,12 +1401,22 @@ const messages = {
     imageGenerationTaskFailedTitle: 'Generation failed',
     imageGenerationFailed: 'Image generation failed: {message}',
     imageGenerationNoLocalPath: 'The Image API did not return a local image path.',
+    imageGenerationHistoryLoadFailed: 'Failed to load image history: {message}',
+    imageGenerationHistorySaveFailed: 'Failed to save image history: {message}',
     imageGenerationUnknownError: 'Unknown error',
     floatingComposerDispatchTasks: 'Dispatch tasks',
     floatingComposerDispatchingTasks: 'Dispatching',
-    floatingComposerDispatchTasksTitle: 'Dispatch one task per line. Idle sessions are used first; new sessions are created when needed. (Ctrl+Enter)',
+    floatingComposerDispatchMode: 'Dispatch mode',
+    floatingComposerDispatchModeReuse: 'Reuse',
+    floatingComposerDispatchModeNew: 'New',
+    floatingComposerDispatchModeReuseTooltip: 'Reuse mode: dispatch one task per line to idle sessions first, creating new sessions only when needed.',
+    floatingComposerDispatchModeNewTooltip: 'New-session mode: dispatch one task per line by creating a fresh session for every task, without using existing sessions.',
+    floatingComposerDispatchTasksTitle: 'Dispatch one task per line with the current dispatch mode. ({dispatchShortcut})',
+    floatingComposerDispatchTasksTitleReuse: 'Dispatch one task per line. Idle sessions are used first; new sessions are created when needed. ({dispatchShortcut})',
+    floatingComposerDispatchTasksTitleNew: 'Dispatch one task per line. A new session is created for every task. ({dispatchShortcut})',
     floatingComposerDispatchEmpty: 'Write one task per line in quick send first.',
     floatingComposerDispatchDone: 'Dispatched {count} task(s), reused {reused} idle session(s), created {created} session(s). Targets: {targets}',
+    floatingComposerDispatchReuseEnterHint: 'For reused sessions with the flashing outline, open the target CMD session and press Enter once to start output.',
     floatingComposerDispatchFailed: 'Task dispatch failed: {message}',
     quickPrompts: 'Prompts',
     quickPromptDefaultName: 'Saved prompt',
@@ -1108,6 +1447,10 @@ const messages = {
     resize: 'Resize',
     preferences: 'Preferences',
     appearance: 'Appearance',
+    commandDockShortcuts: 'Quick send shortcuts',
+    commandDockSendShortcut: 'Send shortcut',
+    commandDockDispatchShortcut: 'Dispatch shortcut',
+    commandDockShortcutHint: 'The two actions cannot share one shortcut; duplicate selections are swapped automatically. Shift+Enter stays as newline.',
     light: 'Light',
     dark: 'Dark',
     language: 'Language',
@@ -1268,7 +1611,7 @@ const messages = {
     quickProfileDeleted: 'Preset deleted: {name}',
     quickProfileSwitched: 'Loaded preset: {name}',
     workspaceTreeTitle: 'Current workspace file tree',
-    workspaceTreeDescription: 'View the current directory structure. Large folders like .git and node_modules are skipped automatically.',
+    workspaceTreeDescription: 'View the current directory structure with generated folders skipped and scan limits applied.',
     workspaceTreeSummary: '{directories} directories, {files} files',
     workspaceTreeSummaryWithOmitted: '{directories} directories, {files} files, {omitted} omitted',
     workspaceTreeLoading: 'Loading file tree…',
@@ -1864,6 +2207,123 @@ function withWorkspaceCanvasFrames(workspace, canvasKey, frames) {
   };
 }
 
+function normalizeCanvasTodoItem(item, index = 0) {
+  const now = Date.now();
+  return {
+    id: item?.id || createLocalId('canvas-todo-item'),
+    text: typeof item?.text === 'string' ? item.text : '',
+    done: Boolean(item?.done),
+    createdAt: Number.isFinite(item?.createdAt) ? item.createdAt : now + index,
+    updatedAt: Number.isFinite(item?.updatedAt) ? item.updatedAt : now + index
+  };
+}
+
+function normalizeCanvasTodo(todo, index = 0) {
+  const fallbackX = 72 + index * 24;
+  const fallbackY = 72 + index * 24;
+
+  return {
+    id: todo?.id || createLocalId('canvas-todo'),
+    title: typeof todo?.title === 'string' ? todo.title : '',
+    pinned: Boolean(todo?.pinned),
+    x: Number.isFinite(todo?.x) ? todo.x : fallbackX,
+    y: Number.isFinite(todo?.y) ? todo.y : fallbackY,
+    width: Number.isFinite(todo?.width)
+      ? clamp(todo.width, canvasTodoMinWidth, 1600)
+      : canvasTodoDefaultWidth,
+    height: Number.isFinite(todo?.height)
+      ? clamp(todo.height, canvasTodoMinHeight, 1600)
+      : canvasTodoDefaultHeight,
+    items: Array.isArray(todo?.items)
+      ? todo.items.map((item, itemIndex) => normalizeCanvasTodoItem(item, itemIndex))
+      : []
+  };
+}
+
+function normalizeCanvasTodoMap(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(raw).map(([canvasKey, todos]) => [
+      canvasKey,
+      Array.isArray(todos)
+        ? todos.map((todo, index) => normalizeCanvasTodo(todo, index))
+        : []
+    ])
+  );
+}
+
+function getWorkspaceCanvasTodos(workspace, canvasKey = getWorkspaceCanvasKey(workspace)) {
+  return Array.isArray(workspace?.canvasTodos?.[canvasKey]) ? workspace.canvasTodos[canvasKey] : [];
+}
+
+function sameCanvasTodoItem(left, right) {
+  return Boolean(
+    left &&
+    right &&
+    left.id === right.id &&
+    left.text === right.text &&
+    left.done === right.done &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt
+  );
+}
+
+function sameCanvasTodo(left, right) {
+  return Boolean(
+    left &&
+    right &&
+    left.id === right.id &&
+    left.title === right.title &&
+    left.pinned === right.pinned &&
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height &&
+    Array.isArray(left.items) &&
+    Array.isArray(right.items) &&
+    left.items.length === right.items.length &&
+    left.items.every((item, index) => sameCanvasTodoItem(item, right.items[index]))
+  );
+}
+
+function sameCanvasTodoList(left, right) {
+  if (left === right) {
+    return true;
+  }
+
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((todo, index) => sameCanvasTodo(todo, right[index]));
+}
+
+function withWorkspaceCanvasTodos(workspace, canvasKey, todos) {
+  const currentTodos = getWorkspaceCanvasTodos(workspace, canvasKey);
+  const nextTodos = Array.isArray(todos)
+    ? todos.map((todo, index) => normalizeCanvasTodo(todo, index))
+    : [];
+
+  if (sameCanvasTodoList(currentTodos, nextTodos)) {
+    return workspace;
+  }
+
+  const nextCanvasTodos = { ...(workspace.canvasTodos || {}) };
+  if (nextTodos.length === 0) {
+    delete nextCanvasTodos[canvasKey];
+  } else {
+    nextCanvasTodos[canvasKey] = nextTodos;
+  }
+
+  return {
+    ...workspace,
+    canvasTodos: nextCanvasTodos
+  };
+}
+
 function closestElement(target, selector) {
   return target instanceof Element ? target.closest(selector) : null;
 }
@@ -1932,6 +2392,24 @@ function isCommandDockSubmitKey(event) {
     || event.nativeEvent?.code === 'Enter'
     || event.keyCode === 13
     || event.which === 13;
+}
+
+function isCommandDockShortcutMatch(event, shortcut) {
+  if (!isCommandDockSubmitKey(event)) {
+    return false;
+  }
+
+  const option = commandDockShortcutOptions.find((item) => (
+    item.id === normalizeCommandDockShortcut(shortcut)
+  ));
+  if (!option) {
+    return false;
+  }
+
+  return Boolean(event?.ctrlKey) === option.ctrlKey
+    && Boolean(event?.shiftKey) === option.shiftKey
+    && Boolean(event?.altKey) === option.altKey
+    && Boolean(event?.metaKey) === option.metaKey;
 }
 
 function normalizePromptFilePath(filePath) {
@@ -2264,6 +2742,83 @@ function getExecutionStateLabel(state, t) {
   return t('taskError');
 }
 
+function getSessionTagPreset(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  return sessionTagPresets.find((tag) => (
+    tag.id === normalized ||
+    tag.aliases.some((alias) => alias.toLowerCase() === normalized)
+  )) || null;
+}
+
+function normalizeSessionTag(value) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  const preset = getSessionTagPreset(normalized);
+  if (preset) {
+    return preset.id;
+  }
+
+  return normalized.slice(0, sessionTagMaxLength);
+}
+
+function getPanelSessionTag(panel) {
+  return normalizeSessionTag(panel?.tag);
+}
+
+function getSessionTagLabel(value, t) {
+  const tag = normalizeSessionTag(value);
+  if (!tag) {
+    return t('sessionTagNone');
+  }
+
+  const preset = getSessionTagPreset(tag);
+  return preset ? t(preset.labelKey) : tag;
+}
+
+function getSessionTagTone(value) {
+  const tag = normalizeSessionTag(value);
+  if (!tag) {
+    return 'none';
+  }
+
+  const preset = getSessionTagPreset(tag);
+  return preset ? preset.id : 'custom';
+}
+
+function getSessionTagOrder(value) {
+  const tag = normalizeSessionTag(value);
+  if (!tag) {
+    return sessionTagPresets.length + 1000;
+  }
+
+  const presetIndex = sessionTagPresets.findIndex((preset) => preset.id === tag);
+  return presetIndex >= 0 ? presetIndex : sessionTagPresets.length + 100;
+}
+
+function getAvailableSessionTags(panels) {
+  const seen = new Set();
+  const customTags = [];
+
+  (Array.isArray(panels) ? panels : []).forEach((panel) => {
+    const tag = getPanelSessionTag(panel);
+    if (!tag || sessionTagPresetIds.has(tag) || seen.has(tag)) {
+      return;
+    }
+
+    seen.add(tag);
+    customTags.push(tag);
+  });
+
+  return customTags.sort((left, right) => left.localeCompare(right, 'zh-CN'));
+}
+
 function isCodexPanel(panel) {
   return getPanelCliProvider(panel)?.id === 'codex';
 }
@@ -2271,6 +2826,33 @@ function isCodexPanel(panel) {
 function hasPanelModelTag(panel) {
   const providerId = getPanelCliProvider(panel)?.id;
   return providerId === 'codex' || providerId === 'claude-code';
+}
+
+function getPanelQuickModelOptions(panel) {
+  const providerId = getPanelCliProvider(panel)?.id;
+  if (providerId === 'claude-code') {
+    return quickClaudeModelOptions;
+  }
+
+  if (providerId === 'codex') {
+    return quickModelOptions;
+  }
+
+  return [];
+}
+
+function getPanelModelSwitchCommand(panel, model) {
+  const providerId = getPanelCliProvider(panel)?.id;
+  const normalizedModel = String(model || '').trim();
+  if (!normalizedModel) {
+    return '';
+  }
+
+  if (providerId === 'codex' || providerId === 'claude-code') {
+    return `/model ${normalizedModel}\r`;
+  }
+
+  return '';
 }
 
 function hasPanelContextTag(panel) {
@@ -2282,14 +2864,14 @@ function getSessionHeaderGridClass(panel) {
   const hasContext = hasPanelContextTag(panel);
 
   if (hasModel && hasContext) {
-    return 'grid-cols-[28px_minmax(70px,1fr)_auto_auto_auto_auto_28px_28px_28px]';
+    return 'grid-cols-[28px_minmax(70px,1fr)_auto_auto_auto_auto_auto_28px_28px_28px]';
   }
 
   if (hasModel || hasContext) {
-    return 'grid-cols-[28px_minmax(70px,1fr)_auto_auto_auto_28px_28px_28px]';
+    return 'grid-cols-[28px_minmax(70px,1fr)_auto_auto_auto_auto_28px_28px_28px]';
   }
 
-  return 'grid-cols-[28px_minmax(70px,1fr)_auto_auto_28px_28px_28px]';
+  return 'grid-cols-[28px_minmax(70px,1fr)_auto_auto_auto_28px_28px_28px]';
 }
 
 function getPanelFallbackTitle(panel, language) {
@@ -2370,6 +2952,96 @@ function SessionContextTag({ panel, t }) {
   );
 }
 
+function SessionTagBadge({ className, tag, t }) {
+  const normalizedTag = normalizeSessionTag(tag);
+  if (!normalizedTag) {
+    return null;
+  }
+
+  const label = getSessionTagLabel(normalizedTag, t);
+
+  return (
+    <span
+      className={cn('session-tag-badge', `is-${getSessionTagTone(normalizedTag)}`, className)}
+      title={`${t('sessionTag')} ${label}`}
+    >
+      <Tags className="h-3 w-3" />
+      <span>{label}</span>
+    </span>
+  );
+}
+
+function SessionTagControl({
+  availableTags = [],
+  className,
+  onChange,
+  t,
+  value
+}) {
+  const normalizedTag = normalizeSessionTag(value);
+  const preset = getSessionTagPreset(normalizedTag);
+  const customTags = (Array.isArray(availableTags) ? availableTags : [])
+    .map((tag) => normalizeSessionTag(tag))
+    .filter((tag, index, tags) => (
+      tag &&
+      !sessionTagPresetIds.has(tag) &&
+      tags.indexOf(tag) === index
+    ))
+    .sort((left, right) => left.localeCompare(right, 'zh-CN'));
+  const customOptions = normalizedTag && !preset && !customTags.includes(normalizedTag)
+    ? [normalizedTag, ...customTags]
+    : customTags;
+
+  const handleChange = (event) => {
+    const nextValue = event.target.value;
+    if (nextValue === sessionTagNoneValue) {
+      onChange?.('');
+      return;
+    }
+
+    if (nextValue === sessionTagCustomValue) {
+      const draft = window.prompt(
+        t('sessionTagCustomPrompt'),
+        normalizedTag && !preset ? normalizedTag : ''
+      );
+      if (draft === null) {
+        return;
+      }
+
+      const nextTag = normalizeSessionTag(draft);
+      if (nextTag) {
+        onChange?.(nextTag);
+      }
+      return;
+    }
+
+    onChange?.(nextValue);
+  };
+
+  return (
+    <select
+      className={cn('session-tag-select', `is-${getSessionTagTone(normalizedTag)}`, className)}
+      value={normalizedTag || sessionTagNoneValue}
+      title={normalizedTag
+        ? `${t('sessionTag')} ${getSessionTagLabel(normalizedTag, t)}`
+        : t('sessionTagNone')}
+      aria-label={t('sessionTag')}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+      onChange={handleChange}
+    >
+      <option value={sessionTagNoneValue}>{t('sessionTagNone')}</option>
+      {sessionTagPresets.map((tag) => (
+        <option key={tag.id} value={tag.id}>{t(tag.labelKey)}</option>
+      ))}
+      {customOptions.map((tag) => (
+        <option key={tag} value={tag}>{tag}</option>
+      ))}
+      <option value={sessionTagCustomValue}>{t('sessionTagCustom')}</option>
+    </select>
+  );
+}
+
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(settingsKey) || '{}');
@@ -2377,12 +3049,36 @@ function loadSettings() {
       cwd: saved.cwd || '',
       theme: saved.theme === 'light' ? 'light' : 'dark',
       language: saved.language === 'en' ? 'en' : 'zh',
-      view: normalizeCanvasView(saved.view)
+      view: normalizeCanvasView(saved.view),
+      commandDockDispatchMode: normalizeCommandDockDispatchMode(saved.commandDockDispatchMode),
+      commandDockShortcuts: normalizeCommandDockShortcutSettings(saved.commandDockShortcuts),
+      commandDockPosition: normalizeCommandDockPosition(saved.commandDockPosition),
+      commandDockHistory: normalizeCommandDockHistory(saved.commandDockHistory)
     };
   } catch {
     localStorage.removeItem(settingsKey);
-    return { cwd: '', theme: 'dark', language: 'zh', view: createDefaultView() };
+    return {
+      cwd: '',
+      theme: 'dark',
+      language: 'zh',
+      view: createDefaultView(),
+      commandDockDispatchMode: 'reuse',
+      commandDockShortcuts: normalizeCommandDockShortcutSettings(commandDockDefaultShortcuts),
+      commandDockPosition: null,
+      commandDockHistory: []
+    };
   }
+}
+
+function normalizeCommandDockPosition(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const left = Number(value.left);
+  const top = Number(value.top);
+
+  return Number.isFinite(left) && Number.isFinite(top) ? { left, top } : null;
 }
 
 function formatTime(ms) {
@@ -2489,9 +3185,15 @@ const imageGenerationFailedStatuses = new Set([
   'timeout',
   'timed_out'
 ]);
+const imageGenerationHistoryMaxItems = 80;
 
 function normalizeImageGenerationStatus(value, fallback = 'queued') {
   return String(value || fallback).trim().toLowerCase() || fallback;
+}
+
+function normalizeImageGenerationTimestamp(value, fallback = Date.now()) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function createImageGenerationTaskItem(source = {}, prompt = '') {
@@ -2508,6 +3210,9 @@ function createImageGenerationTaskItem(source = {}, prompt = '') {
     model: String(source.model || '').trim(),
     n: Number.isFinite(Number.parseInt(source.n, 10)) ? Number.parseInt(source.n, 10) : null,
     size: String(source.size || '').trim(),
+    referenceImageCount: Number.isFinite(Number.parseInt(source.referenceImageCount, 10))
+      ? Number.parseInt(source.referenceImageCount, 10)
+      : 0,
     name: '',
     normalizedPath: '',
     path: '',
@@ -2515,6 +3220,133 @@ function createImageGenerationTaskItem(source = {}, prompt = '') {
     url: '',
     error: String(source.error || '').trim()
   };
+}
+
+function normalizeImageGenerationHistoryItem(source = {}, index = 0) {
+  if (!source || typeof source !== 'object') {
+    return null;
+  }
+
+  const rawKind = String(source.kind || '').trim().toLowerCase();
+  const rawPath = String(source.path || '').trim();
+  const rawNormalizedPath = normalizePromptFilePath(source.normalizedPath || rawPath);
+  const kind = rawKind === 'task' && !rawPath && !rawNormalizedPath ? 'task' : 'image';
+  const status = normalizeImageGenerationStatus(source.status, kind === 'task' ? 'failed' : 'success');
+
+  if (kind === 'task') {
+    if (!imageGenerationFailedStatuses.has(status)) {
+      return null;
+    }
+
+    return createImageGenerationTaskItem({
+      ...source,
+      id: String(source.id || '').trim() || createLocalId(`image-history-task-${index}`),
+      status,
+      createdAt: normalizeImageGenerationTimestamp(source.createdAt),
+      updatedAt: normalizeImageGenerationTimestamp(source.updatedAt, source.createdAt),
+      finishedAt: source.finishedAt || source.updatedAt || source.createdAt || null
+    }, source.prompt);
+  }
+
+  const filePath = rawPath || rawNormalizedPath;
+  if (!filePath) {
+    return null;
+  }
+
+  const createdAt = normalizeImageGenerationTimestamp(source.createdAt);
+  const updatedAt = normalizeImageGenerationTimestamp(source.updatedAt, createdAt);
+  const normalizedPath = normalizePromptFilePath(source.normalizedPath || filePath);
+  const name = String(
+    source.name
+    || normalizedPath.split('/').filter(Boolean).pop()
+    || filePath.split(/[\\/]/).filter(Boolean).pop()
+    || ''
+  ).trim();
+  const count = Number.parseInt(source.n, 10);
+  const referenceImageCount = Number.parseInt(source.referenceImageCount, 10);
+
+  return {
+    id: String(source.id || '').trim() || createLocalId(`image-history-${index}`),
+    kind: 'image',
+    taskId: String(source.taskId || '').trim(),
+    status: 'success',
+    createdAt,
+    updatedAt,
+    finishedAt: source.finishedAt || null,
+    model: String(source.model || '').trim(),
+    n: Number.isFinite(count) ? Math.min(4, Math.max(1, count)) : null,
+    size: String(source.size || '').trim(),
+    referenceImageCount: Number.isFinite(referenceImageCount) ? Math.max(0, referenceImageCount) : 0,
+    name,
+    normalizedPath,
+    path: filePath,
+    prompt: String(source.prompt || ''),
+    url: localFilePathToUrl(filePath),
+    error: String(source.error || '').trim()
+  };
+}
+
+function normalizeImageGenerationHistoryItems(items) {
+  const normalizedItems = [];
+  const seenIds = new Set();
+
+  (Array.isArray(items) ? items : []).forEach((item, index) => {
+    const normalized = normalizeImageGenerationHistoryItem(item, index);
+    if (!normalized) {
+      return;
+    }
+
+    if (seenIds.has(normalized.id)) {
+      normalized.id = createLocalId(`${normalized.kind || 'image'}-history`);
+    }
+    seenIds.add(normalized.id);
+    normalizedItems.push(normalized);
+  });
+
+  return normalizedItems.slice(0, imageGenerationHistoryMaxItems);
+}
+
+function isImageGenerationHistoryPersistable(item) {
+  const status = normalizeImageGenerationStatus(item?.status, item?.kind === 'image' ? 'success' : 'queued');
+  if (item?.kind === 'task') {
+    return imageGenerationFailedStatuses.has(status);
+  }
+
+  return Boolean(item?.path || item?.normalizedPath);
+}
+
+function serializeImageGenerationHistoryItem(item) {
+  if (!isImageGenerationHistoryPersistable(item)) {
+    return null;
+  }
+
+  return {
+    id: String(item.id || '').trim(),
+    kind: item.kind === 'task' ? 'task' : 'image',
+    taskId: String(item.taskId || '').trim(),
+    status: normalizeImageGenerationStatus(item.status, item.kind === 'task' ? 'failed' : 'success'),
+    createdAt: normalizeImageGenerationTimestamp(item.createdAt),
+    updatedAt: normalizeImageGenerationTimestamp(item.updatedAt, item.createdAt),
+    finishedAt: item.finishedAt || null,
+    model: String(item.model || '').trim(),
+    n: Number.isFinite(Number.parseInt(item.n, 10)) ? Number.parseInt(item.n, 10) : null,
+    size: String(item.size || '').trim(),
+    referenceImageCount: Number.isFinite(Number.parseInt(item.referenceImageCount, 10))
+      ? Number.parseInt(item.referenceImageCount, 10)
+      : 0,
+    name: String(item.name || '').trim(),
+    normalizedPath: normalizePromptFilePath(item.normalizedPath || item.path),
+    path: String(item.path || item.normalizedPath || '').trim(),
+    prompt: String(item.prompt || ''),
+    error: String(item.error || '').trim()
+  };
+}
+
+function serializeImageGenerationHistoryItems(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => serializeImageGenerationHistoryItem(item))
+    .filter(Boolean)
+    .slice(0, imageGenerationHistoryMaxItems);
 }
 
 function createImageGenerationImageItems(images, prompt, source = {}) {
@@ -2539,6 +3371,9 @@ function createImageGenerationImageItems(images, prompt, source = {}) {
         model: String(source.model || '').trim(),
         n: Number.isFinite(Number.parseInt(source.n, 10)) ? Number.parseInt(source.n, 10) : null,
         size: String(source.size || '').trim(),
+        referenceImageCount: Number.isFinite(Number.parseInt(source.referenceImageCount, 10))
+          ? Number.parseInt(source.referenceImageCount, 10)
+          : 0,
         name,
         normalizedPath,
         path: filePath,
@@ -2547,6 +3382,24 @@ function createImageGenerationImageItems(images, prompt, source = {}) {
       };
     })
     .filter(Boolean);
+}
+
+function createImageGenerationReferenceItem(source = {}) {
+  const filePath = String(source?.path || '').trim();
+  if (!filePath) {
+    return null;
+  }
+
+  const normalizedPath = normalizePromptFilePath(filePath);
+  const name = String(source?.name || normalizedPath.split('/').filter(Boolean).pop() || '').trim();
+  return {
+    id: createLocalId('reference-image'),
+    name,
+    normalizedPath,
+    path: filePath,
+    size: Number(source?.size) || 0,
+    url: localFilePathToUrl(filePath)
+  };
 }
 
 function isAgentAvatarFile(file) {
@@ -2659,6 +3512,7 @@ function createEmptyWorkspace() {
     canvasMode: 'project',
     sharedView: createDefaultView(),
     canvasFrames: {},
+    canvasTodos: {},
     projectViews: {},
     projects: []
   };
@@ -2753,6 +3607,7 @@ function normalizeWorkspace(raw) {
     ? Object.fromEntries(Object.entries(raw.projectViews).map(([key, value]) => [key, normalizeCanvasView(value)]))
     : {};
   const canvasFrames = normalizeCanvasFrameMap(raw.canvasFrames);
+  const canvasTodos = normalizeCanvasTodoMap(raw.canvasTodos);
 
   return {
     ...fallback,
@@ -2762,6 +3617,7 @@ function normalizeWorkspace(raw) {
     canvasMode: canvasModes.has(raw.canvasMode) ? raw.canvasMode : fallback.canvasMode,
     sharedView: normalizeCanvasView(raw.sharedView),
     canvasFrames,
+    canvasTodos,
     projectViews,
     projects
   };
@@ -2994,6 +3850,331 @@ function CanvasFrame({
   );
 }
 
+function CanvasTodoList({
+  active,
+  scale,
+  t,
+  todo,
+  onActivate,
+  onAddItem,
+  onDelete,
+  onItemDoneChange,
+  onItemRemove,
+  onItemTextChange,
+  onMove,
+  onResize,
+  onTitleChange,
+  onTitleCommit,
+  onTogglePinned
+}) {
+  const [draft, setDraft] = useState('');
+  const items = Array.isArray(todo.items) ? todo.items : [];
+  const completedCount = items.filter((item) => item.done).length;
+  const progressText = items.length > 0
+    ? t('canvasTodoProgress', { done: completedCount, total: items.length })
+    : t('canvasTodoProgressEmpty');
+
+  const addDraftItem = () => {
+    const text = draft.trim();
+    if (!text) {
+      return;
+    }
+
+    onAddItem(todo.id, text);
+    setDraft('');
+  };
+
+  const startDrag = (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    onActivate(todo.id);
+
+    const start = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      x: todo.x,
+      y: todo.y
+    };
+
+    bindPointerSession((moveEvent) => {
+      onMove(todo.id, {
+        x: Math.round(start.x + (moveEvent.clientX - start.clientX) / scale),
+        y: Math.round(start.y + (moveEvent.clientY - start.clientY) / scale)
+      });
+    });
+  };
+
+  const startResize = (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    onActivate(todo.id);
+
+    const start = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      width: todo.width,
+      height: todo.height
+    };
+
+    bindPointerSession((moveEvent) => {
+      onResize(todo.id, {
+        width: Math.round(clamp(start.width + (moveEvent.clientX - start.clientX) / scale, canvasTodoMinWidth, 1600)),
+        height: Math.round(clamp(start.height + (moveEvent.clientY - start.clientY) / scale, canvasTodoMinHeight, 1600))
+      });
+    });
+  };
+
+  const handleTitleKeyDown = (event) => {
+    event.stopPropagation();
+
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.currentTarget.blur();
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.currentTarget.blur();
+      onTitleCommit(todo.id, event.currentTarget.value);
+    }
+  };
+
+  const handleDraftKeyDown = (event) => {
+    event.stopPropagation();
+
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      addDraftItem();
+    }
+  };
+
+  return (
+    <section
+      className={cn('canvas-todo-panel', active && 'is-active', todo.pinned && 'is-pinned')}
+      style={{
+        left: todo.x,
+        top: todo.y,
+        width: todo.width,
+        height: todo.height
+      }}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+        onActivate(todo.id);
+      }}
+    >
+      <header className="canvas-todo-header">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="canvas-todo-drag h-7 w-7 text-muted-foreground"
+          title={t('moveCanvasTodo')}
+          aria-label={t('moveCanvasTodo')}
+          onPointerDown={startDrag}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <GripVertical className="h-4 w-4" />
+        </Button>
+        <ListTodo className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+        <Input
+          className="canvas-todo-title"
+          value={todo.title}
+          placeholder={t('canvasTodoTitlePlaceholder')}
+          aria-label={t('renameCanvasTodo')}
+          spellCheck={false}
+          onChange={(event) => onTitleChange(todo.id, event.target.value)}
+          onBlur={(event) => onTitleCommit(todo.id, event.target.value)}
+          onKeyDown={handleTitleKeyDown}
+        />
+        <Button
+          type="button"
+          variant={todo.pinned ? 'primary' : 'ghost'}
+          size="icon"
+          className="canvas-todo-pin h-7 w-7"
+          title={t(todo.pinned ? 'unpinCanvasTodo' : 'pinCanvasTodo')}
+          aria-label={t(todo.pinned ? 'unpinCanvasTodo' : 'pinCanvasTodo')}
+          onClick={(event) => {
+            event.stopPropagation();
+            onTogglePinned(todo.id);
+          }}
+        >
+          <Pin className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="canvas-todo-delete h-7 w-7"
+          title={t('deleteCanvasTodo')}
+          aria-label={t('deleteCanvasTodo')}
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete(todo.id);
+          }}
+        >
+          <X className="h-3.5 w-3.5" />
+        </Button>
+      </header>
+
+      <div className="canvas-todo-progress">{progressText}</div>
+
+      <div className="canvas-todo-add-row">
+        <Input
+          value={draft}
+          placeholder={t('canvasTodoAddPlaceholder')}
+          spellCheck={false}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={handleDraftKeyDown}
+        />
+        <Button
+          type="button"
+          variant="primary"
+          size="icon"
+          className="h-9 w-9"
+          disabled={!draft.trim()}
+          aria-label={t('addCanvasTodo')}
+          onClick={(event) => {
+            event.stopPropagation();
+            addDraftItem();
+          }}
+        >
+          <Plus className="h-4 w-4" />
+        </Button>
+      </div>
+
+      <div className="canvas-todo-items" role="list">
+        {items.length === 0 ? (
+          <div className="canvas-todo-empty">{t('canvasTodoEmpty')}</div>
+        ) : (
+          items.map((item) => (
+            <div
+              key={item.id}
+              className={cn('canvas-todo-item', item.done && 'is-done')}
+              role="listitem"
+            >
+              <input
+                type="checkbox"
+                checked={item.done}
+                aria-label={item.text || t('canvasTodoItemPlaceholder')}
+                onChange={(event) => onItemDoneChange(todo.id, item.id, event.target.checked)}
+                onKeyDown={(event) => event.stopPropagation()}
+              />
+              <Input
+                className="canvas-todo-item-text"
+                value={item.text}
+                placeholder={t('canvasTodoItemPlaceholder')}
+                spellCheck={false}
+                title={item.text || undefined}
+                onChange={(event) => onItemTextChange(todo.id, item.id, event.target.value)}
+                onKeyDown={(event) => event.stopPropagation()}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                title={t('deleteCanvasTodo')}
+                aria-label={t('deleteCanvasTodo')}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onItemRemove(todo.id, item.id);
+                }}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div
+        className="canvas-todo-resize"
+        title={t('resizeCanvasTodo')}
+        aria-hidden="true"
+        onPointerDown={startResize}
+      />
+    </section>
+  );
+}
+
+function CanvasContextMenu({
+  groupableEndpointCount,
+  menu,
+  t,
+  onAddFrame,
+  onArrange,
+  onClose,
+  onGroupEndpoints
+}) {
+  if (!menu) {
+    return null;
+  }
+
+  const runAction = (action) => (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    action();
+    onClose();
+  };
+  const groupLabel = groupableEndpointCount > 0
+    ? `${t('groupEndpoints')} ${groupableEndpointCount}`
+    : t('groupEndpoints');
+
+  return (
+    <div
+      className="canvas-context-menu"
+      role="menu"
+      aria-label={t('canvasContextMenu')}
+      style={{
+        left: menu.left,
+        top: menu.top
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+    >
+      <button
+        type="button"
+        className="canvas-context-menu-item"
+        role="menuitem"
+        onClick={runAction(() => onAddFrame(menu.canvasPoint))}
+      >
+        <Plus className="canvas-context-menu-icon" aria-hidden="true" />
+        <span>{t('addCanvasFrame')}</span>
+      </button>
+      <button
+        type="button"
+        className="canvas-context-menu-item"
+        role="menuitem"
+        onClick={runAction(onArrange)}
+      >
+        <LayoutGrid className="canvas-context-menu-icon" aria-hidden="true" />
+        <span>{t('arrange')}</span>
+      </button>
+      <button
+        type="button"
+        className="canvas-context-menu-item"
+        role="menuitem"
+        onClick={runAction(onGroupEndpoints)}
+      >
+        <Grid2X2 className="canvas-context-menu-icon" aria-hidden="true" />
+        <span>{groupLabel}</span>
+      </button>
+    </div>
+  );
+}
+
 function EndpointGroup({
   group,
   panels,
@@ -3152,6 +4333,9 @@ function EndpointGroup({
                 onBlur={(event) => onPanelTitleCommit(panel.id, event.target.value)}
                 onKeyDown={(event) => handleTitleKeyDown(event, panel.id)}
               />
+              <span className="endpoint-group-tag-slot">
+                <SessionTagBadge tag={getPanelSessionTag(panel)} t={t} />
+              </span>
               <SessionStatusTag panel={panel} t={t} />
               <SessionRuntimeTag panel={panel} now={runtimeNow} t={t} />
               <Button
@@ -3184,6 +4368,7 @@ function TerminalPanel({
   scale,
   t,
   theme,
+  availableSessionTags,
   visible = true,
   selected = false,
   commandTargeted = false,
@@ -3196,7 +4381,9 @@ function TerminalPanel({
   onMove,
   onResize,
   onRestart,
+  onModelChange,
   onSelectToggle,
+  onTagChange,
   onTerminalInput,
   onTitleChange,
   onTitleCommit,
@@ -3208,7 +4395,9 @@ function TerminalPanel({
   const scrollbarTrackRef = useRef(null);
   const [scrollbarTrackHeight, setScrollbarTrackHeight] = useState(0);
   const [scrollbarState, setScrollbarState] = useState({ baseY: 0, rows: 0, viewportY: 0 });
+  const [contextMenu, setContextMenu] = useState(null);
   const panelProvider = getPanelCliProvider(panel);
+  const sessionTag = getPanelSessionTag(panel);
   const arrangeStyle = arrangeAnimation ? {
     '--canvas-arrange-delay': `${arrangeAnimation.delay || 0}ms`,
     '--canvas-arrange-duration': `${canvasArrangeDurationMs}ms`,
@@ -3241,6 +4430,54 @@ function TerminalPanel({
       current.viewportY === nextState.viewportY
     ) ? current : nextState);
   }, []);
+
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
+  const openPanelContextMenu = useCallback((event) => {
+    if (!visible) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    onActivate(panel.id);
+
+    const maxX = Math.max(8, window.innerWidth - terminalContextMenuWidth - 8);
+    const maxY = Math.max(8, window.innerHeight - terminalContextMenuEstimatedHeight - 8);
+    const term = termRef.current;
+
+    setContextMenu({
+      hasSelection: Boolean(term?.hasSelection?.()),
+      x: clamp(event.clientX, 8, maxX),
+      y: clamp(event.clientY, 8, maxY)
+    });
+  }, [onActivate, panel.id, visible]);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return undefined;
+    }
+
+    const handlePointerDown = () => closeContextMenu();
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        closeContextMenu();
+      }
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('blur', closeContextMenu);
+    window.addEventListener('resize', closeContextMenu);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('blur', closeContextMenu);
+      window.removeEventListener('resize', closeContextMenu);
+    };
+  }, [closeContextMenu, contextMenu]);
 
   const fitTerminal = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -3339,7 +4576,6 @@ function TerminalPanel({
       return true;
     });
 
-    const hostNode = hostRef.current;
     const terminalElement = term.element;
     const terminalTextarea = term.textarea;
     const handleCopy = (event) => {
@@ -3355,24 +4591,12 @@ function TerminalPanel({
         event.stopPropagation();
       }
     };
-    const handleContextMenu = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      onActivate(panel.id);
-
-      if (term.hasSelection()) {
-        copyTerminalSelection(term, true);
-      } else {
-        pasteClipboardIntoTerminal(term);
-      }
-    };
     const handleTextAreaFocus = () => {
       window.requestAnimationFrame(() => syncTerminalImeAnchor(term));
     };
 
     terminalElement?.addEventListener('copy', handleCopy);
     terminalElement?.addEventListener('paste', handlePaste);
-    hostNode?.addEventListener('contextmenu', handleContextMenu);
     terminalTextarea?.addEventListener('focus', handleTextAreaFocus);
 
     const dataDisposable = term.onData((data) => {
@@ -3394,7 +4618,6 @@ function TerminalPanel({
     return () => {
       terminalElement?.removeEventListener('copy', handleCopy);
       terminalElement?.removeEventListener('paste', handlePaste);
-      hostNode?.removeEventListener('contextmenu', handleContextMenu);
       terminalTextarea?.removeEventListener('focus', handleTextAreaFocus);
       dataDisposable.dispose();
       resizeDisposable.dispose();
@@ -3405,7 +4628,7 @@ function TerminalPanel({
       termRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [fitTerminal, onActivate, onTerminalInput, panel.cwd, panel.id, registerTerminal, syncScrollbarState]);
+  }, [fitTerminal, onTerminalInput, panel.cwd, panel.id, registerTerminal, syncScrollbarState]);
 
   useEffect(() => {
     if (visible && !panel.minimized) {
@@ -3574,6 +4797,141 @@ function TerminalPanel({
     }
   };
 
+  const copySelectionFromContextMenu = () => {
+    const term = termRef.current;
+    if (term) {
+      copyTerminalSelection(term, true);
+    }
+    closeContextMenu();
+  };
+
+  const pasteFromContextMenu = () => {
+    const term = termRef.current;
+    if (term) {
+      pasteClipboardIntoTerminal(term);
+    }
+    closeContextMenu();
+  };
+
+  const renameFromContextMenu = () => {
+    closeContextMenu();
+    const value = window.prompt(t('renameSessionPrompt'), panel.title);
+    if (value !== null) {
+      onTitleCommit(panel.id, value);
+    }
+  };
+
+  const switchModelFromContextMenu = (model) => {
+    closeContextMenu();
+    onModelChange?.(panel.id, model);
+  };
+
+  const promptModelFromContextMenu = () => {
+    closeContextMenu();
+    const current = String(panel.codexModel || '').trim();
+    const fallback = current || getPanelQuickModelOptions(panel)[0] || '';
+    const value = window.prompt(t('modelPrompt'), fallback);
+    if (value !== null) {
+      onModelChange?.(panel.id, value);
+    }
+  };
+
+  const currentModel = String(panel.codexModel || '').trim();
+  const modelOptions = getPanelQuickModelOptions(panel);
+  const hasCustomCurrentModel = currentModel && !modelOptions.includes(currentModel);
+  const canSwitchModel = hasPanelModelTag(panel) && canPanelReceiveInput(panel);
+  const contextMenuPortal = contextMenu ? createPortal(
+    <div
+      className="terminal-context-menu"
+      role="menu"
+      aria-label={t('sessionContextMenu')}
+      style={{
+        left: contextMenu.x,
+        top: contextMenu.y
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <div className="terminal-context-menu-header">
+        <CliProviderIcon provider={panelProvider} className="h-4 w-4" />
+        <span className="terminal-context-menu-title">{panel.title}</span>
+      </div>
+      <button
+        type="button"
+        className="terminal-context-menu-item"
+        role="menuitem"
+        disabled={!contextMenu.hasSelection}
+        onClick={copySelectionFromContextMenu}
+      >
+        <ClipboardCopy className="terminal-context-menu-icon" />
+        <span>{t('copySelection')}</span>
+      </button>
+      <button
+        type="button"
+        className="terminal-context-menu-item"
+        role="menuitem"
+        onClick={pasteFromContextMenu}
+      >
+        <ClipboardPaste className="terminal-context-menu-icon" />
+        <span>{t('pasteClipboard')}</span>
+      </button>
+      <button
+        type="button"
+        className="terminal-context-menu-item"
+        role="menuitem"
+        onClick={renameFromContextMenu}
+      >
+        <PencilLine className="terminal-context-menu-icon" />
+        <span>{t('renameSession')}</span>
+      </button>
+      {hasPanelModelTag(panel) && (
+        <>
+          <div className="terminal-context-menu-separator" />
+          <div className="terminal-context-menu-label">
+            <BrainCircuit className="terminal-context-menu-icon" />
+            <span>{t('switchSessionModel')}</span>
+          </div>
+          <div className="terminal-context-menu-models">
+            {modelOptions.map((model) => {
+              const selectedModel = currentModel === model;
+              return (
+                <button
+                  key={model}
+                  type="button"
+                  className={cn('terminal-context-menu-model', selectedModel && 'is-selected')}
+                  disabled={!canSwitchModel || selectedModel}
+                  onClick={() => switchModelFromContextMenu(model)}
+                >
+                  <span>{model}</span>
+                  {selectedModel && <Check className="h-3.5 w-3.5" />}
+                </button>
+              );
+            })}
+            {hasCustomCurrentModel && (
+              <button
+                type="button"
+                className="terminal-context-menu-model is-selected"
+                disabled
+              >
+                <span>{currentModel}</span>
+                <Check className="h-3.5 w-3.5" />
+              </button>
+            )}
+            <button
+              type="button"
+              className="terminal-context-menu-model"
+              disabled={!canSwitchModel}
+              onClick={promptModelFromContextMenu}
+            >
+              <span>{t('customModel')}</span>
+            </button>
+          </div>
+        </>
+      )}
+    </div>,
+    document.body
+  ) : null;
+
   return (
     <Card
       className={cn(
@@ -3601,7 +4959,9 @@ function TerminalPanel({
           onActivate(panel.id);
         }
       }}
+      onContextMenu={openPanelContextMenu}
     >
+      {contextMenuPortal}
       {dispatchSparkleKey && (
         <div key={dispatchSparkleKey} className="terminal-panel-dispatch-sparkle" aria-hidden="true">
           <Sparkles className="terminal-panel-dispatch-sparkle-icon h-4 w-4" />
@@ -3632,6 +4992,7 @@ function TerminalPanel({
             }
           }}
         >
+          <SessionTagBadge className="terminal-endpoint-tag" tag={sessionTag} t={t} />
           <Button
             type="button"
             variant="ghost"
@@ -3697,6 +5058,12 @@ function TerminalPanel({
             onChange={(event) => onTitleChange(panel.id, event.target.value)}
             onBlur={(event) => onTitleCommit(panel.id, event.target.value)}
             onKeyDown={handleTitleKeyDown}
+          />
+          <SessionTagControl
+            availableTags={availableSessionTags}
+            value={sessionTag}
+            t={t}
+            onChange={(nextTag) => onTagChange?.(panel.id, nextTag)}
           />
           <SessionModelTag panel={panel} t={t} />
           <SessionContextTag panel={panel} t={t} />
@@ -3990,8 +5357,10 @@ function UsageTrackingPanel({
 }
 
 function CodexConfigDialog({
+  commandDockShortcuts,
   initialSettingsTab = 'preferences',
   language,
+  onCommandDockShortcutChange,
   onLanguageChange,
   onOpenChange,
   onProfileChanged,
@@ -4902,6 +6271,7 @@ function CodexConfigDialog({
   };
 
   const selectClassName = 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50';
+  const normalizedCommandDockShortcuts = normalizeCommandDockShortcutSettings(commandDockShortcuts);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -4942,6 +6312,51 @@ function CodexConfigDialog({
                   <Button type="button" variant={language === 'en' ? 'primary' : 'outline'} onClick={() => onLanguageChange('en')}>
                     {t('english')}
                   </Button>
+                </div>
+              </div>
+              <div className="grid gap-2 border-t border-border/70 pt-3">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <Settings2 className="h-4 w-4" />
+                  {t('commandDockShortcuts')}
+                </Label>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="commandDockSendShortcut" className="text-xs text-muted-foreground">
+                      {t('commandDockSendShortcut')}
+                    </Label>
+                    <select
+                      id="commandDockSendShortcut"
+                      className={selectClassName}
+                      value={normalizedCommandDockShortcuts.sendShortcut}
+                      onChange={(event) => onCommandDockShortcutChange?.('send', event.target.value)}
+                    >
+                      {commandDockShortcutOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="commandDockDispatchShortcut" className="text-xs text-muted-foreground">
+                      {t('commandDockDispatchShortcut')}
+                    </Label>
+                    <select
+                      id="commandDockDispatchShortcut"
+                      className={selectClassName}
+                      value={normalizedCommandDockShortcuts.dispatchShortcut}
+                      onChange={(event) => onCommandDockShortcutChange?.('dispatch', event.target.value)}
+                    >
+                      {commandDockShortcutOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="text-xs leading-5 text-muted-foreground">
+                  {t('commandDockShortcutHint')}
                 </div>
               </div>
             </div>
@@ -6139,9 +7554,9 @@ function TopbarLaunchMenu({
     };
   }, [open]);
 
-  const runAction = useCallback((handler) => {
+  const runAction = useCallback((handler, providerId = selectedCliProviderId) => {
     setOpen(false);
-    handler(selectedCliProviderId);
+    handler(providerId);
   }, [selectedCliProviderId]);
 
   return (
@@ -6207,7 +7622,7 @@ function TopbarLaunchMenu({
               type="button"
               className="launch-menu-item"
               role="menuitem"
-              onClick={() => runAction(onAddCommandLine)}
+              onClick={() => runAction(onAddCommandLine, 'shell')}
             >
               <SquareTerminal className="launch-menu-item-icon" />
               <span className="launch-menu-item-copy">
@@ -6283,7 +7698,40 @@ function SystemStats({ stats, t }) {
   );
 }
 
-function SidebarThemeControl({ compact = false, onThemeChange, t, theme }) {
+function TopbarSessionStats({ counts, t }) {
+  const safeCounts = {
+    total: counts?.total || 0,
+    running: counts?.running || 0,
+    idle: counts?.idle || 0,
+    completed: counts?.completed || 0,
+    error: counts?.error || 0
+  };
+  const title = t('topbarSessionStatsTitle', safeCounts);
+  const hasRunningSessions = safeCounts.running > 0;
+
+  return (
+    <div
+      className={cn(
+        'flex h-10 shrink-0 items-center gap-2 rounded-lg border border-border bg-card px-2.5 text-xs text-muted-foreground',
+        hasRunningSessions && 'border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200'
+      )}
+      title={title}
+      aria-label={title}
+    >
+      <SquareTerminal
+        className={cn(
+          'h-3.5 w-3.5 text-primary',
+          hasRunningSessions && 'text-emerald-600 dark:text-emerald-300'
+        )}
+      />
+      <span className="hidden whitespace-nowrap font-medium lg:inline">{t('topbarRunningSessions')}</span>
+      <span className="whitespace-nowrap font-medium lg:hidden">{t('taskRunning')}</span>
+      <span className="font-mono text-sm font-semibold tabular-nums text-foreground">{safeCounts.running}</span>
+    </div>
+  );
+}
+
+function SidebarThemeControl({ className, compact = false, onThemeChange, t, theme }) {
   const nextTheme = theme === 'dark' ? 'light' : 'dark';
   const Icon = nextTheme === 'dark' ? Moon : Sun;
   const label = `${t('appearance')}: ${t(nextTheme)}`;
@@ -6292,7 +7740,7 @@ function SidebarThemeControl({ compact = false, onThemeChange, t, theme }) {
     <IconButton
       label={label}
       type="button"
-      className={cn(!compact && 'justify-self-start')}
+      className={cn(className, !compact && 'justify-self-start')}
       onClick={() => onThemeChange(nextTheme)}
     >
       <Icon className="h-4 w-4" />
@@ -6408,28 +7856,59 @@ function GridSessionDialog({
 }
 
 function CommandLineConfigDialog({
+  activeCommandPresetId = '',
+  commandPresets = [],
+  commandPresetsLoading = false,
+  commandPresetsPath = '',
   initialCliProviderId = defaultCliProviderId,
   initialDirectory,
   language,
+  onCommandPresetDelete,
+  onCommandPresetSave,
+  onCommandPresetSelect,
   onCreate,
   onOpenChange,
   open,
+  showToast,
   t
 }) {
   const selectableCliProviders = useMemo(() => getSelectableCliProviders(['directory']), []);
   const selectedInitialCliProviderId = getInitialCliProviderId(initialCliProviderId, selectableCliProviders);
   const [directory, setDirectory] = useState('');
+  const [command, setCommand] = useState('');
+  const [selectedCommandPresetId, setSelectedCommandPresetId] = useState('');
+  const [commandPresetSaving, setCommandPresetSaving] = useState(false);
   const [selectedCliProviderId, setSelectedCliProviderId] = useState(
     () => selectedInitialCliProviderId
   );
   const normalizedDirectory = String(directory || '').trim();
+  const normalizedCommand = normalizeCommandPresetCommandInput(command);
+  const commandPresetEnabled = selectedCliProviderId === 'shell';
+  const activeCommandPreset = useMemo(() => (
+    commandPresets.find((preset) => preset.id === activeCommandPresetId) || null
+  ), [activeCommandPresetId, commandPresets]);
+  const selectedCommandPreset = useMemo(() => (
+    commandPresets.find((preset) => preset.id === selectedCommandPresetId) || null
+  ), [commandPresets, selectedCommandPresetId]);
 
   useEffect(() => {
     if (open) {
       setDirectory(String(initialDirectory || ''));
       setSelectedCliProviderId(selectedInitialCliProviderId);
+      setSelectedCommandPresetId(activeCommandPreset?.id || '');
+      setCommand(activeCommandPreset?.command || '');
     }
-  }, [initialDirectory, open, selectedInitialCliProviderId]);
+  }, [activeCommandPreset, initialDirectory, open, selectedInitialCliProviderId]);
+
+  useEffect(() => {
+    if (!open || !selectedCommandPresetId) {
+      return;
+    }
+
+    if (!commandPresets.some((preset) => preset.id === selectedCommandPresetId)) {
+      setSelectedCommandPresetId('');
+    }
+  }, [commandPresets, open, selectedCommandPresetId]);
 
   const browseDirectory = useCallback(async () => {
     const selected = await bridge.chooseDirectory();
@@ -6438,20 +7917,116 @@ function CommandLineConfigDialog({
     }
   }, []);
 
+  const selectCommandPreset = useCallback((presetId) => {
+    setSelectedCommandPresetId(presetId);
+    const preset = commandPresets.find((item) => item.id === presetId) || null;
+    setCommand(preset?.command || '');
+  }, [commandPresets]);
+
+  const saveCommandPreset = useCallback(async () => {
+    if (!normalizedCommand) {
+      showToast?.(t('commandPresetCommandRequired'));
+      return;
+    }
+
+    if (typeof onCommandPresetSave !== 'function') {
+      return;
+    }
+
+    const fallbackName = deriveCommandPresetTitle(normalizedCommand, t('commandPresetCommand'));
+    const requestedName = window.prompt(
+      t('commandPresetNamePrompt'),
+      selectedCommandPreset?.name || fallbackName
+    );
+    if (requestedName === null) {
+      return;
+    }
+
+    const name = requestedName.trim();
+    if (!name) {
+      showToast?.(t('commandPresetNameRequired'));
+      return;
+    }
+
+    setCommandPresetSaving(true);
+    try {
+      const store = await onCommandPresetSave({
+        id: selectedCommandPreset?.id || '',
+        name,
+        command: normalizedCommand
+      });
+      const savedPreset = store?.savedPreset || null;
+      if (savedPreset?.id) {
+        setSelectedCommandPresetId(savedPreset.id);
+        setCommand(savedPreset.command || normalizedCommand);
+      }
+      showToast?.(t('commandPresetSaved', { name: savedPreset?.name || name }));
+    } catch (error) {
+      showToast?.(t('commandPresetSaveFailed', { message: error.message }));
+    } finally {
+      setCommandPresetSaving(false);
+    }
+  }, [normalizedCommand, onCommandPresetSave, selectedCommandPreset, showToast, t]);
+
+  const activateCommandPreset = useCallback(async () => {
+    if (!selectedCommandPreset || typeof onCommandPresetSelect !== 'function') {
+      return;
+    }
+
+    setCommandPresetSaving(true);
+    try {
+      await onCommandPresetSelect(selectedCommandPreset.id);
+      showToast?.(t('commandPresetSelected', { name: selectedCommandPreset.name }));
+    } catch (error) {
+      showToast?.(t('commandPresetSelectFailed', { message: error.message }));
+    } finally {
+      setCommandPresetSaving(false);
+    }
+  }, [onCommandPresetSelect, selectedCommandPreset, showToast, t]);
+
+  const deleteCommandPreset = useCallback(async () => {
+    if (!selectedCommandPreset || typeof onCommandPresetDelete !== 'function') {
+      return;
+    }
+
+    if (!window.confirm(t('commandPresetDeleteConfirm', { name: selectedCommandPreset.name }))) {
+      return;
+    }
+
+    setCommandPresetSaving(true);
+    try {
+      const deletedName = selectedCommandPreset.name;
+      await onCommandPresetDelete(selectedCommandPreset.id);
+      setSelectedCommandPresetId('');
+      setCommand('');
+      showToast?.(t('commandPresetDeleted', { name: deletedName }));
+    } catch (error) {
+      showToast?.(t('commandPresetDeleteFailed', { message: error.message }));
+    } finally {
+      setCommandPresetSaving(false);
+    }
+  }, [onCommandPresetDelete, selectedCommandPreset, showToast, t]);
+
   const submit = useCallback(() => {
     if (!normalizedDirectory) {
       return;
     }
 
-    onCreate({
+    const payload = {
       cwd: normalizedDirectory,
       cliProviderId: selectedCliProviderId
-    });
-  }, [normalizedDirectory, onCreate, selectedCliProviderId]);
+    };
+
+    if (commandPresetEnabled) {
+      payload.initialCommand = normalizedCommand;
+    }
+
+    onCreate(payload);
+  }, [commandPresetEnabled, normalizedCommand, normalizedDirectory, onCreate, selectedCliProviderId]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent id="commandLineConfigDialog" className="left-4 right-auto top-4 w-[min(520px,calc(100vw-32px))] p-0">
+      <DialogContent id="commandLineConfigDialog" className="left-4 right-auto top-4 max-h-[calc(100vh-32px)] w-[min(560px,calc(100vw-32px))] overflow-y-auto p-0">
         <DialogHeader>
           <DialogTitle>{t('addCommandDialogTitle')}</DialogTitle>
           <DialogDescription>{t('addCommandDialogDescription')}</DialogDescription>
@@ -6494,6 +8069,83 @@ function CommandLineConfigDialog({
               {normalizedDirectory ? t('addCommandDirectoryHint') : t('dialogPathRequired')}
             </div>
           </div>
+
+          {commandPresetEnabled && (
+            <>
+              <div className="grid gap-2">
+                <Label htmlFor="commandPresetSelect">{t('commandPreset')}</Label>
+                <select
+                  id="commandPresetSelect"
+                  className={formSelectClassName}
+                  value={selectedCommandPresetId}
+                  title={commandPresetsPath}
+                  disabled={commandPresetsLoading || commandPresetSaving}
+                  onChange={(event) => selectCommandPreset(event.target.value)}
+                >
+                  <option value="">{t('commandPresetNone')}</option>
+                  {commandPresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name}
+                      {preset.id === activeCommandPresetId ? ` (${t('commandPresetDefaultBadge')})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="commandPresetCommandInput">{t('commandPresetCommand')}</Label>
+                <Textarea
+                  id="commandPresetCommandInput"
+                  className="min-h-[84px] resize-y font-mono text-xs leading-5"
+                  spellCheck={false}
+                  value={command}
+                  placeholder={t('commandPresetPlaceholder')}
+                  onChange={(event) => setCommand(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && normalizedDirectory) {
+                      event.preventDefault();
+                      submit();
+                    }
+                  }}
+                />
+                <div className="text-xs text-muted-foreground">
+                  {t('commandPresetHint')}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!normalizedCommand || commandPresetsLoading || commandPresetSaving}
+                    onClick={saveCommandPreset}
+                  >
+                    <Save className="h-4 w-4" />
+                    {t('commandPresetSave')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={selectedCommandPreset?.id === activeCommandPresetId ? 'primary' : 'outline'}
+                    size="sm"
+                    disabled={!selectedCommandPreset || commandPresetsLoading || commandPresetSaving}
+                    onClick={activateCommandPreset}
+                  >
+                    <Check className="h-4 w-4" />
+                    {t('commandPresetSetDefault')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={!selectedCommandPreset || commandPresetsLoading || commandPresetSaving}
+                    onClick={deleteCommandPreset}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    {t('commandPresetDelete')}
+                  </Button>
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         <DialogFooter>
@@ -7140,6 +8792,15 @@ function WorkspaceSidebar({
           <ImagePlus className="h-4 w-4" />
         </IconButton>
         <div className="sidebar-rail-spacer" />
+        {historyProject && (
+          <IconButton
+            label={t('historyFolder')}
+            variant={activeProject?.id === historyProject.id ? 'primary' : 'default'}
+            onClick={() => onSelectProject(historyProject.id)}
+          >
+            <FolderOpen className="h-4 w-4" />
+          </IconButton>
+        )}
         <SidebarThemeControl compact theme={theme} onThemeChange={onThemeChange} t={t} />
         <IconButton label={t('settings')} onClick={onOpenCodexConfig}>
           <Settings2 className="h-4 w-4" />
@@ -7196,36 +8857,52 @@ function WorkspaceSidebar({
           <div className="sidebar-section-title">
             <span>{t('canvasMode')}</span>
           </div>
-          <Tabs value={workspace.canvasMode} onValueChange={onCanvasModeChange}>
-            <TabsList className="grid w-full grid-cols-2 bg-background/70 shadow-inner">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <TabsTrigger
-                    className="h-7 border border-transparent px-2 text-xs data-[state=active]:border-primary/40 data-[state=active]:bg-primary data-[state=active]:font-semibold data-[state=active]:text-primary-foreground"
+          <fieldset className="sidebar-radio-group" aria-label={t('canvasMode')}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <label
+                  className={cn('sidebar-radio-option', workspace.canvasMode === 'project' && 'is-selected')}
+                  htmlFor="canvasModeProjectRadio"
+                >
+                  <input
+                    id="canvasModeProjectRadio"
+                    className="sidebar-radio-input"
+                    type="radio"
+                    name="sidebarCanvasMode"
                     value="project"
-                  >
-                    {t('canvasModeProject')}
-                  </TabsTrigger>
-                </TooltipTrigger>
-                <TooltipContent className="max-w-[240px] whitespace-normal leading-5">
-                  {t('canvasModeProjectTooltip')}
-                </TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <TabsTrigger
-                    className="h-7 border border-transparent px-2 text-xs data-[state=active]:border-primary/40 data-[state=active]:bg-primary data-[state=active]:font-semibold data-[state=active]:text-primary-foreground"
+                    checked={workspace.canvasMode === 'project'}
+                    onChange={() => onCanvasModeChange('project')}
+                  />
+                  <span>{t('canvasModeProject')}</span>
+                </label>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-[240px] whitespace-normal leading-5">
+                {t('canvasModeProjectTooltip')}
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <label
+                  className={cn('sidebar-radio-option', workspace.canvasMode === 'shared' && 'is-selected')}
+                  htmlFor="canvasModeSharedRadio"
+                >
+                  <input
+                    id="canvasModeSharedRadio"
+                    className="sidebar-radio-input"
+                    type="radio"
+                    name="sidebarCanvasMode"
                     value="shared"
-                  >
-                    {t('canvasModeShared')}
-                  </TabsTrigger>
-                </TooltipTrigger>
-                <TooltipContent className="max-w-[240px] whitespace-normal leading-5">
-                  {t('canvasModeSharedTooltip')}
-                </TooltipContent>
-              </Tooltip>
-            </TabsList>
-          </Tabs>
+                    checked={workspace.canvasMode === 'shared'}
+                    onChange={() => onCanvasModeChange('shared')}
+                  />
+                  <span>{t('canvasModeShared')}</span>
+                </label>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-[240px] whitespace-normal leading-5">
+                {t('canvasModeSharedTooltip')}
+              </TooltipContent>
+            </Tooltip>
+          </fieldset>
         </SidebarSection>
 
         <SidebarSection>
@@ -7238,7 +8915,7 @@ function WorkspaceSidebar({
             </div>
           </div>
 
-          {userProjects.length === 0 && !historyProject && (
+          {userProjects.length === 0 && (
             <div className="sidebar-empty">{t('projectEmpty')}</div>
           )}
 
@@ -7251,18 +8928,6 @@ function WorkspaceSidebar({
               <SquareTerminal className="h-4 w-4 shrink-0" />
               <span className="min-w-0 flex-1 truncate text-left">{t('noProject')}</span>
             </button>
-
-            {historyProject && (
-              <button
-                type="button"
-                className={cn('sidebar-history top-level', activeProject?.id === historyProject.id && 'active')}
-                title={historyProject.path}
-                onClick={() => onSelectProject(historyProject.id)}
-              >
-                <FolderOpen className="h-4 w-4 shrink-0" />
-                <span className="min-w-0 flex-1 truncate text-left">{t('historyFolder')}</span>
-              </button>
-            )}
 
             {userProjects.map((project) => (
               <div key={project.id} className="sidebar-project-group">
@@ -7337,19 +9002,50 @@ function WorkspaceSidebar({
       </SidebarContent>
 
       <SidebarFooter>
-        <SidebarThemeControl theme={theme} onThemeChange={onThemeChange} t={t} />
-        <ReleaseInfo
-          appVersion={appVersion}
-          t={t}
-        />
-        <Button className="w-full justify-start" variant="destructive" size="sm" onClick={onKillAll}>
-          <Trash2 className="h-4 w-4" />
-          {t('closeAll')}
-        </Button>
-        <Button className="w-full justify-start" variant="ghost" onClick={onOpenCodexConfig}>
-          <Settings2 className="h-4 w-4" />
-          {t('settings')}
-        </Button>
+        {historyProject && (
+          <div className="sidebar-footer-history">
+            <button
+              type="button"
+              className={cn('sidebar-history top-level', activeProject?.id === historyProject.id && 'active')}
+              title={historyProject.path}
+              onClick={() => onSelectProject(historyProject.id)}
+            >
+              <FolderOpen className="h-4 w-4 shrink-0" />
+              <span className="min-w-0 flex-1 truncate text-left">{t('historyFolder')}</span>
+            </button>
+          </div>
+        )}
+        <div className="sidebar-footer-version">
+          <ReleaseInfo
+            appVersion={appVersion}
+            t={t}
+          />
+        </div>
+        <div className="sidebar-footer-actions">
+          <IconButton
+            label={t('settings')}
+            variant="outline"
+            className="sidebar-footer-action"
+            onClick={onOpenCodexConfig}
+          >
+            <Settings2 className="h-4 w-4" />
+          </IconButton>
+          <SidebarThemeControl
+            compact
+            className="sidebar-footer-action"
+            theme={theme}
+            onThemeChange={onThemeChange}
+            t={t}
+          />
+          <IconButton
+            label={t('closeAll')}
+            variant="destructive"
+            className="sidebar-footer-action"
+            onClick={onKillAll}
+          >
+            <Trash2 className="h-4 w-4" />
+          </IconButton>
+        </div>
       </SidebarFooter>
     </Sidebar>
   );
@@ -7371,7 +9067,9 @@ export default function App() {
   const [selectedEndpointIds, setSelectedEndpointIds] = useState(() => new Set());
   const [activeId, setActiveId] = useState(null);
   const [activeCanvasFrameId, setActiveCanvasFrameId] = useState(null);
+  const [activeCanvasTodoId, setActiveCanvasTodoId] = useState(null);
   const [pendingCanvasFrame, setPendingCanvasFrame] = useState(false);
+  const [canvasContextMenu, setCanvasContextMenu] = useState(null);
   const [launchCliProviderId, setLaunchCliProviderId] = useState(defaultCliProviderId);
   const [codexOpen, setCodexOpen] = useState(false);
   const [codexInitialTab, setCodexInitialTab] = useState('preferences');
@@ -7385,6 +9083,7 @@ export default function App() {
   const [imageGenerationOpen, setImageGenerationOpen] = useState(false);
   const [imageGenerationPrompt, setImageGenerationPrompt] = useState('');
   const [imageGenerationResults, setImageGenerationResults] = useState([]);
+  const [imageGenerationHistoryLoaded, setImageGenerationHistoryLoaded] = useState(false);
   const [imageGenerationSubmitting, setImageGenerationSubmitting] = useState(false);
   const [imageGenerationConfig, setImageGenerationConfig] = useState(createEmptyImageApiConfig);
   const [imageGenerationConfigLoading, setImageGenerationConfigLoading] = useState(false);
@@ -7414,6 +9113,10 @@ export default function App() {
   const [commandDockValue, setCommandDockValue] = useState('');
   const [commandDockTargetId, setCommandDockTargetId] = useState('');
   const [commandDockCollapsed, setCommandDockCollapsed] = useState(false);
+  const [commandDockPosition, setCommandDockPosition] = useState(initialSettings.commandDockPosition);
+  const [commandDockHistory, setCommandDockHistory] = useState(initialSettings.commandDockHistory);
+  const [commandDockDispatchMode, setCommandDockDispatchMode] = useState(initialSettings.commandDockDispatchMode);
+  const [commandDockShortcuts, setCommandDockShortcuts] = useState(initialSettings.commandDockShortcuts);
   const [commandDockTaskDispatching, setCommandDockTaskDispatching] = useState(false);
   const [commandDockDispatchSparkles, setCommandDockDispatchSparkles] = useState({});
   const [canvasArrangeAnimations, setCanvasArrangeAnimations] = useState({});
@@ -7421,17 +9124,23 @@ export default function App() {
   const [quickPrompts, setQuickPrompts] = useState([]);
   const [quickPromptsPath, setQuickPromptsPath] = useState('');
   const [quickPromptsLoading, setQuickPromptsLoading] = useState(false);
+  const [commandPresets, setCommandPresets] = useState([]);
+  const [activeCommandPresetId, setActiveCommandPresetId] = useState('');
+  const [commandPresetsPath, setCommandPresetsPath] = useState('');
+  const [commandPresetsLoading, setCommandPresetsLoading] = useState(false);
   const [commandDockSkillMention, setCommandDockSkillMention] = useState(createClosedCommandDockSkillMention);
   const viewportRef = useRef(null);
   const commandDockInputRef = useRef(null);
   const commandDockComposingRef = useRef(false);
-  const commandDockPendingSubmitRef = useRef(false);
+  const commandDockPendingActionRef = useRef('');
+  const commandDockDispatchTasksRef = useRef(null);
   const commandDockDispatchSparkleTimersRef = useRef(new Map());
   const canvasArrangeTimerRef = useRef(null);
   const panelActivityQueueRef = useRef(new Map());
   const panelActivityFlushTimer = useRef(null);
   const sessionReviewRecordsRef = useRef({});
   const sessionReviewFlushTimer = useRef(null);
+  const panelExecutionStatesRef = useRef(new Map());
   const terminalInstances = useRef(new Map());
   const panelsRef = useRef([]);
   const endpointGroupsRef = useRef([]);
@@ -7441,7 +9150,9 @@ export default function App() {
   const canvasScopeKeyRef = useRef(getWorkspaceCanvasKey(initialWorkspace));
   const activeIdRef = useRef(null);
   const activeCanvasFrameIdRef = useRef(null);
+  const activeCanvasTodoIdRef = useRef(null);
   const cwdRef = useRef(cwd);
+  const activeCommandPresetRef = useRef(null);
   const workspaceTreeRequestIdRef = useRef(0);
   const workspaceSkillsRequestIdRef = useRef(0);
   const nextZIndex = useRef(10);
@@ -7449,6 +9160,10 @@ export default function App() {
   const saveSettingsTimer = useRef(null);
   const saveWorkspaceTimer = useRef(null);
   const persistCanvasViewTimer = useRef(null);
+  const imageGenerationHistoryLoadStartedRef = useRef(false);
+  const imageGenerationHistorySkipNextSaveRef = useRef(false);
+  const imageGenerationHistorySaveTimer = useRef(null);
+  const imageGenerationHistorySaveErrorShownRef = useRef(false);
 
   const projectsWithHistory = useMemo(() => {
     if (!historyProject) {
@@ -7470,6 +9185,19 @@ export default function App() {
   );
   const skillsRootPath = currentWorkspacePath;
   const t = useCallback((key, values) => translate(language, key, values), [language]);
+  const activeCommandPreset = useMemo(() => (
+    commandPresets.find((preset) => preset.id === activeCommandPresetId) || null
+  ), [activeCommandPresetId, commandPresets]);
+  const commandDockShortcutLabels = useMemo(() => {
+    const normalizedShortcuts = normalizeCommandDockShortcutSettings(commandDockShortcuts);
+    return {
+      send: getCommandDockShortcutLabel(normalizedShortcuts.sendShortcut),
+      dispatch: getCommandDockShortcutLabel(normalizedShortcuts.dispatchShortcut)
+    };
+  }, [commandDockShortcuts]);
+  const closeCanvasContextMenu = useCallback(() => {
+    setCanvasContextMenu(null);
+  }, []);
   const flashCommandDockDispatchTargets = useCallback((targets) => {
     const ids = [...new Set((Array.isArray(targets) ? targets : [targets])
       .map((target) => String(target?.id || target || '').trim())
@@ -7514,9 +9242,29 @@ export default function App() {
     () => panels.filter((panel) => isPanelVisibleInWorkspace(panel, workspace)),
     [panels, workspace.activeProjectId, workspace.canvasMode]
   );
+  const availableSessionTags = useMemo(
+    () => getAvailableSessionTags(panels),
+    [panels]
+  );
+  const crossProjectSessionCounts = useMemo(
+    () => getSessionReviewStatusCounts(panels, runtimeNow, getPanelExecutionState),
+    [panels, runtimeNow]
+  );
   const visibleCanvasFrames = useMemo(
     () => getWorkspaceCanvasFrames(workspace),
     [workspace]
+  );
+  const visibleCanvasTodos = useMemo(
+    () => getWorkspaceCanvasTodos(workspace),
+    [workspace]
+  );
+  const visiblePinnedCanvasTodos = useMemo(
+    () => visibleCanvasTodos.filter((todo) => todo.pinned),
+    [visibleCanvasTodos]
+  );
+  const visibleUnpinnedCanvasTodos = useMemo(
+    () => visibleCanvasTodos.filter((todo) => !todo.pinned),
+    [visibleCanvasTodos]
   );
   const visiblePanelIds = useMemo(
     () => new Set(visiblePanels.map((panel) => panel.id)),
@@ -7595,6 +9343,7 @@ export default function App() {
 
   useEffect(() => {
     if (panels.length === 0) {
+      panelExecutionStatesRef.current = new Map();
       return undefined;
     }
 
@@ -7628,8 +9377,16 @@ export default function App() {
   }, [activeCanvasFrameId]);
 
   useEffect(() => {
+    activeCanvasTodoIdRef.current = activeCanvasTodoId;
+  }, [activeCanvasTodoId]);
+
+  useEffect(() => {
     cwdRef.current = cwd;
   }, [cwd]);
+
+  useEffect(() => {
+    activeCommandPresetRef.current = activeCommandPreset;
+  }, [activeCommandPreset]);
 
   useEffect(() => {
     if (
@@ -7655,12 +9412,39 @@ export default function App() {
   }, [activeCanvasFrameId, visibleCanvasFrames]);
 
   useEffect(() => {
+    if (activeCanvasTodoId && !visibleCanvasTodos.some((todo) => todo.id === activeCanvasTodoId)) {
+      setActiveCanvasTodoId(null);
+    }
+  }, [activeCanvasTodoId, visibleCanvasTodos]);
+
+  useEffect(() => {
     setPendingCanvasFrame(false);
   }, [workspace.activeProjectId, workspace.canvasMode]);
 
   useEffect(() => {
     setWorkspaceTreeSelectedNode(null);
   }, [currentWorkspacePath]);
+
+  useEffect(() => {
+    if (workspaceTreeOpen) {
+      return;
+    }
+
+    workspaceTreeRequestIdRef.current += 1;
+    setWorkspaceTreeSelectedNode(null);
+    setWorkspaceTreeState((current) => {
+      if (current.status === 'idle' && !current.snapshot && !current.error && !current.requestedPath) {
+        return current;
+      }
+
+      return {
+        status: 'idle',
+        snapshot: null,
+        error: '',
+        requestedPath: ''
+      };
+    });
+  }, [workspaceTreeOpen]);
 
   useEffect(() => {
     const activeGroupIds = new Set(panels.filter((panel) => panel.groupId).map((panel) => panel.groupId));
@@ -7735,6 +9519,91 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToast(''), 3200);
   }, []);
 
+  useEffect(() => {
+    const previousStates = panelExecutionStatesRef.current;
+    const nextStates = new Map();
+    let idlePanel = null;
+
+    panels.forEach((panel) => {
+      const state = getPanelExecutionState(panel, runtimeNow);
+      nextStates.set(panel.id, state);
+      if (!idlePanel && isPanelLive(panel) && state === 'idle' && previousStates.get(panel.id) === 'running') {
+        idlePanel = panel;
+      }
+    });
+
+    panelExecutionStatesRef.current = nextStates;
+
+    if (idlePanel) {
+      showToast(t('sessionIdleToast', {
+        name: idlePanel.title || getPanelFallbackTitle(idlePanel, language)
+      }));
+    }
+  }, [language, panels, runtimeNow, showToast, t]);
+
+  useEffect(() => {
+    if (imageGenerationHistoryLoadStartedRef.current) {
+      return undefined;
+    }
+
+    imageGenerationHistoryLoadStartedRef.current = true;
+    if (typeof bridge.listImageGenerationHistory !== 'function') {
+      setImageGenerationHistoryLoaded(true);
+      return undefined;
+    }
+
+    let canceled = false;
+    bridge.listImageGenerationHistory().then((store) => {
+      if (canceled) {
+        return;
+      }
+
+      imageGenerationHistorySkipNextSaveRef.current = true;
+      setImageGenerationResults(normalizeImageGenerationHistoryItems(store?.items));
+      setImageGenerationHistoryLoaded(true);
+    }).catch((error) => {
+      if (canceled) {
+        return;
+      }
+
+      imageGenerationHistorySkipNextSaveRef.current = true;
+      setImageGenerationHistoryLoaded(true);
+      showToast(t('imageGenerationHistoryLoadFailed', { message: error.message }));
+    });
+
+    return () => {
+      canceled = true;
+    };
+  }, [showToast, t]);
+
+  useEffect(() => {
+    if (!imageGenerationHistoryLoaded || typeof bridge.writeImageGenerationHistory !== 'function') {
+      return undefined;
+    }
+
+    if (imageGenerationHistorySkipNextSaveRef.current) {
+      imageGenerationHistorySkipNextSaveRef.current = false;
+      return undefined;
+    }
+
+    const items = serializeImageGenerationHistoryItems(imageGenerationResults);
+    window.clearTimeout(imageGenerationHistorySaveTimer.current);
+    imageGenerationHistorySaveTimer.current = window.setTimeout(() => {
+      bridge.writeImageGenerationHistory({ items }).then(() => {
+        imageGenerationHistorySaveErrorShownRef.current = false;
+      }).catch((error) => {
+        if (!imageGenerationHistorySaveErrorShownRef.current) {
+          showToast(t('imageGenerationHistorySaveFailed', { message: error.message }));
+        }
+        imageGenerationHistorySaveErrorShownRef.current = true;
+      });
+    }, 250);
+
+    return () => {
+      window.clearTimeout(imageGenerationHistorySaveTimer.current);
+    };
+  }, [imageGenerationHistoryLoaded, imageGenerationResults, showToast, t]);
+
   const loadImageGenerationConfig = useCallback(async () => {
     setImageGenerationConfigLoading(true);
     try {
@@ -7763,6 +9632,23 @@ export default function App() {
     }
   }, []);
 
+  const applyCommandPresetStore = useCallback((store = {}) => {
+    setCommandPresets(Array.isArray(store.presets) ? store.presets : []);
+    setActiveCommandPresetId(store.activeId || '');
+    setCommandPresetsPath(store.path || '');
+    return store;
+  }, []);
+
+  const loadCommandPresets = useCallback(async () => {
+    setCommandPresetsLoading(true);
+    try {
+      const store = await bridge.listCommandPresets();
+      return applyCommandPresetStore(store);
+    } finally {
+      setCommandPresetsLoading(false);
+    }
+  }, [applyCommandPresetStore]);
+
   useEffect(() => {
     loadQuickPrompts().catch((error) => {
       setQuickPrompts([]);
@@ -7770,6 +9656,15 @@ export default function App() {
       showToast(t('quickPromptLoadFailed', { message: error.message }));
     });
   }, [loadQuickPrompts, showToast, t]);
+
+  useEffect(() => {
+    loadCommandPresets().catch((error) => {
+      setCommandPresets([]);
+      setActiveCommandPresetId('');
+      setCommandPresetsPath('');
+      showToast(t('commandPresetLoadFailed', { message: error.message }));
+    });
+  }, [loadCommandPresets, showToast, t]);
 
   useEffect(() => {
     if (!imageGenerationOpen) {
@@ -7863,17 +9758,40 @@ export default function App() {
     workspaceTreeState.status
   ]);
 
-  const copyWorkspaceTree = useCallback(() => {
-    const snapshot = workspaceTreeState.snapshot;
-    if (!snapshot?.text) {
+  const copyWorkspaceTree = useCallback(async () => {
+    const requestedPath = String(
+      workspaceTreeState.snapshot?.cwd || workspaceTreeState.requestedPath || currentWorkspacePath || ''
+    ).trim();
+    if (!requestedPath || workspaceTreeState.status === 'loading') {
       return;
     }
 
-    const copied = writeClipboardText(`${snapshot.cwd}\n\n${snapshot.text}`);
-    if (copied) {
-      showToast(t('workspaceTreeCopied'));
+    try {
+      const snapshot = await bridge.readWorkspaceTree({
+        cwd: requestedPath,
+        includeRoot: false,
+        includeText: true
+      });
+      if (!snapshot?.text) {
+        return;
+      }
+
+      const copied = writeClipboardText(`${snapshot.cwd}\n\n${snapshot.text}`);
+      if (copied) {
+        showToast(t('workspaceTreeCopied'));
+      }
+    } catch (error) {
+      const message = error?.message || String(error);
+      showToast(t('workspaceTreeFailed', { message }));
     }
-  }, [showToast, t, workspaceTreeState.snapshot]);
+  }, [
+    currentWorkspacePath,
+    showToast,
+    t,
+    workspaceTreeState.requestedPath,
+    workspaceTreeState.snapshot?.cwd,
+    workspaceTreeState.status
+  ]);
 
   const selectWorkspaceTreeNode = useCallback((node) => {
     const nextPath = getWorkspaceTreeInsertPath(node, normalizePromptFilePath);
@@ -8120,6 +10038,17 @@ export default function App() {
     window.requestAnimationFrame(() => commandDockInputRef.current?.focus());
   }, []);
 
+  const changeCommandDockDispatchMode = useCallback((mode) => {
+    setCommandDockDispatchMode(normalizeCommandDockDispatchMode(mode));
+    window.requestAnimationFrame(() => commandDockInputRef.current?.focus());
+  }, []);
+
+  const changeCommandDockShortcut = useCallback((action, value) => {
+    setCommandDockShortcuts((current) => (
+      updateCommandDockShortcutSetting(current, action, value)
+    ));
+  }, []);
+
   const expandCommandDock = useCallback(() => {
     if (!commandDockCollapsed) {
       return;
@@ -8167,6 +10096,32 @@ export default function App() {
       commandDockInputRef.current?.setSelectionRange(caret, caret);
     });
   }, [closeCommandDockSkillMention, commandDockValue, resizeCommandDockInput]);
+
+  const rememberCommandDockHistory = useCallback((value) => {
+    setCommandDockHistory((current) => addCommandDockHistoryEntry(current, value));
+  }, []);
+
+  const selectCommandDockHistory = useCallback((value) => {
+    const nextValue = trimTrailingLineBreaks(value);
+    if (!String(nextValue || '').trim()) {
+      return false;
+    }
+
+    closeCommandDockSkillMention();
+    if (commandDockCollapsed) {
+      setCommandDockCollapsed(false);
+    }
+
+    setCommandDockValue(nextValue);
+    window.requestAnimationFrame(() => {
+      const input = commandDockInputRef.current;
+      const caret = String(nextValue).length;
+      resizeCommandDockInput(input);
+      input?.focus();
+      input?.setSelectionRange(caret, caret);
+    });
+    return true;
+  }, [closeCommandDockSkillMention, commandDockCollapsed, resizeCommandDockInput]);
 
   const promptQuickPromptName = useCallback((fallback) => {
     const value = window.prompt(t('quickPromptNamePrompt'), fallback);
@@ -8264,6 +10219,36 @@ export default function App() {
       setQuickPromptsLoading(false);
     }
   }, [quickPromptsLoading, showToast, t]);
+
+  const saveCommandPreset = useCallback(async (payload) => {
+    setCommandPresetsLoading(true);
+    try {
+      const store = await bridge.saveCommandPreset(payload || {});
+      return applyCommandPresetStore(store);
+    } finally {
+      setCommandPresetsLoading(false);
+    }
+  }, [applyCommandPresetStore]);
+
+  const selectCommandPreset = useCallback(async (id) => {
+    setCommandPresetsLoading(true);
+    try {
+      const store = await bridge.selectCommandPreset(id);
+      return applyCommandPresetStore(store);
+    } finally {
+      setCommandPresetsLoading(false);
+    }
+  }, [applyCommandPresetStore]);
+
+  const deleteCommandPreset = useCallback(async (id) => {
+    setCommandPresetsLoading(true);
+    try {
+      const store = await bridge.deleteCommandPreset(id);
+      return applyCommandPresetStore(store);
+    } finally {
+      setCommandPresetsLoading(false);
+    }
+  }, [applyCommandPresetStore]);
 
   const insertCommandDockSkillMention = useCallback((item) => {
     const insertPath = String(item?.insertPath || '').trim();
@@ -8368,6 +10353,37 @@ export default function App() {
     }
   }, [insertTextIntoCommandDock, showToast, t]);
 
+  const saveImageGenerationReferenceImages = useCallback(async (files) => {
+    const imageFiles = Array.isArray(files) ? files.filter((file) => isImageFile(file)) : [];
+    if (imageFiles.length === 0) {
+      return [];
+    }
+
+    try {
+      const references = [];
+      for (const file of imageFiles) {
+        const arrayBuffer = await file.arrayBuffer();
+        const savedImage = await bridge.saveCommandDockImage({
+          fileName: file.name,
+          mimeType: file.type,
+          bytes: new Uint8Array(arrayBuffer)
+        });
+        const reference = createImageGenerationReferenceItem(savedImage);
+        if (reference) {
+          references.push(reference);
+        }
+      }
+
+      if (references.length > 0) {
+        showToast(t('imageGenerationReferenceAdded', { count: references.length }));
+      }
+      return references;
+    } catch (error) {
+      showToast(t('imageGenerationReferenceSaveFailed', { message: error.message }));
+      return [];
+    }
+  }, [showToast, t]);
+
   const handleCommandDockPaste = useCallback((event) => {
     const imageFiles = extractImageFilesFromDataTransfer(event.clipboardData);
     if (imageFiles.length === 0) {
@@ -8417,6 +10433,9 @@ export default function App() {
     const size = String(options.size || '').trim();
     const count = Number.parseInt(options.n, 10);
     const n = Number.isFinite(count) ? Math.min(4, Math.max(1, count)) : undefined;
+    const referenceImageUrls = Array.isArray(options.referenceImageUrls)
+      ? options.referenceImageUrls.map((url) => String(url || '').trim()).filter(Boolean)
+      : [];
     const taskId = createLocalId('image-task');
     const pendingTask = createImageGenerationTaskItem({
       id: taskId,
@@ -8424,6 +10443,7 @@ export default function App() {
       model,
       n,
       size,
+      referenceImageCount: referenceImageUrls.length,
       status: 'submitting',
       createdAt: Date.now()
     });
@@ -8436,7 +10456,8 @@ export default function App() {
         clientTaskId: taskId,
         ...(model ? { model } : {}),
         ...(size ? { size } : {}),
-        ...(n ? { n } : {})
+        ...(n ? { n } : {}),
+        ...(referenceImageUrls.length > 0 ? { referenceImageUrls } : {})
       });
       setImageGenerationResults((current) => current.map((item) => (
         item.id === taskId
@@ -8556,7 +10577,12 @@ export default function App() {
 
   const clearImageGenerationResults = useCallback(() => {
     setImageGenerationResults([]);
-  }, []);
+    if (typeof bridge.clearImageGenerationHistory === 'function') {
+      bridge.clearImageGenerationHistory().catch((error) => {
+        showToast(t('imageGenerationHistorySaveFailed', { message: error.message }));
+      });
+    }
+  }, [showToast, t]);
 
   const submitTerminalTextPayload = useCallback((panelId, value) => {
     const text = String(value || '');
@@ -8580,17 +10606,125 @@ export default function App() {
     submitTerminalTextPayload(panelId, value)
   ), [submitTerminalTextPayload]);
 
+  const getCommandDockTargetRect = useCallback((panel) => {
+    if (!panel) {
+      return null;
+    }
+
+    if (panel.minimized) {
+      const group = panel.groupId
+        ? endpointGroupsRef.current.find((item) => item.id === panel.groupId)
+        : null;
+
+      if (group && group.canvasKey === getWorkspaceCanvasKey(workspaceRef.current)) {
+        const groupX = Number.isFinite(group.x) ? group.x : 0;
+        const groupY = Number.isFinite(group.y) ? group.y : 0;
+        const groupWidth = Number.isFinite(group.width) ? group.width : endpointWidth + 28;
+        const members = panelsRef.current.filter((item) => (
+          item.groupId === group.id &&
+          item.minimized &&
+          isPanelVisibleInWorkspace(item, workspaceRef.current)
+        ));
+        const index = Math.max(0, members.findIndex((item) => item.id === panel.id));
+
+        return {
+          x: groupX + 14,
+          y: groupY + 58 + index * 42,
+          width: Math.max(groupWidth - 28, endpointWidth),
+          height: 36
+        };
+      }
+
+      return {
+        x: Number.isFinite(panel.x) ? panel.x : 0,
+        y: Number.isFinite(panel.y) ? panel.y : 0,
+        width: endpointWidth,
+        height: endpointHeight
+      };
+    }
+
+    return {
+      x: Number.isFinite(panel.x) ? panel.x : 0,
+      y: Number.isFinite(panel.y) ? panel.y : 0,
+      width: Number.isFinite(panel.width) ? panel.width : 640,
+      height: Number.isFinite(panel.height) ? panel.height : 380
+    };
+  }, []);
+
+  const centerCanvasOnCommandDockTarget = useCallback((target) => {
+    const panel = typeof target === 'string'
+      ? panelsRef.current.find((item) => item.id === target)
+      : target;
+
+    if (!panel || !isPanelVisibleInWorkspace(panel, workspaceRef.current)) {
+      return false;
+    }
+
+    const targetRect = getCommandDockTargetRect(panel);
+    const viewportRect = viewportRef.current?.getBoundingClientRect();
+    if (!targetRect || !viewportRect) {
+      return false;
+    }
+
+    const targetCenter = {
+      x: targetRect.x + targetRect.width / 2,
+      y: targetRect.y + targetRect.height / 2
+    };
+
+    setView((current) => {
+      const scale = Number.isFinite(current?.scale) ? clamp(current.scale, 0.35, 2.5) : 1;
+      const currentX = Number.isFinite(current?.x) ? current.x : 0;
+      const currentY = Number.isFinite(current?.y) ? current.y : 0;
+      const nextView = {
+        scale,
+        x: Math.round(viewportRect.width / 2 - targetCenter.x * scale),
+        y: Math.round(viewportRect.height / 2 - targetCenter.y * scale)
+      };
+
+      return current && currentX === nextView.x && currentY === nextView.y && scale === nextView.scale
+        ? current
+        : nextView;
+    });
+
+    nextZIndex.current += 1;
+    setActiveId(panel.id);
+    setActiveCanvasFrameId(null);
+    setActiveCanvasTodoId(null);
+
+    const targetGroup = panel.minimized && panel.groupId
+      ? endpointGroupsRef.current.find((group) => (
+        group.id === panel.groupId &&
+        group.canvasKey === getWorkspaceCanvasKey(workspaceRef.current)
+      ))
+      : null;
+
+    if (targetGroup) {
+      setEndpointGroups((current) => current.map((group) => (
+        group.id === targetGroup.id ? { ...group, zIndex: nextZIndex.current } : group
+      )));
+    } else {
+      setPanels((current) => current.map((item) => (
+        item.id === panel.id ? { ...item, zIndex: nextZIndex.current } : item
+      )));
+    }
+
+    return true;
+  }, [getCommandDockTargetRect]);
+
   const sendCommandDockInput = useCallback((options = {}) => {
     const targetPanel = commandDockPanels.find((panel) => panel.id === commandDockTargetId);
     if (!canPanelReceiveInput(targetPanel)) {
       return false;
     }
 
-    const hasExplicitValue = Object.prototype.hasOwnProperty.call(options, 'value');
+    const hasExplicitValue = options
+      && typeof options === 'object'
+      && !options.nativeEvent
+      && Object.prototype.hasOwnProperty.call(options, 'value');
     const rawValue = hasExplicitValue
       ? options.value
       : commandDockInputRef.current?.value ?? commandDockValue;
-    const shouldTrimTrailingBreaks = options.trimTrailingLineBreaks !== false;
+    const shouldTrimTrailingBreaks = !options || options.trimTrailingLineBreaks !== false;
     const nextValue = shouldTrimTrailingBreaks ? trimTrailingLineBreaks(rawValue) : rawValue;
     if (!String(nextValue || '').trim()) {
       return false;
@@ -8598,6 +10732,9 @@ export default function App() {
 
     touchPanelActivity(targetPanel.id);
     submitCommandDockPayload(targetPanel.id, nextValue);
+    flashCommandDockDispatchTargets(targetPanel.id);
+    centerCanvasOnCommandDockTarget(targetPanel);
+    rememberCommandDockHistory(nextValue);
     setCommandDockValue('');
     closeCommandDockSkillMention();
     showToast(t('floatingComposerSent', { name: targetPanel.title }));
@@ -8606,7 +10743,7 @@ export default function App() {
       commandDockInputRef.current?.focus();
     });
     return true;
-  }, [closeCommandDockSkillMention, commandDockPanels, commandDockTargetId, commandDockValue, resizeCommandDockInput, showToast, submitCommandDockPayload, t, touchPanelActivity]);
+  }, [centerCanvasOnCommandDockTarget, closeCommandDockSkillMention, commandDockPanels, commandDockTargetId, commandDockValue, flashCommandDockDispatchTargets, rememberCommandDockHistory, resizeCommandDockInput, showToast, submitCommandDockPayload, t, touchPanelActivity]);
 
   const handleCommandDockCompositionStart = useCallback(() => {
     commandDockComposingRef.current = true;
@@ -8614,18 +10751,23 @@ export default function App() {
 
   const handleCommandDockCompositionEnd = useCallback((event) => {
     commandDockComposingRef.current = false;
-    if (!commandDockPendingSubmitRef.current) {
+    const pendingAction = commandDockPendingActionRef.current;
+    if (!pendingAction) {
       updateCommandDockSkillMention(event.target);
       return;
     }
 
-    commandDockPendingSubmitRef.current = false;
+    commandDockPendingActionRef.current = '';
     const committedValue = trimTrailingLineBreaks(commandDockInputRef.current?.value || '');
     setCommandDockValue(committedValue);
     window.requestAnimationFrame(() => {
-      sendCommandDockInput({
-        value: committedValue
-      });
+      if (pendingAction === 'dispatch') {
+        commandDockDispatchTasksRef.current?.({ value: committedValue });
+      } else {
+        sendCommandDockInput({
+          value: committedValue
+        });
+      }
     });
   }, [sendCommandDockInput, updateCommandDockSkillMention]);
 
@@ -8665,8 +10807,7 @@ export default function App() {
       }
 
       if (
-        (event.key === 'Tab' || isCommandDockSubmitKey(event)) &&
-        !event.shiftKey &&
+        (event.key === 'Tab' || isCommandDockShortcutMatch(event, 'enter')) &&
         commandDockSkillMentionItems.length > 0
       ) {
         event.preventDefault();
@@ -8678,20 +10819,30 @@ export default function App() {
       }
     }
 
-    if (!isCommandDockSubmitKey(event) || event.shiftKey) {
+    const normalizedShortcuts = normalizeCommandDockShortcutSettings(commandDockShortcuts);
+    const shortcutAction = isCommandDockShortcutMatch(event, normalizedShortcuts.sendShortcut)
+      ? 'send'
+      : isCommandDockShortcutMatch(event, normalizedShortcuts.dispatchShortcut) ? 'dispatch' : '';
+
+    if (!shortcutAction) {
       return;
     }
 
     if (isComposing) {
-      commandDockPendingSubmitRef.current = true;
+      commandDockPendingActionRef.current = shortcutAction;
       return;
     }
 
-    commandDockPendingSubmitRef.current = false;
+    commandDockPendingActionRef.current = '';
     event.preventDefault();
-    sendCommandDockInput();
+    if (shortcutAction === 'dispatch') {
+      commandDockDispatchTasksRef.current?.();
+    } else {
+      sendCommandDockInput();
+    }
   }, [
     closeCommandDockSkillMention,
+    commandDockShortcuts,
     commandDockSkillMention.open,
     commandDockSkillMention.selectedIndex,
     commandDockSkillMentionItems,
@@ -8737,6 +10888,14 @@ export default function App() {
       const currentFrames = getWorkspaceCanvasFrames(currentWorkspace, canvasKey);
       const nextFrames = updater(currentFrames);
       return withWorkspaceCanvasFrames(currentWorkspace, canvasKey, nextFrames);
+    });
+  }, [commitWorkspace]);
+
+  const updateCanvasTodosForKey = useCallback((canvasKey, updater) => {
+    commitWorkspace((currentWorkspace) => {
+      const currentTodos = getWorkspaceCanvasTodos(currentWorkspace, canvasKey);
+      const nextTodos = updater(currentTodos);
+      return withWorkspaceCanvasTodos(currentWorkspace, canvasKey, nextTodos);
     });
   }, [commitWorkspace]);
 
@@ -8790,9 +10949,18 @@ export default function App() {
   useEffect(() => {
     window.clearTimeout(saveSettingsTimer.current);
     saveSettingsTimer.current = window.setTimeout(() => {
-      localStorage.setItem(settingsKey, JSON.stringify({ cwd, theme, language, view }));
+      localStorage.setItem(settingsKey, JSON.stringify({
+        cwd,
+        theme,
+        language,
+        view,
+        commandDockDispatchMode,
+        commandDockShortcuts: normalizeCommandDockShortcutSettings(commandDockShortcuts),
+        commandDockPosition,
+        commandDockHistory
+      }));
     }, 180);
-  }, [cwd, language, theme, view]);
+  }, [commandDockDispatchMode, commandDockHistory, commandDockPosition, commandDockShortcuts, cwd, language, theme, view]);
 
   useEffect(() => () => window.clearTimeout(saveSettingsTimer.current), []);
 
@@ -8981,6 +11149,7 @@ export default function App() {
     nextZIndex.current += 1;
     setActiveId(id);
     setActiveCanvasFrameId(null);
+    setActiveCanvasTodoId(null);
     setPanels((current) => current.map((panel) => (
       panel.id === id ? { ...panel, zIndex: nextZIndex.current } : panel
     )));
@@ -8992,6 +11161,7 @@ export default function App() {
   const activateCanvasFrame = useCallback((id) => {
     const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
     setActiveCanvasFrameId(id);
+    setActiveCanvasTodoId(null);
     setActiveId(null);
     updateCanvasFramesForKey(canvasKey, (currentFrames) => {
       const index = currentFrames.findIndex((frame) => frame.id === id);
@@ -9009,6 +11179,7 @@ export default function App() {
   const updateCanvasFrame = useCallback((id, patch) => {
     const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
     setActiveCanvasFrameId(id);
+    setActiveCanvasTodoId(null);
     updateCanvasFramesForKey(canvasKey, (currentFrames) => currentFrames.map((frame) => (
       frame.id === id ? normalizeCanvasFrame({ ...frame, ...patch }) : frame
     )));
@@ -9024,6 +11195,152 @@ export default function App() {
     setActiveCanvasFrameId((current) => (current === id ? null : current));
     updateCanvasFramesForKey(canvasKey, (currentFrames) => currentFrames.filter((frame) => frame.id !== id));
   }, [updateCanvasFramesForKey]);
+
+  const createCanvasFrameAtPoint = useCallback((point) => {
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    const frameId = createLocalId('canvas-frame');
+    const frame = normalizeCanvasFrame({
+      id: frameId,
+      title: t('canvasFrameDefaultTitle'),
+      x: Math.round(point?.x || 0),
+      y: Math.round(point?.y || 0),
+      width: canvasFrameDefaultWidth,
+      height: canvasFrameDefaultHeight
+    });
+
+    setPendingCanvasFrame(false);
+    setActiveId(null);
+    setActiveCanvasTodoId(null);
+    setActiveCanvasFrameId(frameId);
+    updateCanvasFramesForKey(canvasKey, (currentFrames) => [...currentFrames, frame]);
+  }, [t, updateCanvasFramesForKey]);
+
+  const activateCanvasTodo = useCallback((id) => {
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    setActiveCanvasTodoId(id);
+    setActiveCanvasFrameId(null);
+    setActiveId(null);
+    updateCanvasTodosForKey(canvasKey, (currentTodos) => {
+      const index = currentTodos.findIndex((todo) => todo.id === id);
+      if (index < 0 || index === currentTodos.length - 1) {
+        return currentTodos;
+      }
+
+      const nextTodos = [...currentTodos];
+      const [todo] = nextTodos.splice(index, 1);
+      nextTodos.push(todo);
+      return nextTodos;
+    });
+  }, [updateCanvasTodosForKey]);
+
+  const updateCanvasTodo = useCallback((id, patch) => {
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    setActiveCanvasTodoId(id);
+    setActiveCanvasFrameId(null);
+    updateCanvasTodosForKey(canvasKey, (currentTodos) => currentTodos.map((todo) => (
+      todo.id === id ? normalizeCanvasTodo({ ...todo, ...patch }) : todo
+    )));
+  }, [updateCanvasTodosForKey]);
+
+  const updateCanvasTodoItems = useCallback((id, updater) => {
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    setActiveCanvasTodoId(id);
+    setActiveCanvasFrameId(null);
+    updateCanvasTodosForKey(canvasKey, (currentTodos) => currentTodos.map((todo) => {
+      if (todo.id !== id) {
+        return todo;
+      }
+
+      const nextItems = typeof updater === 'function' ? updater(todo.items || []) : todo.items || [];
+      return normalizeCanvasTodo({
+        ...todo,
+        items: nextItems
+      });
+    }));
+  }, [updateCanvasTodosForKey]);
+
+  const addCanvasTodo = useCallback(() => {
+    const center = viewportCenterOnCanvas();
+    const todoId = createLocalId('canvas-todo');
+    const todo = {
+      id: todoId,
+      title: t('canvasTodoDefaultTitle'),
+      pinned: true,
+      x: Math.round(center.x - canvasTodoDefaultWidth / 2),
+      y: Math.round(center.y - canvasTodoDefaultHeight / 2),
+      width: canvasTodoDefaultWidth,
+      height: canvasTodoDefaultHeight,
+      items: []
+    };
+
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    setActiveCanvasTodoId(todoId);
+    setActiveCanvasFrameId(null);
+    setActiveId(null);
+    updateCanvasTodosForKey(canvasKey, (currentTodos) => [...currentTodos, todo]);
+    showToast(t('canvasTodoAdded'));
+  }, [showToast, t, updateCanvasTodosForKey, viewportCenterOnCanvas]);
+
+  const commitCanvasTodoTitle = useCallback((id, title) => {
+    const nextTitle = String(title || '').trim() || t('canvasTodoDefaultTitle');
+    updateCanvasTodo(id, { title: nextTitle });
+  }, [t, updateCanvasTodo]);
+
+  const toggleCanvasTodoPinned = useCallback((id) => {
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    setActiveCanvasTodoId(id);
+    setActiveCanvasFrameId(null);
+    updateCanvasTodosForKey(canvasKey, (currentTodos) => currentTodos.map((todo) => (
+      todo.id === id ? normalizeCanvasTodo({ ...todo, pinned: !todo.pinned }) : todo
+    )));
+  }, [updateCanvasTodosForKey]);
+
+  const deleteCanvasTodo = useCallback((id) => {
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    setActiveCanvasTodoId((current) => (current === id ? null : current));
+    updateCanvasTodosForKey(canvasKey, (currentTodos) => currentTodos.filter((todo) => todo.id !== id));
+  }, [updateCanvasTodosForKey]);
+
+  const addCanvasTodoItem = useCallback((todoId, text) => {
+    const trimmedText = String(text || '').trim();
+    if (!trimmedText) {
+      return;
+    }
+
+    const now = Date.now();
+    updateCanvasTodoItems(todoId, (items) => [
+      ...items,
+      {
+        id: createLocalId('canvas-todo-item'),
+        text: trimmedText,
+        done: false,
+        createdAt: now,
+        updatedAt: now
+      }
+    ]);
+  }, [updateCanvasTodoItems]);
+
+  const updateCanvasTodoItemDone = useCallback((todoId, itemId, done) => {
+    const now = Date.now();
+    updateCanvasTodoItems(todoId, (items) => items.map((item) => (
+      item.id === itemId
+        ? { ...item, done: Boolean(done), updatedAt: now }
+        : item
+    )));
+  }, [updateCanvasTodoItems]);
+
+  const updateCanvasTodoItemText = useCallback((todoId, itemId, text) => {
+    const now = Date.now();
+    updateCanvasTodoItems(todoId, (items) => items.map((item) => (
+      item.id === itemId
+        ? { ...item, text: String(text || ''), updatedAt: now }
+        : item
+    )));
+  }, [updateCanvasTodoItems]);
+
+  const removeCanvasTodoItem = useCallback((todoId, itemId) => {
+    updateCanvasTodoItems(todoId, (items) => items.filter((item) => item.id !== itemId));
+  }, [updateCanvasTodoItems]);
 
   const createTerminal = useCallback(async (slot = {}) => {
     const center = viewportCenterOnCanvas();
@@ -9078,11 +11395,14 @@ export default function App() {
       zIndex: nextZIndex.current,
       minimized: false,
       groupId: null,
-      status: 'running'
+      status: 'running',
+      tag: normalizeSessionTag(slot.tag)
     };
 
     setPanels((current) => [...current, panel]);
     setActiveId(meta.id);
+    setActiveCanvasFrameId(null);
+    setActiveCanvasTodoId(null);
     window.requestAnimationFrame(() => focusTerminalInstance(meta.id));
     return panel;
   }, [focusTerminalInstance, getVisiblePanels, language, viewportCenterOnCanvas]);
@@ -9156,12 +11476,19 @@ export default function App() {
     touchPanelActivity
   ]);
 
-  const dispatchCommandDockTasks = useCallback(() => {
+  const dispatchCommandDockTasks = useCallback((options = {}) => {
     if (commandDockTaskDispatching) {
       return false;
     }
 
-    const tasks = parseCommandDockDispatchTasks(commandDockInputRef.current?.value ?? commandDockValue);
+    const hasExplicitValue = options
+      && typeof options === 'object'
+      && !options.nativeEvent
+      && Object.prototype.hasOwnProperty.call(options, 'value');
+    const rawTasksValue = trimTrailingLineBreaks(
+      hasExplicitValue ? options.value : commandDockInputRef.current?.value ?? commandDockValue
+    );
+    const tasks = parseCommandDockDispatchTasks(rawTasksValue);
     if (tasks.length === 0) {
       showToast(t('floatingComposerDispatchEmpty'));
       return false;
@@ -9179,10 +11506,13 @@ export default function App() {
         const cliProvider = resolveCliProvider(cliProviderId);
         const launchContext = getCurrentSessionLaunchContext();
         const baseSlot = getCenteredTerminalSlot(workspaceRef.current, 700, 420);
-        const idlePanels = commandDockPanels.filter((panel) => (
-          canPanelReceiveInput(panel) &&
-          getPanelExecutionState(panel, runtimeNow) === 'idle'
-        ));
+        const shouldReuseDispatchTargets = commandDockDispatchMode === 'reuse';
+        const idlePanels = shouldReuseDispatchTargets
+          ? commandDockPanels.filter((panel) => (
+            canPanelReceiveInput(panel) &&
+            getPanelExecutionState(panel, runtimeNow) === 'idle'
+          ))
+          : [];
         let reused = 0;
         let created = 0;
         const dispatchTargets = [];
@@ -9203,7 +11533,7 @@ export default function App() {
         };
 
         for (const task of tasks) {
-          const idlePanel = idlePanels.shift();
+          const idlePanel = shouldReuseDispatchTargets ? idlePanels.shift() : null;
           if (idlePanel) {
             dispatchTargets.push(idlePanel);
             submitTaskToPanel(idlePanel, task);
@@ -9227,13 +11557,18 @@ export default function App() {
           submitTaskToPanel(newPanel, task, commandDockTaskSubmitDelayMs);
         }
 
+        centerCanvasOnCommandDockTarget(dispatchTargets[0]);
+        rememberCommandDockHistory(rawTasksValue);
         setCommandDockValue('');
-        showToast(t('floatingComposerDispatchDone', {
+        const dispatchDoneMessage = t('floatingComposerDispatchDone', {
           count: tasks.length,
           reused,
           created,
           targets: formatDispatchTargetList(dispatchTargets, language)
-        }));
+        });
+        showToast(reused > 0
+          ? `${dispatchDoneMessage} ${t('floatingComposerDispatchReuseEnterHint')}`
+          : dispatchDoneMessage);
         window.requestAnimationFrame(() => {
           resizeCommandDockInput();
           commandDockInputRef.current?.focus();
@@ -9251,6 +11586,8 @@ export default function App() {
     return true;
   }, [
     closeCommandDockSkillMention,
+    centerCanvasOnCommandDockTarget,
+    commandDockDispatchMode,
     commandDockPanels,
     commandDockTargetId,
     commandDockTaskDispatching,
@@ -9261,6 +11598,7 @@ export default function App() {
     getCurrentSessionLaunchContext,
     language,
     launchCliProviderId,
+    rememberCommandDockHistory,
     resizeCommandDockInput,
     runtimeNow,
     showToast,
@@ -9268,6 +11606,7 @@ export default function App() {
     t,
     touchPanelActivity
   ]);
+  commandDockDispatchTasksRef.current = dispatchCommandDockTasks;
 
   const createWorkspaceCommandLineFromConfig = useCallback((config = {}) => {
     const run = async () => {
@@ -9275,25 +11614,37 @@ export default function App() {
       const nextCwd = String(config.cwd || '').trim() || launchContext.cwd;
       const cliProvider = resolveCliProvider(config.cliProviderId || launchCliProviderId);
       const cliProviderId = cliProvider?.id || defaultCliProviderId;
-
-      setLaunchCliProviderId(cliProviderId);
-
-      await createTerminal({
+      const hasExplicitInitialCommand = Object.prototype.hasOwnProperty.call(config, 'initialCommand');
+      const presetInitialCommand = cliProviderId === 'shell'
+        ? normalizeCommandPresetCommandInput(activeCommandPresetRef.current?.command)
+        : '';
+      const terminalSlot = {
         projectId: Object.prototype.hasOwnProperty.call(config, 'projectId')
           ? config.projectId
           : launchContext.projectId,
         cwd: nextCwd,
         cliProviderId,
         targetType: 'directory'
-      });
+      };
+
+      if (hasExplicitInitialCommand) {
+        terminalSlot.initialCommand = normalizeCommandPresetCommandInput(config.initialCommand);
+      } else if (presetInitialCommand) {
+        terminalSlot.initialCommand = presetInitialCommand;
+      }
+
+      setLaunchCliProviderId(cliProviderId);
+
+      await createTerminal(terminalSlot);
     };
 
     run().catch((error) => showToast(error.message));
   }, [createTerminal, getCurrentSessionLaunchContext, launchCliProviderId, showToast]);
 
   const createWorkspaceCommandLine = useCallback((cliProviderId) => {
+    const nextCliProviderId = typeof cliProviderId === 'string' ? cliProviderId : 'shell';
     createWorkspaceCommandLineFromConfig(
-      typeof cliProviderId === 'string' ? { cliProviderId } : {}
+      { cliProviderId: nextCliProviderId }
     );
   }, [createWorkspaceCommandLineFromConfig]);
 
@@ -9336,7 +11687,8 @@ export default function App() {
       x: panel.x,
       y: panel.y,
       width: panel.width,
-      height: panel.height
+      height: panel.height,
+      tag: getPanelSessionTag(panel)
     });
   }, [closeTerminal, createTerminal]);
 
@@ -9345,6 +11697,20 @@ export default function App() {
       panel.id === id ? { ...panel, ...patch } : panel
     )));
   }, []);
+
+  const updateTerminalMeta = useCallback((id, patch) => {
+    if (typeof bridge.updateTerminalMeta !== 'function') {
+      return;
+    }
+
+    bridge.updateTerminalMeta(id, patch).catch(() => {
+      // The renderer state is authoritative for live UI; stale backend sessions are ignored.
+    });
+  }, []);
+
+  const changePanelTag = useCallback((id, tag) => {
+    updatePanel(id, { tag: normalizeSessionTag(tag) });
+  }, [updatePanel]);
 
   const toggleEndpointSelection = useCallback((id) => {
     const panel = panelsRef.current.find((item) => item.id === id);
@@ -9391,6 +11757,8 @@ export default function App() {
 
     nextZIndex.current += 1;
     setActiveId(id);
+    setActiveCanvasFrameId(null);
+    setActiveCanvasTodoId(null);
     setPanels((current) => current.map((panel) => (
       panel.id === id
         ? {
@@ -9421,11 +11789,34 @@ export default function App() {
     const panel = panelsRef.current.find((item) => item.id === id);
     const nextTitle = title.trim() || getPanelFallbackTitle(panel, language);
     updatePanel(id, { title: nextTitle });
-  }, [language, updatePanel]);
+    updateTerminalMeta(id, { title: nextTitle });
+  }, [language, updatePanel, updateTerminalMeta]);
+
+  const switchPanelModel = useCallback((id, value) => {
+    const model = String(value || '').trim();
+    if (!model) {
+      showToast(t('modelRequired'));
+      return;
+    }
+
+    const panel = panelsRef.current.find((item) => item.id === id);
+    const command = getPanelModelSwitchCommand(panel, model);
+    if (!panel || !command || !canPanelReceiveInput(panel)) {
+      showToast(t('modelSwitchUnavailable'));
+      return;
+    }
+
+    bridge.writeTerminal(id, command);
+    touchPanelActivity(id);
+    updatePanel(id, { codexModel: model });
+    updateTerminalMeta(id, { codexModel: model });
+    showToast(t('modelSwitched', { model }));
+  }, [showToast, t, touchPanelActivity, updatePanel, updateTerminalMeta]);
 
   const activateEndpointGroup = useCallback((id) => {
     nextZIndex.current += 1;
     setActiveCanvasFrameId(null);
+    setActiveCanvasTodoId(null);
     setEndpointGroups((current) => current.map((group) => (
       group.id === id ? { ...group, zIndex: nextZIndex.current } : group
     )));
@@ -9754,6 +12145,87 @@ export default function App() {
     })));
   }, [getVisiblePanels, startCanvasArrangeAnimation, viewportCenterOnCanvas]);
 
+  const arrangeByTag = useCallback(() => {
+    const records = getVisiblePanels()
+      .filter((panel) => !(panel.groupId && panel.minimized));
+    if (records.length === 0) {
+      return;
+    }
+
+    if (!records.some((panel) => getPanelSessionTag(panel))) {
+      showToast(t('arrangeByTagEmpty'));
+    }
+
+    const locale = language === 'en' ? 'en-US' : 'zh-CN';
+    const groups = new Map();
+    records.forEach((panel) => {
+      const tag = getPanelSessionTag(panel);
+      const key = tag || '';
+      groups.set(key, [...(groups.get(key) || []), panel]);
+    });
+
+    const orderedTags = [...groups.keys()].sort((left, right) => {
+      const rankDelta = getSessionTagOrder(left) - getSessionTagOrder(right);
+      if (rankDelta !== 0) {
+        return rankDelta;
+      }
+
+      return getSessionTagLabel(left, t).localeCompare(getSessionTagLabel(right, t), locale);
+    });
+
+    const width = 620;
+    const height = 360;
+    const gap = 28;
+    const sectionGap = 68;
+    const sections = orderedTags.map((tag) => {
+      const items = [...(groups.get(tag) || [])].sort((left, right) => (
+        (left.createdAt || 0) - (right.createdAt || 0) ||
+        String(left.title || '').localeCompare(String(right.title || ''), locale)
+      ));
+      const columns = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(items.length))));
+      const rows = Math.ceil(items.length / columns);
+      return {
+        tag,
+        items,
+        columns,
+        rows,
+        width: columns * width + (columns - 1) * gap,
+        height: rows * height + (rows - 1) * gap
+      };
+    });
+    const totalWidth = sections.reduce((sum, section, index) => (
+      sum + section.width + (index > 0 ? sectionGap : 0)
+    ), 0);
+    const totalHeight = Math.max(...sections.map((section) => section.height), height);
+    const center = viewportCenterOnCanvas();
+    const startX = Math.round(center.x - totalWidth / 2);
+    const startY = Math.round(center.y - totalHeight / 2);
+    const positions = new Map();
+    let cursorX = startX;
+
+    sections.forEach((section, sectionIndex) => {
+      if (sectionIndex > 0) {
+        cursorX += sectionGap;
+      }
+
+      section.items.forEach((panel, index) => {
+        positions.set(panel.id, {
+          x: cursorX + (index % section.columns) * (width + gap),
+          y: startY + Math.floor(index / section.columns) * (height + gap),
+          width,
+          height
+        });
+      });
+      cursorX += section.width;
+    });
+
+    startCanvasArrangeAnimation(records, positions);
+    setPanels((current) => current.map((panel) => ({
+      ...panel,
+      ...(positions.get(panel.id) || {})
+    })));
+  }, [getVisiblePanels, language, showToast, startCanvasArrangeAnimation, t, viewportCenterOnCanvas]);
+
   const createSessionGrid = useCallback(async (count = 4, config = {}) => {
     const sessionCount = parseGridSessionCount(count);
     if (!sessionCount) {
@@ -10062,10 +12534,12 @@ export default function App() {
     commitWorkspace((workspaceWithView) => {
       const { [projectId]: _removedView, ...projectViews } = workspaceWithView.projectViews;
       const { [projectId]: _removedFrames, ...canvasFrames } = workspaceWithView.canvasFrames || {};
+      const { [projectId]: _removedTodos, ...canvasTodos } = workspaceWithView.canvasTodos || {};
       return {
         ...workspaceWithView,
         activeProjectId: nextActiveProject?.id || null,
         canvasFrames,
+        canvasTodos,
         projectViews,
         projects
       };
@@ -10102,11 +12576,46 @@ export default function App() {
     zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, nextScale);
   }, [getViewportRect, zoomAt]);
 
+  const openCanvasContextMenu = useCallback((event) => {
+    if (
+      closestElement(event.target, '.terminal-panel') ||
+      closestElement(event.target, '.endpoint-group') ||
+      closestElement(event.target, '.canvas-frame-header') ||
+      closestElement(event.target, '.canvas-todo-panel') ||
+      closestElement(event.target, '.canvas-tools') ||
+      closestElement(event.target, '.canvas-arrange-tool') ||
+      closestElement(event.target, '.canvas-context-menu')
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const rect = getViewportRect();
+    const rawLeft = event.clientX - rect.left;
+    const rawTop = event.clientY - rect.top;
+    const maxLeft = Math.max(8, rect.width - canvasContextMenuWidth - 8);
+    const maxTop = Math.max(8, rect.height - canvasContextMenuHeight - 8);
+
+    setPendingCanvasFrame(false);
+    setCanvasContextMenu({
+      left: Math.round(clamp(rawLeft, 8, maxLeft)),
+      top: Math.round(clamp(rawTop, 8, maxTop)),
+      canvasPoint: clientPointToCanvas(event.clientX, event.clientY)
+    });
+  }, [clientPointToCanvas, getViewportRect]);
+
   const startViewportPan = (event) => {
+    if (event.button === 0) {
+      closeCanvasContextMenu();
+    }
+
     if (
       event.button !== 0 ||
       closestElement(event.target, '.terminal-panel') ||
-      closestElement(event.target, '.endpoint-group')
+      closestElement(event.target, '.endpoint-group') ||
+      closestElement(event.target, '.canvas-todo-panel')
     ) {
       return;
     }
@@ -10114,6 +12623,7 @@ export default function App() {
     if (pendingCanvasFrame) {
       event.preventDefault();
       setActiveId(null);
+      setActiveCanvasTodoId(null);
 
       const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
       const anchor = clientPointToCanvas(event.clientX, event.clientY);
@@ -10146,6 +12656,7 @@ export default function App() {
     event.preventDefault();
     setPanning(true);
     setActiveCanvasFrameId(null);
+    setActiveCanvasTodoId(null);
     const start = {
       clientX: event.clientX,
       clientY: event.clientY,
@@ -10165,9 +12676,12 @@ export default function App() {
   };
 
   const handleWheel = (event) => {
+    closeCanvasContextMenu();
+
     if (
       closestElement(event.target, '.terminal-panel') ||
-      closestElement(event.target, '.endpoint-group')
+      closestElement(event.target, '.endpoint-group') ||
+      closestElement(event.target, '.canvas-todo-panel')
     ) {
       return;
     }
@@ -10206,6 +12720,12 @@ export default function App() {
         event.target.isContentEditable
       );
 
+      if (event.key === 'Escape' && canvasContextMenu) {
+        event.preventDefault();
+        closeCanvasContextMenu();
+        return;
+      }
+
       if (event.key === 'Escape' && pendingCanvasFrame) {
         event.preventDefault();
         setPendingCanvasFrame(false);
@@ -10231,6 +12751,16 @@ export default function App() {
       const activePanel = panelsRef.current.find((panel) => panel.id === activeIdRef.current);
       if (
         event.key === 'Delete' &&
+        activeCanvasTodoIdRef.current &&
+        !editable &&
+        !closestElement(event.target, '.terminal-host')
+      ) {
+        deleteCanvasTodo(activeCanvasTodoIdRef.current);
+        return;
+      }
+
+      if (
+        event.key === 'Delete' &&
         activeCanvasFrameIdRef.current &&
         !editable &&
         !closestElement(event.target, '.terminal-host')
@@ -10254,10 +12784,13 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    canvasContextMenu,
     closeTerminal,
+    closeCanvasContextMenu,
     createWorkspaceCommandLine,
     createWorkspaceSession,
     deleteCanvasFrame,
+    deleteCanvasTodo,
     openNewSessionPicker,
     pendingCanvasFrame
   ]);
@@ -10314,6 +12847,8 @@ export default function App() {
 
             <Separator orientation="vertical" className="h-8" />
 
+            <TopbarSessionStats counts={crossProjectSessionCounts} t={t} />
+
             <div className="flex shrink-0 items-center gap-2">
               <TopbarLaunchMenu
                 cliProviderId={launchCliProviderId}
@@ -10329,16 +12864,6 @@ export default function App() {
               <Button type="button" variant="outline" onClick={() => setAgentsOpen(true)}>
                 <Bot className="h-4 w-4" />
                 {t('agents')}
-              </Button>
-              <Button
-                type="button"
-                variant={sessionReviewOpen ? 'primary' : 'outline'}
-                className="h-9 gap-1.5 px-3"
-                aria-pressed={sessionReviewOpen}
-                onClick={toggleSessionReview}
-              >
-                <SquareTerminal className="h-4 w-4" />
-                {t('sessionReview')}
               </Button>
             </div>
 
@@ -10409,9 +12934,16 @@ export default function App() {
               backgroundPosition: `${view.x}px ${view.y}px`
             }}
             onPointerDown={startViewportPan}
+            onContextMenu={openCanvasContextMenu}
             onWheel={handleWheel}
           >
-            <div className="canvas-tools">
+            <div
+              className="canvas-tools"
+              onPointerDown={(event) => {
+                event.stopPropagation();
+                closeCanvasContextMenu();
+              }}
+            >
               <Button
                 id="addCanvasFrame"
                 variant={pendingCanvasFrame ? 'default' : 'outline'}
@@ -10428,15 +12960,40 @@ export default function App() {
                 <Plus className="h-4 w-4" />
                 {pendingCanvasFrame ? t('addCanvasFrameArmed') : t('addCanvasFrame')}
               </Button>
+              <Button id="addCanvasTodo" variant="outline" onClick={addCanvasTodo}>
+                <ListTodo className="h-4 w-4" />
+                {t('addCanvasTodo')}
+              </Button>
               <Button id="groupEndpoints" onClick={groupEndpoints} disabled={groupableEndpointCount < 2}>
                 <Grid2X2 className="h-4 w-4" />
                 {groupableEndpointCount > 0 ? `${t('groupEndpoints')} ${groupableEndpointCount}` : t('groupEndpoints')}
               </Button>
+            </div>
+            <div
+              className="canvas-arrange-tool"
+              onPointerDown={(event) => {
+                event.stopPropagation();
+                closeCanvasContextMenu();
+              }}
+            >
               <Button id="arrangeGrid" onClick={arrangeGrid}>
                 <LayoutGrid className="h-4 w-4" />
                 {t('arrange')}
               </Button>
+              <Button id="arrangeByTag" variant="outline" onClick={arrangeByTag}>
+                <Tags className="h-4 w-4" />
+                {t('arrangeByTag')}
+              </Button>
             </div>
+            <CanvasContextMenu
+              groupableEndpointCount={groupableEndpointCount}
+              menu={canvasContextMenu}
+              t={t}
+              onAddFrame={createCanvasFrameAtPoint}
+              onArrange={arrangeGrid}
+              onClose={closeCanvasContextMenu}
+              onGroupEndpoints={groupEndpoints}
+            />
             <div
               id="stage"
               className="stage"
@@ -10456,6 +13013,28 @@ export default function App() {
                     onResize={updateCanvasFrame}
                     onTitleChange={(id, title) => updateCanvasFrame(id, { title })}
                     onTitleCommit={commitCanvasFrameTitle}
+                  />
+                ))}
+              </div>
+              <div className="canvas-todo-layer">
+                {visibleUnpinnedCanvasTodos.map((todo) => (
+                  <CanvasTodoList
+                    key={todo.id}
+                    active={todo.id === activeCanvasTodoId}
+                    todo={todo}
+                    scale={view.scale}
+                    t={t}
+                    onActivate={activateCanvasTodo}
+                    onAddItem={addCanvasTodoItem}
+                    onDelete={deleteCanvasTodo}
+                    onItemDoneChange={updateCanvasTodoItemDone}
+                    onItemRemove={removeCanvasTodoItem}
+                    onItemTextChange={updateCanvasTodoItemText}
+                    onMove={updateCanvasTodo}
+                    onResize={updateCanvasTodo}
+                    onTitleChange={(id, title) => updateCanvasTodo(id, { title })}
+                    onTitleCommit={commitCanvasTodoTitle}
+                    onTogglePinned={toggleCanvasTodoPinned}
                   />
                 ))}
               </div>
@@ -10495,6 +13074,7 @@ export default function App() {
                   selected={selectedEndpointIds.has(panel.id)}
                   commandTargeted={panel.id === commandDockTargetId}
                   arrangeAnimation={canvasArrangeAnimations[panel.id] || null}
+                  availableSessionTags={availableSessionTags}
                   dispatchSparkleKey={commandDockDispatchSparkles[panel.id] || ''}
                   onActivate={activatePanel}
                   onClose={closeTerminal}
@@ -10503,7 +13083,9 @@ export default function App() {
                   onMove={updatePanel}
                   onResize={updatePanel}
                   onRestart={restartTerminal}
+                  onModelChange={switchPanelModel}
                   onSelectToggle={toggleEndpointSelection}
+                  onTagChange={changePanelTag}
                   onTerminalInput={touchPanelActivity}
                   onTitleChange={(id, title) => updatePanel(id, { title })}
                   onTitleCommit={commitPanelTitle}
@@ -10512,9 +13094,31 @@ export default function App() {
                 );
               })}
               </div>
+              <div className="canvas-todo-layer is-pinned-layer">
+                {visiblePinnedCanvasTodos.map((todo) => (
+                  <CanvasTodoList
+                    key={todo.id}
+                    active={todo.id === activeCanvasTodoId}
+                    todo={todo}
+                    scale={view.scale}
+                    t={t}
+                    onActivate={activateCanvasTodo}
+                    onAddItem={addCanvasTodoItem}
+                    onDelete={deleteCanvasTodo}
+                    onItemDoneChange={updateCanvasTodoItemDone}
+                    onItemRemove={removeCanvasTodoItem}
+                    onItemTextChange={updateCanvasTodoItemText}
+                    onMove={updateCanvasTodo}
+                    onResize={updateCanvasTodo}
+                    onTitleChange={(id, title) => updateCanvasTodo(id, { title })}
+                    onTitleCommit={commitCanvasTodoTitle}
+                    onTogglePinned={toggleCanvasTodoPinned}
+                  />
+                ))}
+              </div>
             </div>
 
-            {visiblePanels.length === 0 && (
+            {visiblePanels.length === 0 && visibleCanvasFrames.length === 0 && visibleCanvasTodos.length === 0 && (
               <Card id="emptyState" className="pointer-events-none absolute left-1/2 top-1/2 w-[min(420px,calc(100%-48px))] -translate-x-1/2 -translate-y-1/2 border-border/70 bg-card/80 text-center shadow-2xl backdrop-blur">
                 <CardContent className="p-5">
                   <div className="flex items-center justify-center gap-2 text-xl font-bold text-foreground">
@@ -10546,7 +13150,7 @@ export default function App() {
             state={workspaceTreeState}
             t={t}
           />
-          <SessionReviewSidebar
+          <SessionReviewModal
             activeId={activeId}
             commandTargetId={commandDockTargetId}
             getPanelState={getPanelExecutionState}
@@ -10589,6 +13193,7 @@ export default function App() {
               onOpenFile={openImageGenerationFile}
               onOpenSettings={openImageGenerationSettings}
               onPromptChange={setImageGenerationPrompt}
+              onReferenceImagesAdd={saveImageGenerationReferenceImages}
               prompt={imageGenerationPrompt}
               results={imageGenerationResults}
               t={t}
@@ -10602,6 +13207,9 @@ export default function App() {
           activeId={activeId}
           canPanelReceiveInput={canPanelReceiveInput}
           collapsed={commandDockCollapsed}
+          commandHistory={commandDockHistory}
+          dispatchMode={commandDockDispatchMode}
+          dispatchShortcutLabel={commandDockShortcutLabels.dispatch}
           dispatchingTasks={commandDockTaskDispatching}
           getExecutionStateLabel={getExecutionStateLabel}
           getPanelExecutionState={getPanelExecutionState}
@@ -10613,6 +13221,7 @@ export default function App() {
           )}
           inputRef={commandDockInputRef}
           message={commandDockValue}
+          position={commandDockPosition}
           quickPrompts={quickPrompts}
           quickPromptsLoading={quickPromptsLoading}
           quickPromptsPath={quickPromptsPath}
@@ -10623,9 +13232,12 @@ export default function App() {
               provider={getPanelCliProvider(panel)}
             />
           )}
+          sendShortcutLabel={commandDockShortcutLabels.send}
           onDispatchTasks={dispatchCommandDockTasks}
+          onDispatchModeChange={changeCommandDockDispatchMode}
           onExport={exportTerminal}
           onExportCustom={exportTerminalCustom}
+          onHistorySelect={selectCommandDockHistory}
           onInputChange={handleCommandDockInputChange}
           onInputCompositionEnd={handleCommandDockCompositionEnd}
           onInputCompositionStart={handleCommandDockCompositionStart}
@@ -10635,26 +13247,31 @@ export default function App() {
           onInputPaste={handleCommandDockPaste}
           onInputScroll={handleCommandDockInputScroll}
           onInputSelect={handleCommandDockInputSelect}
+          onPositionChange={setCommandDockPosition}
           onQuickPromptDelete={deleteCommandDockPrompt}
           onQuickPromptSave={saveCommandDockPrompt}
           onQuickPromptSelect={insertQuickPromptIntoCommandDock}
           onSend={sendCommandDockInput}
           onSkillMentionSelect={insertCommandDockSkillMention}
           onToggleCollapsed={toggleCommandDockCollapsed}
+          onToggleSessionReview={toggleSessionReview}
           onTargetChange={selectCommandDockTarget}
           panels={commandDockPanels}
           skillMention={commandDockSkillMention}
           skillMentionHasAnyItems={commandDockSkillMentionSourceItems.length > 0}
           skillMentionItems={commandDockSkillMentionItems}
           skillMentionLoading={commandDockSkillMentionLoading}
+          sessionReviewOpen={sessionReviewOpen}
           targetId={commandDockTargetId}
           t={t}
         />
       )}
 
       <CodexConfigDialog
+        commandDockShortcuts={commandDockShortcuts}
         initialSettingsTab={codexInitialTab}
         language={language}
+        onCommandDockShortcutChange={changeCommandDockShortcut}
         onLanguageChange={setLanguage}
         onOpenChange={setCodexOpen}
         onProfileChanged={setCodexProfileState}
@@ -10687,12 +13304,20 @@ export default function App() {
       />
 
       <CommandLineConfigDialog
-        initialCliProviderId={launchCliProviderId}
+        activeCommandPresetId={activeCommandPresetId}
+        commandPresets={commandPresets}
+        commandPresetsLoading={commandPresetsLoading}
+        commandPresetsPath={commandPresetsPath}
+        initialCliProviderId="shell"
         initialDirectory={currentWorkspacePath}
         language={language}
+        onCommandPresetDelete={deleteCommandPreset}
+        onCommandPresetSave={saveCommandPreset}
+        onCommandPresetSelect={selectCommandPreset}
         onCreate={createCommandLineFromDialog}
         onOpenChange={setCommandDialogOpen}
         open={commandDialogOpen}
+        showToast={showToast}
         t={t}
       />
 

@@ -332,7 +332,7 @@ export function WorkspaceTreeSidebar({
               <TreeIconButton
                 label={t('copy')}
                 variant="ghost"
-                disabled={!snapshot?.text}
+                disabled={!snapshot?.root || loading}
                 onClick={onCopy}
               >
                 <Copy className="h-4 w-4" />
