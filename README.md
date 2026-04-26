@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="static/banner.png" alt="CLI in One banner">
+</p>
+
 # CLI in One
 
 Electron app for watching multiple Codex-powered terminal sessions inside one infinite-canvas workspace.

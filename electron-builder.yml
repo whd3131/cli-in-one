@@ -9,6 +9,7 @@ files:
   - package.json
   - src/main.js
   - src/preload.js
+  - static/**/*
   - dist/renderer/**/*
 
 asarUnpack:
@@ -16,6 +17,7 @@ asarUnpack:
   - "**/*.node"
 
 win:
+  icon: static/favicon.ico
   target:
     - target: nsis
       arch:

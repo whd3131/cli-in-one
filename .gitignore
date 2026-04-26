@@ -3,5 +3,8 @@ dist/
 out/
 release/
 *.log
+.history/
+.tmp-settings-home-*/
+codex-quick-profiles.json
 .DS_Store
 Thumbs.db
