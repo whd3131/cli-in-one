@@ -600,6 +600,7 @@ const commandDockSkillMentionMenuWidth = 320;
 const commandDockSkillMentionMenuMaxHeight = 232;
 const sessionReviewFlushMs = 180;
 const workspaceSkillSources = [
+  { id: 'cli-in-one', directoryName: '.cli-in-one/skills', label: 'Project' },
   { id: 'cursor', directoryName: '.cursor', label: 'Cursor' },
   { id: 'claude', directoryName: '.claude', label: 'Claude' },
   { id: 'agent', directoryName: '.agent', label: 'Agent' },
@@ -1014,7 +1015,7 @@ const messages = {
     save: '保存',
     loading: '加载中',
     skills: 'Skills',
-    skillsHint: '自动识别当前工作区里的 .cursor、.claude、.agent、.github。',
+    skillsHint: '自动识别当前工作区里的 .cli-in-one/skills、.cursor、.claude、.agent、.github。',
     collapseSkills: '收起 Skills',
     expandSkills: '展开 Skills',
     skillsEmpty: '未识别到可管理的 skill 文件。',
@@ -1528,7 +1529,7 @@ const messages = {
     save: 'Save',
     loading: 'Loading',
     skills: 'Skills',
-    skillsHint: 'Auto-detects .cursor, .claude, .agent, and .github in the current workspace.',
+    skillsHint: 'Auto-detects .cli-in-one/skills, .cursor, .claude, .agent, and .github in the current workspace.',
     collapseSkills: 'Collapse Skills',
     expandSkills: 'Expand Skills',
     skillsEmpty: 'No manageable skill files were detected.',
@@ -10123,21 +10124,6 @@ export default function App() {
     return true;
   }, [closeCommandDockSkillMention, commandDockCollapsed, resizeCommandDockInput]);
 
-  const promptQuickPromptName = useCallback((fallback) => {
-    const value = window.prompt(t('quickPromptNamePrompt'), fallback);
-    if (value === null) {
-      return null;
-    }
-
-    const name = value.trim();
-    if (!name) {
-      showToast(t('quickPromptNameRequired'));
-      return null;
-    }
-
-    return name;
-  }, [showToast, t]);
-
   const saveCommandDockPrompt = useCallback(async () => {
     if (quickPromptsLoading) {
       return false;
@@ -10149,10 +10135,7 @@ export default function App() {
       return false;
     }
 
-    const title = promptQuickPromptName(deriveQuickPromptTitle(prompt, t('quickPromptDefaultName')));
-    if (!title) {
-      return false;
-    }
+    const title = deriveQuickPromptTitle(prompt, t('quickPromptDefaultName'));
 
     setQuickPromptsLoading(true);
     try {
@@ -10170,7 +10153,7 @@ export default function App() {
     } finally {
       setQuickPromptsLoading(false);
     }
-  }, [commandDockValue, promptQuickPromptName, quickPromptsLoading, showToast, t]);
+  }, [commandDockValue, quickPromptsLoading, showToast, t]);
 
   const insertQuickPromptIntoCommandDock = useCallback((record) => {
     const prompt = String(record?.prompt || '').trim();
@@ -11354,12 +11337,17 @@ export default function App() {
     const terminalCwd = Object.prototype.hasOwnProperty.call(slot, 'cwd')
       ? slot.cwd
       : cwdRef.current;
+    const hasExplicitInitialCommand = Object.prototype.hasOwnProperty.call(slot, 'initialCommand');
     const cliProvider = resolveCliProvider(slot.cliProviderId, slot.initialCommand);
     const cliProviderId = cliProvider?.id || defaultCliProviderId;
     const targetType = slot.targetType === 'directory' ? 'directory' : 'project';
-    const initialCommand = Object.prototype.hasOwnProperty.call(slot, 'initialCommand')
+    const launchCommand = getCliLaunchCommand(cliProvider, targetType);
+    const presetInitialCommand = !hasExplicitInitialCommand && slot.useCommandPreset === true && cliProviderId === 'shell'
+      ? normalizeCommandPresetCommandInput(activeCommandPresetRef.current?.command)
+      : '';
+    const initialCommand = hasExplicitInitialCommand
       ? slot.initialCommand
-      : getCliLaunchCommand(cliProvider, targetType);
+      : (launchCommand || presetInitialCommand);
     const title = slot.title || `${getCliProviderTitleBase(cliProvider, language)} ${getVisiblePanels().length + 1}`;
 
     const meta = await bridge.createTerminal({
@@ -11615,22 +11603,18 @@ export default function App() {
       const cliProvider = resolveCliProvider(config.cliProviderId || launchCliProviderId);
       const cliProviderId = cliProvider?.id || defaultCliProviderId;
       const hasExplicitInitialCommand = Object.prototype.hasOwnProperty.call(config, 'initialCommand');
-      const presetInitialCommand = cliProviderId === 'shell'
-        ? normalizeCommandPresetCommandInput(activeCommandPresetRef.current?.command)
-        : '';
       const terminalSlot = {
         projectId: Object.prototype.hasOwnProperty.call(config, 'projectId')
           ? config.projectId
           : launchContext.projectId,
         cwd: nextCwd,
         cliProviderId,
-        targetType: 'directory'
+        targetType: 'directory',
+        useCommandPreset: true
       };
 
       if (hasExplicitInitialCommand) {
         terminalSlot.initialCommand = normalizeCommandPresetCommandInput(config.initialCommand);
-      } else if (presetInitialCommand) {
-        terminalSlot.initialCommand = presetInitialCommand;
       }
 
       setLaunchCliProviderId(cliProviderId);
@@ -12258,7 +12242,8 @@ export default function App() {
         y: startY + Math.floor(index / cols) * (height + gap),
         width,
         height,
-        cliProviderId
+        cliProviderId,
+        useCommandPreset: cliProviderId === 'shell'
       });
     }
   }, [createTerminal, getCurrentSessionLaunchContext, launchCliProviderId, viewportCenterOnCanvas]);
@@ -12329,7 +12314,8 @@ export default function App() {
       await createTerminal({
         ...getCenteredTerminalSlot(workspaceRef.current),
         ...launchContext,
-        cliProviderId
+        cliProviderId,
+        useCommandPreset: cliProviderId === 'shell'
       });
       setLaunchCliProviderId(cliProviderId);
     };
@@ -12361,7 +12347,8 @@ export default function App() {
           projectId: project.id,
           cwd: project.path,
           cliProviderId,
-          targetType: 'project'
+          targetType: 'project',
+          useCommandPreset: cliProviderId === 'shell'
         });
         return;
       }
@@ -12377,7 +12364,8 @@ export default function App() {
         projectId: null,
         cwd: sessionCwd,
         cliProviderId,
-        targetType: 'directory'
+        targetType: 'directory',
+        useCommandPreset: cliProviderId === 'shell'
       });
     };
 

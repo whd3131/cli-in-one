@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.0](https://github.com/whd3131/cli-in-one/compare/v0.8.0...v0.9.0) (2026-04-27)
+
+
+### Features
+
+* add project-local `.cli-in-one/skills` discovery and auto-create the skills folder when needed
+* apply saved shell command presets when launching shell sessions from the canvas, projects, directories, and grid launch flows
+
+
+### Improvements
+
+* save Quick Send prompts with derived names instead of interrupting the flow with a name prompt
+* keep the Quick Send target picker usable near screen edges by opening above or below the dock based on available space
+* label the Quick Send prompt bar so saved prompts are easier to identify
+
 ## [0.8.0](https://github.com/whd3131/cli-in-one/compare/v0.7.0...v0.8.0) (2026-04-27)
 
 

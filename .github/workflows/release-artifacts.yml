@@ -52,13 +52,49 @@ jobs:
       - name: Build installers
         run: npm run dist:win
 
+      - name: Build release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.tag.outputs.value }}"
+          $version = $tag -replace '^v', ''
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          $lines = Get-Content -Path CHANGELOG.md
+          $headingPattern = "^## \[$([regex]::Escape($version))\]"
+          $start = -1
+
+          for ($index = 0; $index -lt $lines.Count; $index++) {
+            if ($lines[$index] -match $headingPattern) {
+              $start = $index + 1
+              break
+            }
+          }
+
+          $notes = @()
+          if ($start -ge 0) {
+            for ($index = $start; $index -lt $lines.Count; $index++) {
+              if ($lines[$index] -match '^## \[') {
+                break
+              }
+
+              $notes += $lines[$index]
+            }
+          }
+
+          if (-not ($notes | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+            $notes = @("Release $tag", "", "See CHANGELOG.md for details.")
+          }
+
+          Set-Content -Path $notesPath -Value $notes -Encoding UTF8
+          "notes_path=$notesPath" >> $env:GITHUB_OUTPUT
+
       - name: Ensure GitHub Release exists
         shell: pwsh
         run: |
           $tag = "${{ steps.tag.outputs.value }}"
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title $tag --generate-notes --latest
+            gh release create $tag --title $tag --notes-file "${{ steps.notes.outputs.notes_path }}" --latest
             if ($LASTEXITCODE -ne 0) {
               gh release view $tag
             }
@@ -151,12 +187,36 @@ jobs:
             npx electron-builder --mac dmg --${{ matrix.arch }} --publish never
           fi
 
+      - name: Build release notes
+        id: notes
+        shell: bash
+        run: |
+          tag="${{ steps.tag.outputs.value }}"
+          version="${tag#v}"
+          notes_path="$RUNNER_TEMP/release-notes.md"
+
+          awk -v version="$version" '
+            $0 ~ "^## \\[" version "\\]" { in_section=1; next }
+            in_section && $0 ~ "^## \\[" { exit }
+            in_section { print }
+          ' CHANGELOG.md > "$notes_path"
+
+          if ! grep -q '[^[:space:]]' "$notes_path"; then
+            {
+              echo "Release $tag"
+              echo
+              echo "See CHANGELOG.md for details."
+            } > "$notes_path"
+          fi
+
+          echo "notes_path=$notes_path" >> "$GITHUB_OUTPUT"
+
       - name: Ensure GitHub Release exists
         shell: bash
         run: |
           tag="${{ steps.tag.outputs.value }}"
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --title "$tag" --generate-notes --latest || gh release view "$tag"
+            gh release create "$tag" --title "$tag" --notes-file "${{ steps.notes.outputs.notes_path }}" --latest || gh release view "$tag"
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

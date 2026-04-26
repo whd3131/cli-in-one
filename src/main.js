@@ -161,6 +161,7 @@ const workspaceSkillGithubAllowedFileNames = new Set([
   'instructions.txt'
 ]);
 const workspaceSkillSources = [
+  { id: 'cli-in-one', directoryName: `${APP_STORAGE_DIR_NAME}/skills`, ensureDirectory: true },
   { id: 'cursor', directoryName: '.cursor' },
   { id: 'claude', directoryName: '.claude' },
   { id: 'agent', directoryName: '.agent' },
@@ -1316,27 +1317,45 @@ async function readWorkspaceSkillSourceSnapshot(rootPath, source) {
     sourceStats = await fs.promises.stat(sourcePath);
   } catch (error) {
     if (error && error.code === 'ENOENT') {
+      if (source.ensureDirectory) {
+        try {
+          await fs.promises.mkdir(sourcePath, { recursive: true });
+          sourceStats = await fs.promises.stat(sourcePath);
+        } catch (createError) {
+          return {
+            id: source.id,
+            directoryName: source.directoryName,
+            exists: false,
+            error: createError.message,
+            fileCount: 0,
+            files: [],
+            path: sourcePath,
+            truncated: false
+          };
+        }
+      } else {
+        return {
+          id: source.id,
+          directoryName: source.directoryName,
+          exists: false,
+          fileCount: 0,
+          files: [],
+          path: sourcePath,
+          truncated: false
+        };
+      }
+    } else {
       return {
         id: source.id,
         directoryName: source.directoryName,
         exists: false,
+        error: error.message,
         fileCount: 0,
         files: [],
         path: sourcePath,
         truncated: false
       };
     }
-
-    return {
-      id: source.id,
-      directoryName: source.directoryName,
-      exists: false,
-      error: error.message,
-      fileCount: 0,
-      files: [],
-      path: sourcePath,
-      truncated: false
-    };
   }
 
   if (!sourceStats.isDirectory()) {

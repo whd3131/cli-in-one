@@ -229,6 +229,10 @@ export function FloatingCommandDock({
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [targetMenuOpen, setTargetMenuOpen] = React.useState(false);
   const [targetFilter, setTargetFilter] = React.useState('');
+  const [targetMenuLayout, setTargetMenuLayout] = React.useState({
+    maxHeight: 342,
+    placement: 'up'
+  });
   const targetPanel = panels.find((panel) => panel.id === targetId) || null;
   const targetReady = canPanelReceiveInput?.(targetPanel);
   const canExport = Boolean(targetPanel);
@@ -321,6 +325,32 @@ export function FloatingCommandDock({
     return clampCommandDockPosition(nextPosition, rect);
   }, []);
 
+  const updateTargetMenuLayout = React.useCallback(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const rect = targetMenuRootRef.current?.getBoundingClientRect();
+    if (!rect) {
+      return;
+    }
+
+    const menuGap = 6;
+    const maxMenuHeight = 342;
+    const minMenuHeight = 96;
+    const spaceAbove = Math.max(0, rect.top - commandDockViewportMargin - menuGap);
+    const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - commandDockViewportMargin - menuGap);
+    const placement = spaceAbove >= spaceBelow ? 'up' : 'down';
+    const availableHeight = placement === 'up' ? spaceAbove : spaceBelow;
+    const maxHeight = Math.max(minMenuHeight, Math.min(maxMenuHeight, availableHeight));
+
+    setTargetMenuLayout((current) => (
+      current.placement === placement && Math.abs(current.maxHeight - maxHeight) < 1
+        ? current
+        : { maxHeight, placement }
+    ));
+  }, []);
+
   React.useLayoutEffect(() => {
     if (!dockPosition || typeof onPositionChange !== 'function') {
       return;
@@ -399,6 +429,21 @@ export function FloatingCommandDock({
       document.removeEventListener('keydown', closeOnEscape);
     };
   }, [targetMenuOpen]);
+
+  React.useLayoutEffect(() => {
+    if (targetMenuOpen) {
+      updateTargetMenuLayout();
+    }
+  }, [dockPosition, targetMenuOpen, updateTargetMenuLayout]);
+
+  React.useEffect(() => {
+    if (!targetMenuOpen) {
+      return undefined;
+    }
+
+    window.addEventListener('resize', updateTargetMenuLayout);
+    return () => window.removeEventListener('resize', updateTargetMenuLayout);
+  }, [targetMenuOpen, updateTargetMenuLayout]);
 
   React.useEffect(() => {
     if (collapsed && historyOpen) {
@@ -623,9 +668,13 @@ export function FloatingCommandDock({
               {targetMenuOpen && (
                 <div
                   id="commandDockTargetMenu"
-                  className="command-dock-target-menu"
+                  className={cn(
+                    'command-dock-target-menu',
+                    targetMenuLayout.placement === 'up' ? 'is-above' : 'is-below'
+                  )}
                   role="dialog"
                   aria-label={t('floatingComposerTargetMenu')}
+                  style={{ maxHeight: `${targetMenuLayout.maxHeight}px` }}
                 >
                   <label className="command-dock-target-search">
                     <Search className="h-3.5 w-3.5" />
@@ -703,6 +752,10 @@ export function FloatingCommandDock({
             <CardContent className="grid gap-2 px-3 pb-3 pt-0">
               {normalizedQuickPrompts.length > 0 && (
                 <div className="command-dock-prompt-bar" title={quickPromptsPath || undefined}>
+                  <div className="command-dock-prompt-label">
+                    <MessageSquarePlus className="h-3.5 w-3.5" />
+                    <span>{t('quickPrompts')}</span>
+                  </div>
                   <div
                     className="command-dock-prompt-list"
                     role="list"
