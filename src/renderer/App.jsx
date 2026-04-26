@@ -3,14 +3,11 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import {
-  Archive,
   Check,
-  Clock3,
   FolderOpen,
   FolderPlus,
   GripVertical,
   Grid2X2,
-  History,
   Languages,
   LayoutGrid,
   MessageSquarePlus,
@@ -52,8 +49,6 @@ import { cn } from '@/lib/utils';
 const bridge = window.cliBridge;
 const settingsKey = 'cli-in-one.settings.v3';
 const workspaceKey = 'cli-in-one.workspace.v1';
-const conversationIdleDelayMs = 10 * 60 * 1000;
-const maxTranscriptChars = 140000;
 
 const terminalThemes = {
   dark: {
@@ -126,17 +121,11 @@ const messages = {
     appSubtitle: '本地项目与会话',
     expandSidebar: '展开侧边栏',
     collapseSidebar: '收起侧边栏',
-    newChat: '新对话',
-    temporaryChat: '临时对话',
     addProject: '新增项目',
     codexConfig: 'Codex 配置',
     projects: '项目',
-    projectEmpty: '选择一个目录后会在这里管理项目会话。',
-    temporaryConversations: '临时对话',
-    temporaryEmpty: '不绑定项目的对话会显示在这里。',
-    recordsFolder: '会话记录目录',
+    projectEmpty: '选择一个目录后会在这里管理项目。',
     settings: '设置',
-    conversationDirLoading: '会话目录初始化中',
     closeAll: '全部关闭',
     workspace: '工作区',
     noProject: '不绑定项目',
@@ -155,6 +144,8 @@ const messages = {
     movePanel: '移动会话',
     restart: '重启',
     close: '关闭',
+    restartConfirm: '确认重启这个会话？当前运行状态会被中断。',
+    closeConfirm: '确认关闭这个会话？当前运行状态会被中断。',
     resize: '调整大小',
     preferences: '偏好',
     appearance: '外观',
@@ -168,19 +159,10 @@ const messages = {
     openFolder: '打开目录',
     save: '保存',
     loading: '加载中',
-    settingsDescription: '应用偏好、Codex 配置文件和本地会话记录。',
-    tempLabel: '临时',
-    uncached: '尚未缓存历史记录',
-    createdProjectConversation: '已创建 {name} 的新对话',
-    createdTemporaryConversation: '已创建临时对话',
+    settingsDescription: '应用偏好和 Codex 配置文件。',
     switchedProject: '当前项目：{name}',
     addedProject: '已新增项目：{name}',
     switchedExistingProject: '已切换到项目：{name}',
-    openedHistory: '已切换历史记录：{title}',
-    openedHistoryWithPanels: '已在当前画布中打开历史：{title}',
-    cachedConversation: '已缓存会话记录：{title}',
-    cacheFailed: '缓存会话记录失败：{message}',
-    openRecordsFailed: '打开会话记录目录失败：{message}',
     ptyFallback: '当前使用管道模式；安装 node-pty 成功后会自动切换到 ConPTY。',
     codexReadFailed: '读取 Codex 配置失败：{message}',
     reloadFailed: '刷新失败：{message}',
@@ -189,24 +171,17 @@ const messages = {
     invalidNotSaved: '{name}，未保存。',
     unsavedCloseConfirm: '{name} 还没有保存，确认关闭？',
     switchDiscardConfirm: '切换文件会丢弃当前未保存更改，确认切换？',
-    reloadDiscardConfirm: '重新加载 {name} 会丢弃未保存更改，确认刷新？',
-    newConversationConfirm: '开始新对话会关闭当前画布中的运行会话，确认继续？'
+    reloadDiscardConfirm: '重新加载 {name} 会丢弃未保存更改，确认刷新？'
   },
   en: {
     appSubtitle: 'Local projects and sessions',
     expandSidebar: 'Expand sidebar',
     collapseSidebar: 'Collapse sidebar',
-    newChat: 'New chat',
-    temporaryChat: 'Temporary chat',
     addProject: 'Add project',
     codexConfig: 'Codex config',
     projects: 'Projects',
-    projectEmpty: 'Choose a folder to manage project sessions here.',
-    temporaryConversations: 'Temporary chats',
-    temporaryEmpty: 'Chats without a project appear here.',
-    recordsFolder: 'Conversation records',
+    projectEmpty: 'Choose a folder to manage projects here.',
     settings: 'Settings',
-    conversationDirLoading: 'Conversation folder loading',
     closeAll: 'Close all',
     workspace: 'Workspace',
     noProject: 'No project',
@@ -225,6 +200,8 @@ const messages = {
     movePanel: 'Move session',
     restart: 'Restart',
     close: 'Close',
+    restartConfirm: 'Restart this session? Its current running state will be interrupted.',
+    closeConfirm: 'Close this session? Its current running state will be interrupted.',
     resize: 'Resize',
     preferences: 'Preferences',
     appearance: 'Appearance',
@@ -238,19 +215,10 @@ const messages = {
     openFolder: 'Open folder',
     save: 'Save',
     loading: 'Loading',
-    settingsDescription: 'App preferences, Codex config files, and local conversation records.',
-    tempLabel: 'Temporary',
-    uncached: 'History has not been cached yet',
-    createdProjectConversation: 'Created a new chat for {name}',
-    createdTemporaryConversation: 'Created a temporary chat',
+    settingsDescription: 'App preferences and Codex config files.',
     switchedProject: 'Current project: {name}',
     addedProject: 'Added project: {name}',
     switchedExistingProject: 'Switched to project: {name}',
-    openedHistory: 'Switched history: {title}',
-    openedHistoryWithPanels: 'Opened history in the current canvas: {title}',
-    cachedConversation: 'Cached conversation: {title}',
-    cacheFailed: 'Failed to cache conversation: {message}',
-    openRecordsFailed: 'Failed to open conversation folder: {message}',
     ptyFallback: 'Pipe mode is active. Install node-pty successfully to use ConPTY.',
     codexReadFailed: 'Failed to read Codex config: {message}',
     reloadFailed: 'Reload failed: {message}',
@@ -259,8 +227,7 @@ const messages = {
     invalidNotSaved: '{name}, not saved.',
     unsavedCloseConfirm: '{name} has unsaved changes. Close anyway?',
     switchDiscardConfirm: 'Switching files will discard unsaved changes. Continue?',
-    reloadDiscardConfirm: 'Reloading {name} will discard unsaved changes. Continue?',
-    newConversationConfirm: 'Starting a new chat will close running sessions on the current canvas. Continue?'
+    reloadDiscardConfirm: 'Reloading {name} will discard unsaved changes. Continue?'
   }
 };
 
@@ -336,13 +303,6 @@ function createLocalId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
-function trimTranscript(text) {
-  if (typeof text !== 'string' || text.length <= maxTranscriptChars) {
-    return text || '';
-  }
-  return text.slice(text.length - maxTranscriptChars);
-}
-
 function deriveNameFromPath(value) {
   if (!value) {
     return '未命名项目';
@@ -356,9 +316,7 @@ function createEmptyWorkspace() {
   return {
     sidebarCollapsed: false,
     activeProjectId: null,
-    activeConversationId: null,
-    projects: [],
-    temporaryConversations: []
+    projects: []
   };
 }
 
@@ -374,8 +332,7 @@ function normalizeWorkspace(raw) {
       name: project.name || deriveNameFromPath(project.path),
       path: project.path || '',
       createdAt: Number.isFinite(project.createdAt) ? project.createdAt : Date.now(),
-      updatedAt: Number.isFinite(project.updatedAt) ? project.updatedAt : Date.now(),
-      conversations: Array.isArray(project.conversations) ? project.conversations : []
+      updatedAt: Number.isFinite(project.updatedAt) ? project.updatedAt : Date.now()
     }))
     : [];
 
@@ -383,9 +340,7 @@ function normalizeWorkspace(raw) {
     ...fallback,
     sidebarCollapsed: Boolean(raw.sidebarCollapsed),
     activeProjectId: raw.activeProjectId || null,
-    activeConversationId: raw.activeConversationId || null,
-    projects,
-    temporaryConversations: Array.isArray(raw.temporaryConversations) ? raw.temporaryConversations : []
+    projects
   };
 }
 
@@ -396,60 +351,6 @@ function loadWorkspace() {
     localStorage.removeItem(workspaceKey);
     return createEmptyWorkspace();
   }
-}
-
-function findConversation(workspace, conversationId) {
-  if (!conversationId) {
-    return null;
-  }
-
-  for (const project of workspace.projects) {
-    const match = project.conversations.find((conversation) => conversation.id === conversationId);
-    if (match) {
-      return { ...match, project };
-    }
-  }
-
-  const temporary = workspace.temporaryConversations.find((conversation) => conversation.id === conversationId);
-  return temporary ? { ...temporary, project: null } : null;
-}
-
-function upsertConversationInWorkspace(workspace, conversation) {
-  const next = {
-    ...workspace,
-    projects: workspace.projects.map((project) => ({
-      ...project,
-      conversations: [...project.conversations]
-    })),
-    temporaryConversations: [...workspace.temporaryConversations]
-  };
-
-  if (conversation.projectId) {
-    next.projects = next.projects.map((project) => {
-      if (project.id !== conversation.projectId) {
-        return project;
-      }
-
-      const existingIndex = project.conversations.findIndex((item) => item.id === conversation.id);
-      const conversations = existingIndex >= 0
-        ? project.conversations.map((item) => (item.id === conversation.id ? { ...item, ...conversation } : item))
-        : [conversation, ...project.conversations];
-
-      return {
-        ...project,
-        updatedAt: conversation.updatedAt || Date.now(),
-        conversations: conversations.slice(0, 30)
-      };
-    });
-    return next;
-  }
-
-  const existingIndex = next.temporaryConversations.findIndex((item) => item.id === conversation.id);
-  next.temporaryConversations = existingIndex >= 0
-    ? next.temporaryConversations.map((item) => (item.id === conversation.id ? { ...item, ...conversation } : item))
-    : [conversation, ...next.temporaryConversations];
-  next.temporaryConversations = next.temporaryConversations.slice(0, 50);
-  return next;
 }
 
 function IconButton({ label, children, ...props }) {
@@ -477,7 +378,6 @@ function TerminalPanel({
   onResize,
   onRestart,
   onTitleChange,
-  onTerminalInput,
   registerTerminal
 }) {
   const hostRef = useRef(null);
@@ -524,10 +424,7 @@ function TerminalPanel({
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    const dataDisposable = term.onData((data) => {
-      bridge.writeTerminal(panel.id, data);
-      onTerminalInput(panel.id, data);
-    });
+    const dataDisposable = term.onData((data) => bridge.writeTerminal(panel.id, data));
     const resizeDisposable = term.onResize(({ cols, rows }) => bridge.resizeTerminal(panel.id, cols, rows));
     const unregister = registerTerminal(panel.id, { term, fitAddon, fit: fitTerminal });
 
@@ -542,7 +439,7 @@ function TerminalPanel({
       termRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [fitTerminal, onTerminalInput, panel.cwd, panel.id, registerTerminal]);
+  }, [fitTerminal, panel.cwd, panel.id, registerTerminal]);
 
   useEffect(() => {
     fitTerminal();
@@ -666,7 +563,11 @@ function TerminalPanel({
           title={t('restart')}
           aria-label={t('restart')}
           onPointerDown={(event) => event.stopPropagation()}
-          onClick={() => onRestart(panel.id)}
+          onClick={() => {
+            if (window.confirm(t('restartConfirm'))) {
+              onRestart(panel.id);
+            }
+          }}
         >
           <RefreshCw className="h-3.5 w-3.5" />
         </Button>
@@ -678,7 +579,11 @@ function TerminalPanel({
           title={t('close')}
           aria-label={t('close')}
           onPointerDown={(event) => event.stopPropagation()}
-          onClick={() => onClose(panel.id)}
+          onClick={() => {
+            if (window.confirm(t('closeConfirm'))) {
+              onClose(panel.id);
+            }
+          }}
         >
           <X className="h-3.5 w-3.5" />
         </Button>
@@ -838,7 +743,7 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onThemeCh
           <DialogDescription id="codexConfigPath" title={pathText}>{t('settingsDescription')}</DialogDescription>
         </DialogHeader>
 
-        <div className="grid min-h-0 grid-rows-[auto_1fr_auto] gap-2 p-3">
+        <div className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-2 p-3">
           <div className="grid gap-3 rounded-md border border-border bg-muted/35 p-3">
             <div className="grid gap-2 md:grid-cols-2">
               <div className="grid gap-1.5">
@@ -934,21 +839,15 @@ function CodexConfigDialog({ language, onLanguageChange, onOpenChange, onThemeCh
 function WorkspaceSidebar({
   workspace,
   activeProject,
-  activeConversationId,
-  appInfo,
   onAddProject,
   onKillAll,
-  onNewConversation,
+  onAddSession,
   onOpenCodexConfig,
-  onOpenConversationFolder,
-  onSelectConversation,
   onSelectProject,
-  onStartTemporaryConversation,
   t,
   onToggleCollapsed
 }) {
   const collapsed = workspace.sidebarCollapsed;
-  const temporary = workspace.temporaryConversations;
 
   if (collapsed) {
     return (
@@ -956,14 +855,11 @@ function WorkspaceSidebar({
         <IconButton label={t('expandSidebar')} onClick={onToggleCollapsed}>
           <PanelLeftOpen className="h-4 w-4" />
         </IconButton>
-        <IconButton label={t('newChat')} onClick={() => onNewConversation()}>
+        <IconButton label={t('addSession')} onClick={onAddSession}>
           <MessageSquarePlus className="h-4 w-4" />
         </IconButton>
         <IconButton label={t('addProject')} onClick={onAddProject}>
           <FolderPlus className="h-4 w-4" />
-        </IconButton>
-        <IconButton label={t('temporaryChat')} onClick={onStartTemporaryConversation}>
-          <Archive className="h-4 w-4" />
         </IconButton>
         <div className="sidebar-rail-spacer" />
         <IconButton label={t('settings')} onClick={onOpenCodexConfig}>
@@ -989,13 +885,13 @@ function WorkspaceSidebar({
       </SidebarHeader>
 
       <div className="sidebar-actions">
-        <Button className="w-full justify-start" variant="ghost" onClick={() => onNewConversation()}>
+        <Button className="w-full justify-start" variant="ghost" onClick={onAddSession}>
           <MessageSquarePlus className="h-4 w-4" />
-          {t('newChat')}
+          {t('addSession')}
         </Button>
-        <Button className="w-full justify-start" variant="ghost" onClick={onStartTemporaryConversation}>
-          <Archive className="h-4 w-4" />
-          {t('temporaryChat')}
+        <Button className="w-full justify-start" variant="ghost" onClick={onAddProject}>
+          <FolderPlus className="h-4 w-4" />
+          {t('addProject')}
         </Button>
       </div>
 
@@ -1024,58 +920,14 @@ function WorkspaceSidebar({
                 >
                   <FolderOpen className="h-4 w-4 shrink-0" />
                   <span className="min-w-0 flex-1 truncate text-left">{project.name}</span>
-                  <span className="shrink-0 text-[11px] text-muted-foreground">{project.conversations.length}</span>
                 </button>
-
-                {project.conversations.slice(0, 6).map((conversation) => (
-                  <button
-                    key={conversation.id}
-                    type="button"
-                    className={cn('sidebar-history', activeConversationId === conversation.id && 'active')}
-                    title={conversation.preview || conversation.title}
-                    onClick={() => onSelectConversation(conversation)}
-                  >
-                    <History className="h-3.5 w-3.5 shrink-0" />
-                    <span className="min-w-0 flex-1 truncate text-left">{conversation.title}</span>
-                    <span className="shrink-0 text-[11px] text-muted-foreground">{formatRelativeTime(conversation.updatedAt)}</span>
-                  </button>
-                ))}
               </div>
             ))}
           </div>
         </SidebarSection>
-
-        <SidebarSection>
-          <div className="sidebar-section-title">
-            <span>{t('temporaryConversations')}</span>
-            <Clock3 className="h-3.5 w-3.5 text-muted-foreground" />
-          </div>
-
-          {temporary.length === 0 && (
-            <div className="sidebar-empty">{t('temporaryEmpty')}</div>
-          )}
-
-          {temporary.slice(0, 10).map((conversation) => (
-            <button
-              key={conversation.id}
-              type="button"
-              className={cn('sidebar-history top-level', activeConversationId === conversation.id && 'active')}
-              title={conversation.preview || conversation.title}
-              onClick={() => onSelectConversation(conversation)}
-            >
-              <History className="h-3.5 w-3.5 shrink-0" />
-              <span className="min-w-0 flex-1 truncate text-left">{conversation.title}</span>
-              <span className="shrink-0 text-[11px] text-muted-foreground">{formatRelativeTime(conversation.updatedAt)}</span>
-            </button>
-          ))}
-        </SidebarSection>
       </SidebarContent>
 
       <SidebarFooter>
-        <Button className="w-full justify-start" variant="ghost" onClick={onOpenConversationFolder}>
-          <FolderOpen className="h-4 w-4" />
-          {t('recordsFolder')}
-        </Button>
         <Button className="w-full justify-start" variant="destructive" onClick={onKillAll}>
           <Trash2 className="h-4 w-4" />
           {t('closeAll')}
@@ -1084,9 +936,6 @@ function WorkspaceSidebar({
           <Settings2 className="h-4 w-4" />
           {t('settings')}
         </Button>
-        <div className="truncate px-2 text-[11px] text-muted-foreground" title={appInfo?.conversationDir || ''}>
-          {appInfo?.conversationDir || t('conversationDirLoading')}
-        </div>
       </SidebarFooter>
     </Sidebar>
   );
@@ -1095,7 +944,6 @@ function WorkspaceSidebar({
 export default function App() {
   const initialSettings = useMemo(loadSettings, []);
   const initialWorkspace = useMemo(loadWorkspace, []);
-  const [appInfo, setAppInfo] = useState(null);
   const [cwd, setCwd] = useState(initialSettings.cwd);
   const [theme, setTheme] = useState(initialSettings.theme);
   const [language, setLanguage] = useState(initialSettings.language);
@@ -1108,28 +956,18 @@ export default function App() {
   const [toast, setToast] = useState('');
   const viewportRef = useRef(null);
   const terminalInstances = useRef(new Map());
-  const transcriptsRef = useRef(new Map());
   const panelsRef = useRef([]);
   const workspaceRef = useRef(workspace);
   const activeIdRef = useRef(null);
   const cwdRef = useRef(cwd);
-  const viewRef = useRef(view);
-  const appInfoRef = useRef(appInfo);
   const nextZIndex = useRef(10);
   const toastTimer = useRef(null);
   const saveSettingsTimer = useRef(null);
   const saveWorkspaceTimer = useRef(null);
-  const idleSaveTimer = useRef(null);
-  const lastActivityAt = useRef(Date.now());
-  const snapshotSaving = useRef(false);
 
   const activeProject = useMemo(
     () => workspace.projects.find((project) => project.id === workspace.activeProjectId) || null,
     [workspace.activeProjectId, workspace.projects]
-  );
-  const activeConversation = useMemo(
-    () => findConversation(workspace, workspace.activeConversationId),
-    [workspace]
   );
   const t = useCallback((key, values) => translate(language, key, values), [language]);
 
@@ -1149,14 +987,6 @@ export default function App() {
     cwdRef.current = cwd;
   }, [cwd]);
 
-  useEffect(() => {
-    viewRef.current = view;
-  }, [view]);
-
-  useEffect(() => {
-    appInfoRef.current = appInfo;
-  }, [appInfo]);
-
   const showToast = useCallback((message) => {
     window.clearTimeout(toastTimer.current);
     setToast(message);
@@ -1167,7 +997,6 @@ export default function App() {
 
   useEffect(() => {
     bridge.getAppInfo().then((info) => {
-      setAppInfo(info);
       if (!cwdRef.current) {
         setCwd(activeProject?.path || info.homeDir || '');
       }
@@ -1201,96 +1030,6 @@ export default function App() {
 
   useEffect(() => () => window.clearTimeout(saveWorkspaceTimer.current), []);
 
-  const updateConversationRecord = useCallback((conversation) => {
-    const next = {
-      ...upsertConversationInWorkspace(workspaceRef.current, conversation),
-      activeProjectId: conversation.projectId || null,
-      activeConversationId: conversation.id
-    };
-    workspaceRef.current = next;
-    setWorkspace(next);
-  }, []);
-
-  const buildConversationSnapshot = useCallback((reason) => {
-    const currentWorkspace = workspaceRef.current;
-    const active = findConversation(currentWorkspace, currentWorkspace.activeConversationId);
-    if (!active) {
-      return null;
-    }
-
-    const now = Date.now();
-    const panelSnapshots = panelsRef.current.map((panel) => ({
-      id: panel.id,
-      title: panel.title,
-      cwd: panel.cwd,
-      backend: panel.backend,
-      status: panel.status,
-      x: panel.x,
-      y: panel.y,
-      width: panel.width,
-      height: panel.height,
-      transcript: transcriptsRef.current.get(panel.id) || ''
-    }));
-    const lastTranscript = panelSnapshots
-      .map((panel) => panel.transcript.trim().split(/\r?\n/).filter(Boolean).at(-1))
-      .find(Boolean);
-
-    return {
-      id: active.id,
-      title: active.title,
-      projectId: active.project?.id || active.projectId || null,
-      projectName: active.project?.name || active.projectName || null,
-      cwd: cwdRef.current,
-      createdAt: active.createdAt || now,
-      updatedAt: now,
-      reason,
-      inactivityMs: Math.max(0, now - lastActivityAt.current),
-      view: viewRef.current,
-      panelCount: panelSnapshots.length,
-      panels: panelSnapshots,
-      preview: lastTranscript || (panelSnapshots.length ? `${panelSnapshots.length} ${t('session')}` : t('uncached')),
-      platform: appInfoRef.current?.platform || navigator.platform
-    };
-  }, []);
-
-  const saveActiveConversationSnapshot = useCallback(async (reason = 'idle') => {
-    if (snapshotSaving.current) {
-      return;
-    }
-
-    const snapshot = buildConversationSnapshot(reason);
-    if (!snapshot) {
-      return;
-    }
-
-    snapshotSaving.current = true;
-    try {
-      const result = await bridge.saveConversationSnapshot(snapshot);
-      updateConversationRecord({
-        ...snapshot,
-        snapshotPath: result.path,
-        savedAt: result.savedAt
-      });
-      showToast(t('cachedConversation', { title: snapshot.title }));
-    } catch (error) {
-      showToast(t('cacheFailed', { message: error.message }));
-    } finally {
-      snapshotSaving.current = false;
-    }
-  }, [buildConversationSnapshot, showToast, t, updateConversationRecord]);
-
-  const markActivity = useCallback(() => {
-    lastActivityAt.current = Date.now();
-    window.clearTimeout(idleSaveTimer.current);
-    if (workspaceRef.current.activeConversationId) {
-      idleSaveTimer.current = window.setTimeout(() => {
-        saveActiveConversationSnapshot('idle').catch((error) => showToast(error.message));
-      }, conversationIdleDelayMs);
-    }
-  }, [saveActiveConversationSnapshot, showToast]);
-
-  useEffect(() => () => window.clearTimeout(idleSaveTimer.current), []);
-
   const registerTerminal = useCallback((id, instance) => {
     terminalInstances.current.set(id, instance);
     return () => terminalInstances.current.delete(id);
@@ -1299,8 +1038,6 @@ export default function App() {
   useEffect(() => {
     const offData = bridge.onTerminalData(({ id, data }) => {
       terminalInstances.current.get(id)?.term.write(data);
-      transcriptsRef.current.set(id, trimTranscript(`${transcriptsRef.current.get(id) || ''}${data}`));
-      markActivity();
     });
 
     const offExit = bridge.onTerminalExit(({ id, exitCode, signal }) => {
@@ -1312,14 +1049,13 @@ export default function App() {
       setPanels((current) => current.map((panel) => (
         panel.id === id ? { ...panel, status: 'exit' } : panel
       )));
-      markActivity();
     });
 
     return () => {
       offData();
       offExit();
     };
-  }, [markActivity]);
+  }, []);
 
   const getViewportRect = useCallback(() => viewportRef.current.getBoundingClientRect(), []);
 
@@ -1340,45 +1076,6 @@ export default function App() {
     window.requestAnimationFrame(() => terminalInstances.current.get(id)?.term.focus());
   }, []);
 
-  const createConversationRecord = useCallback((project = null) => {
-    const now = Date.now();
-    const projectLabel = project ? project.name : t('tempLabel');
-    return {
-      id: createLocalId('conversation'),
-      title: `${projectLabel} ${new Date(now).toLocaleString(language === 'en' ? 'en-US' : 'zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`,
-      projectId: project?.id || null,
-      projectName: project?.name || null,
-      cwd: project?.path || cwdRef.current || appInfoRef.current?.homeDir || '',
-      createdAt: now,
-      updatedAt: now,
-      panelCount: 0,
-      panels: [],
-      preview: t('uncached'),
-      view: { x: 80, y: 80, scale: 1 }
-    };
-  }, [language, t]);
-
-  const startNewConversation = useCallback(async (projectId = workspaceRef.current.activeProjectId, options = {}) => {
-    const currentWorkspace = workspaceRef.current;
-    const project = options.temporary ? null : currentWorkspace.projects.find((item) => item.id === projectId) || null;
-
-    if (panelsRef.current.length > 0 && !window.confirm(t('newConversationConfirm'))) {
-      return null;
-    }
-
-    await bridge.killAllTerminals();
-    transcriptsRef.current.clear();
-    setPanels([]);
-    setActiveId(null);
-    const record = createConversationRecord(project);
-    setView(record.view);
-    setCwd(record.cwd || appInfoRef.current?.homeDir || '');
-    updateConversationRecord(record);
-    markActivity();
-    showToast(project ? t('createdProjectConversation', { name: project.name }) : t('createdTemporaryConversation'));
-    return record;
-  }, [createConversationRecord, markActivity, showToast, t, updateConversationRecord]);
-
   const createTerminal = useCallback(async (slot = {}) => {
     const center = viewportCenterOnCanvas();
     const width = Number.isFinite(slot.width) ? slot.width : 640;
@@ -1386,16 +1083,6 @@ export default function App() {
     const title = slot.title || `${t('session')} ${panelsRef.current.length + 1}`;
     const x = Number.isFinite(slot.x) ? slot.x : center.x - width / 2;
     const y = Number.isFinite(slot.y) ? slot.y : center.y - height / 2;
-
-    let conversationId = workspaceRef.current.activeConversationId;
-    if (!conversationId) {
-      const activeProjectId = workspaceRef.current.activeProjectId;
-      const record = await startNewConversation(activeProjectId, { temporary: !activeProjectId });
-      if (!record) {
-        return null;
-      }
-      conversationId = record.id;
-    }
 
     const meta = await bridge.createTerminal({
       title,
@@ -1408,7 +1095,7 @@ export default function App() {
     nextZIndex.current += 1;
     const panel = {
       id: meta.id,
-      conversationId,
+      projectId: workspaceRef.current.activeProjectId || null,
       title: meta.title,
       cwd: meta.cwd,
       backend: meta.backend,
@@ -1420,13 +1107,11 @@ export default function App() {
       status: 'running'
     };
 
-    transcriptsRef.current.set(meta.id, '');
     setPanels((current) => [...current, panel]);
     setActiveId(meta.id);
-    markActivity();
     window.requestAnimationFrame(() => terminalInstances.current.get(meta.id)?.term.focus());
     return panel;
-  }, [markActivity, startNewConversation, t, viewportCenterOnCanvas]);
+  }, [t, viewportCenterOnCanvas]);
 
   const closeTerminal = useCallback(async (id) => {
     try {
@@ -1435,13 +1120,11 @@ export default function App() {
       // It may already be gone.
     }
 
-    transcriptsRef.current.delete(id);
     setPanels((current) => current.filter((panel) => panel.id !== id));
     if (activeIdRef.current === id) {
       setActiveId(null);
     }
-    markActivity();
-  }, [markActivity]);
+  }, []);
 
   const restartTerminal = useCallback(async (id) => {
     const panel = panelsRef.current.find((item) => item.id === id);
@@ -1464,13 +1147,7 @@ export default function App() {
     setPanels((current) => current.map((panel) => (
       panel.id === id ? { ...panel, ...patch } : panel
     )));
-    markActivity();
-  }, [markActivity]);
-
-  const handleTerminalInput = useCallback((id, data) => {
-    transcriptsRef.current.set(id, trimTranscript(`${transcriptsRef.current.get(id) || ''}${data}`));
-    markActivity();
-  }, [markActivity]);
+  }, []);
 
   const arrangeGrid = useCallback(() => {
     const records = panelsRef.current;
@@ -1496,8 +1173,7 @@ export default function App() {
       width,
       height
     })));
-    markActivity();
-  }, [markActivity, viewportCenterOnCanvas]);
+  }, [viewportCenterOnCanvas]);
 
   const addGrid = useCallback(async () => {
     const center = viewportCenterOnCanvas();
@@ -1526,19 +1202,16 @@ export default function App() {
 
   const killAll = useCallback(async () => {
     await bridge.killAllTerminals();
-    transcriptsRef.current.clear();
     setPanels([]);
     setActiveId(null);
-    markActivity();
-  }, [markActivity]);
+  }, []);
 
   const chooseDirectory = useCallback(async () => {
     const selected = await bridge.chooseDirectory();
     if (selected) {
       setCwd(selected);
-      markActivity();
     }
-  }, [markActivity]);
+  }, []);
 
   const addProject = useCallback(async () => {
     const selected = await bridge.chooseDirectory();
@@ -1549,7 +1222,7 @@ export default function App() {
     const now = Date.now();
     const existing = workspaceRef.current.projects.find((project) => project.path.toLowerCase() === selected.toLowerCase());
     if (existing) {
-      const nextWorkspace = { ...workspaceRef.current, activeProjectId: existing.id, activeConversationId: null };
+      const nextWorkspace = { ...workspaceRef.current, activeProjectId: existing.id };
       workspaceRef.current = nextWorkspace;
       setWorkspace(nextWorkspace);
       setCwd(existing.path);
@@ -1562,14 +1235,12 @@ export default function App() {
       name: deriveNameFromPath(selected),
       path: selected,
       createdAt: now,
-      updatedAt: now,
-      conversations: []
+      updatedAt: now
     };
 
     const nextWorkspace = {
       ...workspaceRef.current,
       activeProjectId: project.id,
-      activeConversationId: null,
       projects: [project, ...workspaceRef.current.projects]
     };
     workspaceRef.current = nextWorkspace;
@@ -1583,49 +1254,12 @@ export default function App() {
     if (!project) {
       return;
     }
-    const nextWorkspace = { ...workspaceRef.current, activeProjectId: project.id, activeConversationId: null };
+    const nextWorkspace = { ...workspaceRef.current, activeProjectId: project.id };
     workspaceRef.current = nextWorkspace;
     setWorkspace(nextWorkspace);
     setCwd(project.path);
     showToast(t('switchedProject', { name: project.name }));
   }, [showToast, t]);
-
-  const selectConversation = useCallback(async (conversation) => {
-    if (!conversation) {
-      return;
-    }
-
-    const nextWorkspace = {
-      ...workspaceRef.current,
-      activeProjectId: conversation.projectId || null,
-      activeConversationId: conversation.id
-    };
-    workspaceRef.current = nextWorkspace;
-    setWorkspace(nextWorkspace);
-    setCwd(conversation.cwd || appInfoRef.current?.homeDir || '');
-    setView(conversation.view || { x: 80, y: 80, scale: 1 });
-
-    if (panelsRef.current.some((panel) => panel.conversationId === conversation.id)) {
-      showToast(t('openedHistory', { title: conversation.title }));
-      return;
-    }
-
-    const savedPanels = Array.isArray(conversation.panels) ? conversation.panels : [];
-    for (const [index, panel] of savedPanels.entries()) {
-      await createTerminal({
-        title: panel.title || `${t('session')} ${index + 1}`,
-        cwd: panel.cwd || conversation.cwd,
-        x: Number.isFinite(panel.x) ? panel.x : 80 + index * 42,
-        y: Number.isFinite(panel.y) ? panel.y : 80 + index * 42,
-        width: Number.isFinite(panel.width) ? panel.width : 640,
-        height: Number.isFinite(panel.height) ? panel.height : 380
-      });
-    }
-
-    showToast(savedPanels.length
-      ? t('openedHistoryWithPanels', { title: conversation.title })
-      : t('openedHistory', { title: conversation.title }));
-  }, [createTerminal, showToast, t]);
 
   const zoomAt = useCallback((clientX, clientY, nextScale) => {
     const rect = getViewportRect();
@@ -1641,8 +1275,7 @@ export default function App() {
         y: clientY - rect.top - before.y * scale
       };
     });
-    markActivity();
-  }, [getViewportRect, markActivity]);
+  }, [getViewportRect]);
 
   const startViewportPan = (event) => {
     if (event.button !== 0 || closestElement(event.target, '.terminal-panel')) {
@@ -1668,7 +1301,6 @@ export default function App() {
 
     const onPointerUp = () => {
       setPanning(false);
-      markActivity();
       document.removeEventListener('pointermove', onPointerMove);
       document.removeEventListener('pointerup', onPointerUp);
     };
@@ -1689,7 +1321,6 @@ export default function App() {
       x: current.x - event.deltaX,
       y: current.y - event.deltaY
     }));
-    markActivity();
   };
 
   const toggleSidebar = useCallback(() => {
@@ -1700,10 +1331,6 @@ export default function App() {
     workspaceRef.current = nextWorkspace;
     setWorkspace(nextWorkspace);
   }, []);
-
-  const openConversationFolder = useCallback(() => {
-    bridge.openConversationFolder().catch((error) => showToast(t('openRecordsFailed', { message: error.message })));
-  }, [showToast, t]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -1733,7 +1360,7 @@ export default function App() {
 
   const minorGrid = 48 * view.scale;
   const majorGrid = minorGrid * 4;
-  const activeTitle = activeConversation?.title || (activeProject ? `${activeProject.name} ${t('workspace')}` : t('temporaryChat'));
+  const activeTitle = activeProject ? `${activeProject.name} ${t('workspace')}` : t('noProject');
 
   return (
     <TooltipProvider>
@@ -1741,16 +1368,11 @@ export default function App() {
         <WorkspaceSidebar
           workspace={workspace}
           activeProject={activeProject}
-          activeConversationId={workspace.activeConversationId}
-          appInfo={appInfo}
           onAddProject={addProject}
+          onAddSession={() => createTerminal().catch((error) => showToast(error.message))}
           onKillAll={killAll}
-          onNewConversation={() => startNewConversation().catch((error) => showToast(error.message))}
           onOpenCodexConfig={() => setCodexOpen(true)}
-          onOpenConversationFolder={openConversationFolder}
-          onSelectConversation={(conversation) => selectConversation(conversation).catch((error) => showToast(error.message))}
           onSelectProject={selectProject}
-          onStartTemporaryConversation={() => startNewConversation(null, { temporary: true }).catch((error) => showToast(error.message))}
           t={t}
           onToggleCollapsed={toggleSidebar}
         />
@@ -1788,10 +1410,7 @@ export default function App() {
                 className="h-8 min-w-[70px] border-0 bg-transparent px-1 font-mono text-xs shadow-none focus-visible:ring-0"
                 value={cwd}
                 spellCheck={false}
-                onChange={(event) => {
-                  setCwd(event.target.value);
-                  markActivity();
-                }}
+                onChange={(event) => setCwd(event.target.value)}
               />
               <IconButton id="browseDir" label={t('chooseDirectory')} onClick={chooseDirectory}>
                 <FolderOpen className="h-4 w-4" />
@@ -1856,7 +1475,6 @@ export default function App() {
                   onMove={updatePanel}
                   onResize={updatePanel}
                   onRestart={restartTerminal}
-                  onTerminalInput={handleTerminalInput}
                   onTitleChange={(id, title) => updatePanel(id, { title: title.trim() || t('sessionFallbackTitle') })}
                   registerTerminal={registerTerminal}
                 />

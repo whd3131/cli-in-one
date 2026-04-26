@@ -1,6 +1,6 @@
 # CLI in One
 
-Windows 11 Electron app for watching multiple `cmd.exe` sessions inside one infinite-canvas workspace.
+Electron app for watching multiple Codex-powered terminal sessions inside one infinite-canvas workspace.
 
 The renderer is built with React, Vite, Tailwind CSS, and shadcn/ui-style local components.
 
@@ -33,23 +33,23 @@ npm run dist:mac
 
 ## What it does
 
-- Creates independent `cmd.exe` sessions.
+- Creates independent terminal sessions and pre-fills `codex` for new sessions.
 - Renders each session with xterm.js.
 - Uses `node-pty`/Windows ConPTY when available, with a pipe fallback if the native module cannot load.
 - Lets you pan and zoom the canvas, drag terminals around, resize panels, arrange them into a grid, and close or restart sessions.
-- Lets you choose the working directory used by new cmd sessions.
+- Lets you manage local projects as working-directory shortcuts. Projects are stored locally in browser storage; conversation history files are not written.
 - Lets you freely edit `~/.codex/auth.json` and `~/.codex/config.toml` from inside the app, with JSON/TOML validation, timestamped backups, and atomic writes.
 
 ## Controls
 
-- `+ CMD`: create one terminal.
+- `新增会话`: create one terminal session.
 - `2x2`: create four terminals at once.
 - `整理`: arrange open terminals into a grid around the current viewport center.
 - `Ctrl + mouse wheel`: zoom the canvas.
 - Mouse wheel: pan the canvas.
-- Drag the panel handle: move a terminal.
+- Drag the panel header: move a terminal.
 - Drag the lower-right corner: resize a terminal.
-- `Codex`: open the `~/.codex/auth.json` / `~/.codex/config.toml` editor.
+- `设置`: switch language/theme and open the `~/.codex/auth.json` / `~/.codex/config.toml` editor.
 
 ## Notes
 
