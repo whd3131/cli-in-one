@@ -92,9 +92,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Electron smoke test
-        run: npm run smoke
-
       - name: Build macOS artifacts
         run: npm run dist:mac
 

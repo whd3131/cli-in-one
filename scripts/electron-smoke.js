@@ -1,5 +1,14 @@
 const { app } = require('electron');
 
+let term;
+const timeout = setTimeout(() => {
+  console.error('smoke timed out');
+  try {
+    term?.kill();
+  } catch {}
+  app.exit(1);
+}, 10000);
+
 app.whenReady().then(() => {
   const pty = require('node-pty');
   const shell = process.platform === 'win32'
@@ -8,7 +17,7 @@ app.whenReady().then(() => {
   const args = process.platform === 'win32'
     ? ['/C', 'echo cli-in-one-smoke']
     : ['-lc', 'echo cli-in-one-smoke'];
-  const term = pty.spawn(shell, args, {
+  term = pty.spawn(shell, args, {
     cols: 80,
     rows: 24,
     cwd: process.cwd(),
@@ -16,13 +25,6 @@ app.whenReady().then(() => {
   });
 
   let output = '';
-  const timeout = setTimeout(() => {
-    console.error('smoke timed out');
-    try {
-      term.kill();
-    } catch {}
-    app.exit(1);
-  }, 6000);
 
   term.onData((data) => {
     output += data;

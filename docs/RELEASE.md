@@ -49,7 +49,7 @@ npm run dist:mac
 
 Local build output is written to `release/`. macOS artifacts must be built on macOS.
 
-`electron-builder.yml` disables package-time native dependency rebuilds because `node-pty` is validated by `npm install` and the app smoke test. If you later change native dependencies, run `npm run smoke` on Windows before publishing.
+`electron-builder.yml` disables package-time native dependency rebuilds because `node-pty` is validated by `npm install` and the Windows CI smoke test. The macOS artifact job only packages the app, which avoids headless Electron readiness hangs on hosted runners. If you later change native dependencies, run `npm run smoke` on Windows before publishing.
 
 ## Future Code Signing
 
