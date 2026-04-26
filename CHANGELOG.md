@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/whd3131/cli-in-one/compare/v0.3.0...v0.4.0) (2026-04-26)
+
+
+### Features
+
+* expand terminal workspace controls ([58a7a60](https://github.com/whd3131/cli-in-one/commit/58a7a60636e79effa8cc50394e49e56aad729224))
+
 ## [0.3.0](https://github.com/whd3131/cli-in-one/compare/v0.2.0...v0.3.0) (2026-04-26)
 
 
