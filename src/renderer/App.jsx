@@ -4,6 +4,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import {
+  Archive,
   BrainCircuit,
   Bot,
   Check,
@@ -15,6 +16,7 @@ import {
   ExternalLink,
   FolderOpen,
   FolderPlus,
+  GitBranch,
   GripVertical,
   Grid2X2,
   ImagePlus,
@@ -103,21 +105,35 @@ const canvasModes = new Set(['shared', 'project']);
 const sharedCanvasKey = '__shared__';
 const noProjectCanvasKey = '__no_project__';
 const historyProjectId = '__history__';
+const idleCommandLineGroupKind = 'idle-command-line';
 const endpointWidth = 300;
 const endpointHeight = 44;
+const idleCommandLineGroupWidth = 380;
 const canvasFrameMinWidth = 220;
 const canvasFrameMinHeight = 140;
 const canvasFrameDefaultWidth = 360;
 const canvasFrameDefaultHeight = 200;
-const canvasContextMenuWidth = 220;
-const canvasContextMenuHeight = 136;
+const canvasContextMenuWidth = 244;
+const canvasContextMenuHeight = 440;
 const canvasTodoMinWidth = 280;
 const canvasTodoMinHeight = 240;
 const canvasTodoDefaultWidth = 340;
 const canvasTodoDefaultHeight = 420;
+const canvasConnectionTones = [
+  { color: '#7c3aed', glow: 'rgba(124, 58, 237, 0.2)' },
+  { color: '#0d9488', glow: 'rgba(13, 148, 136, 0.2)' },
+  { color: '#2563eb', glow: 'rgba(37, 99, 235, 0.2)' },
+  { color: '#e11d48', glow: 'rgba(225, 29, 72, 0.2)' },
+  { color: '#ea580c', glow: 'rgba(234, 88, 12, 0.2)' }
+];
 const terminalContextMenuWidth = 280;
 const terminalContextMenuEstimatedHeight = 360;
 const zoomPresetScales = [0.5, 1, 1.5, 2];
+const appZoomDefaultFactor = 1;
+const appZoomMinFactor = 0.75;
+const appZoomMaxFactor = 1.75;
+const appZoomStep = 0.05;
+const appZoomPresetFactors = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75];
 const systemStatsRefreshMs = 2000;
 const memoryUsageWarningThreshold = 0.85;
 const memoryUsageCriticalThreshold = 0.95;
@@ -138,12 +154,75 @@ const commandDockDefaultShortcuts = {
   sendShortcut: 'enter',
   dispatchShortcut: 'ctrlEnter'
 };
+const sessionHeaderItemOptions = [
+  { id: 'tag', labelKey: 'sessionHeaderShowTag' },
+  { id: 'model', labelKey: 'sessionHeaderShowModel' },
+  { id: 'context', labelKey: 'sessionHeaderShowContext' },
+  { id: 'status', labelKey: 'sessionHeaderShowStatus' },
+  { id: 'runtime', labelKey: 'sessionHeaderShowRuntime' }
+];
+const sessionHeaderItemIds = new Set(sessionHeaderItemOptions.map((option) => option.id));
+const sessionHeaderDefaultVisibility = {
+  tag: true,
+  model: true,
+  context: true,
+  status: true,
+  runtime: true
+};
 const canvasArrangeDurationMs = 760;
 const canvasArrangeMaxStaggerMs = 180;
 const formSelectClassName = 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50';
 
+function normalizeAppZoomFactor(value) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return appZoomDefaultFactor;
+  }
+
+  const clamped = clamp(parsed, appZoomMinFactor, appZoomMaxFactor);
+  return Math.round(clamped * 100) / 100;
+}
+
+function formatAppZoomPercent(value) {
+  return Math.round(normalizeAppZoomFactor(value) * 100);
+}
+
 function normalizeCommandDockDispatchMode(value) {
   return value === 'new' ? 'new' : 'reuse';
+}
+
+function normalizeSessionHeaderVisibility(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  return sessionHeaderItemOptions.reduce((result, option) => {
+    result[option.id] = Object.prototype.hasOwnProperty.call(source, option.id)
+      ? Boolean(source[option.id])
+      : sessionHeaderDefaultVisibility[option.id];
+    return result;
+  }, {});
+}
+
+function normalizeLoadedSessionHeaderVisibility(value) {
+  const source = value && typeof value === 'object' ? value : null;
+  const legacyCompactDefaults = source
+    && sessionHeaderItemOptions.every((option) => Object.prototype.hasOwnProperty.call(source, option.id))
+    && source.tag === true
+    && source.model === false
+    && source.context === false
+    && source.status === true
+    && source.runtime === false;
+
+  return legacyCompactDefaults
+    ? normalizeSessionHeaderVisibility()
+    : normalizeSessionHeaderVisibility(value);
+}
+
+function updateSessionHeaderVisibilitySetting(current, itemId, visible) {
+  const normalizedItemId = String(itemId || '').trim();
+  const next = normalizeSessionHeaderVisibility(current);
+  if (sessionHeaderItemIds.has(normalizedItemId)) {
+    next[normalizedItemId] = Boolean(visible);
+  }
+  return next;
 }
 
 function normalizeCommandDockShortcut(value, fallback = commandDockDefaultShortcuts.sendShortcut) {
@@ -645,13 +724,6 @@ const messages = {
     closeAllConfirm: '确认关闭全部会话？所有当前运行状态会被中断。',
     workspace: '工作区',
     noProject: '不绑定项目',
-    launchMenu: '新增',
-    launchMenuAria: '新增会话菜单',
-    launchAtCurrentWorkspace: '当前工作区',
-    launchChooseTarget: '选择目录或项目',
-    launchCurrentDirectory: '当前目录',
-    launchFourSessions: '4 个会话',
-    launchCustomCount: '自定义数量',
     addSession: '新增会话',
     agents: 'Agents',
     agentsDialogTitle: 'Agents',
@@ -754,7 +826,7 @@ const messages = {
     commandLine: 'CMD',
     commandLineFallbackTitle: 'CMD',
     startEmpty: '新增会话开始',
-    startHint: '从新增菜单选择 CLI 后，可在当前工作区创建单个或批量会话。',
+    startHint: '右键空白画布可快速新增 Codex、Claude、CMD 等会话。',
     movePanel: '移动会话',
     minimizeSession: '缩成端点',
     expandSession: '展开会话',
@@ -769,8 +841,18 @@ const messages = {
     modelRequired: '模型名称不能为空。',
     modelSwitchUnavailable: '这个会话当前不支持模型切换。',
     canvasContextMenu: '画布菜单',
+    addCliSession: '新增会话',
+    addProviderSession: '新增 {provider}',
     addCanvasFrame: '说明框',
     addCanvasFrameArmed: '拖拽画框',
+    canvasConnect: '连线',
+    canvasConnectArmed: '连线中',
+    canvasConnectHint: '点击任意会话两侧圆点，再点击另一个会话完成连线。',
+    canvasConnectionStart: '选择另一个会话完成连线。',
+    canvasConnectionCancel: '已取消连线。',
+    canvasConnectionCreated: '已连接会话。',
+    canvasConnectionRemoved: '已移除这条连线。',
+    deleteCanvasConnection: '删除连线',
     canvasFrameHint: '在空白画布拖拽一下，创建一个只给人看的说明框。',
     moveCanvasFrame: '移动说明框',
     resizeCanvasFrame: '调整说明框大小',
@@ -797,6 +879,10 @@ const messages = {
     ungroupEndpoints: '取消分组',
     endpointGroup: '端点组',
     groupEndpointsUnavailable: '至少需要两个已收起端点。',
+    collectIdleCmd: '收纳闲置 CMD',
+    idleCmdGroup: '闲置 CMD',
+    collectIdleCmdUnavailable: '当前画布没有闲置 CMD。',
+    collectIdleCmdDone: '已收纳 {count} 个闲置 CMD。',
     sessionTag: 'Tag',
     sessionTagNone: '无标签',
     sessionTagCustom: '自定义...',
@@ -934,6 +1020,18 @@ const messages = {
     resize: '调整大小',
     preferences: '偏好',
     appearance: '外观',
+    appZoom: '应用缩放',
+    appZoomPreset: '应用缩放 {percent}%',
+    appZoomReset: '重置为 100%',
+    appZoomApplyFailed: '应用缩放失败：{message}',
+    sessionHeaderDisplay: '会话 CMD 顶部',
+    sessionHeaderDisplayHint: '未勾选的项目会收进会话顶部的信息下拉菜单，随时可以打开查看。',
+    sessionHeaderMore: '会话信息',
+    sessionHeaderShowTag: 'Tag',
+    sessionHeaderShowModel: '模型',
+    sessionHeaderShowContext: '上下文',
+    sessionHeaderShowStatus: '状态',
+    sessionHeaderShowRuntime: '运行时间',
     commandDockShortcuts: '快捷发送快捷键',
     commandDockSendShortcut: '发送快捷键',
     commandDockDispatchShortcut: '分发任务快捷键',
@@ -1159,13 +1257,6 @@ const messages = {
     closeAllConfirm: 'Close all sessions? Their current running state will be interrupted.',
     workspace: 'Workspace',
     noProject: 'No project',
-    launchMenu: 'New',
-    launchMenuAria: 'New session menu',
-    launchAtCurrentWorkspace: 'Current workspace',
-    launchChooseTarget: 'Choose directory or project',
-    launchCurrentDirectory: 'Current directory',
-    launchFourSessions: '4 sessions',
-    launchCustomCount: 'Custom count',
     addSession: 'New session',
     agents: 'Agents',
     agentsDialogTitle: 'Agents',
@@ -1268,7 +1359,7 @@ const messages = {
     commandLine: 'CMD',
     commandLineFallbackTitle: 'CMD',
     startEmpty: 'Start a new session',
-    startHint: 'Use the New menu to choose a CLI and create single or batch sessions in the current workspace.',
+    startHint: 'Right-click empty canvas space to quickly create Codex, Claude, CMD, and other sessions.',
     movePanel: 'Move session',
     minimizeSession: 'Minimize to endpoint',
     expandSession: 'Expand session',
@@ -1283,8 +1374,18 @@ const messages = {
     modelRequired: 'Model name is required.',
     modelSwitchUnavailable: 'This session cannot switch models right now.',
     canvasContextMenu: 'Canvas menu',
+    addCliSession: 'New session',
+    addProviderSession: 'New {provider}',
     addCanvasFrame: 'Frame',
     addCanvasFrameArmed: 'Draw frame',
+    canvasConnect: 'Connect',
+    canvasConnectArmed: 'Connecting',
+    canvasConnectHint: 'Click a dot on any session, then click another session to create a connection.',
+    canvasConnectionStart: 'Choose another session to finish the connection.',
+    canvasConnectionCancel: 'Connection canceled.',
+    canvasConnectionCreated: 'Sessions connected.',
+    canvasConnectionRemoved: 'Connection removed.',
+    deleteCanvasConnection: 'Delete connection',
     canvasFrameHint: 'Drag on empty canvas to create a human-only annotation frame.',
     moveCanvasFrame: 'Move frame',
     resizeCanvasFrame: 'Resize frame',
@@ -1311,6 +1412,10 @@ const messages = {
     ungroupEndpoints: 'Ungroup endpoints',
     endpointGroup: 'Endpoint group',
     groupEndpointsUnavailable: 'At least two minimized endpoints are required.',
+    collectIdleCmd: 'Collect idle CMD',
+    idleCmdGroup: 'Idle CMD',
+    collectIdleCmdUnavailable: 'There are no idle CMD sessions on this canvas.',
+    collectIdleCmdDone: 'Collected {count} idle CMD session(s).',
     sessionTag: 'Tag',
     sessionTagNone: 'No tag',
     sessionTagCustom: 'Custom...',
@@ -1448,6 +1553,18 @@ const messages = {
     resize: 'Resize',
     preferences: 'Preferences',
     appearance: 'Appearance',
+    appZoom: 'App zoom',
+    appZoomPreset: 'Set app zoom to {percent}%',
+    appZoomReset: 'Reset to 100%',
+    appZoomApplyFailed: 'Failed to apply app zoom: {message}',
+    sessionHeaderDisplay: 'Session CMD header',
+    sessionHeaderDisplayHint: 'Unchecked items move into the session header info menu and remain available there.',
+    sessionHeaderMore: 'Session info',
+    sessionHeaderShowTag: 'Tag',
+    sessionHeaderShowModel: 'Model',
+    sessionHeaderShowContext: 'Context',
+    sessionHeaderShowStatus: 'Status',
+    sessionHeaderShowRuntime: 'Runtime',
     commandDockShortcuts: 'Quick send shortcuts',
     commandDockSendShortcut: 'Send shortcut',
     commandDockDispatchShortcut: 'Dispatch shortcut',
@@ -2325,6 +2442,225 @@ function withWorkspaceCanvasTodos(workspace, canvasKey, todos) {
   };
 }
 
+function getCanvasConnectionPairKey(fromId, toId) {
+  return [String(fromId || '').trim(), String(toId || '').trim()].sort().join('::');
+}
+
+function normalizeCanvasConnection(connection, index = 0) {
+  const fromId = String(connection?.fromId || connection?.sourceId || '').trim();
+  const toId = String(connection?.toId || connection?.targetId || '').trim();
+  const createdAt = Number.isFinite(connection?.createdAt) ? connection.createdAt : Date.now() + index;
+
+  return {
+    id: connection?.id || createLocalId('canvas-connection'),
+    fromId,
+    toId,
+    createdAt
+  };
+}
+
+function normalizeCanvasConnectionList(connections) {
+  if (!Array.isArray(connections)) {
+    return [];
+  }
+
+  const seen = new Set();
+  const normalized = [];
+  connections.forEach((connection, index) => {
+    const nextConnection = normalizeCanvasConnection(connection, index);
+    if (!nextConnection.fromId || !nextConnection.toId || nextConnection.fromId === nextConnection.toId) {
+      return;
+    }
+
+    const pairKey = getCanvasConnectionPairKey(nextConnection.fromId, nextConnection.toId);
+    if (seen.has(pairKey)) {
+      return;
+    }
+
+    seen.add(pairKey);
+    normalized.push(nextConnection);
+  });
+
+  return normalized;
+}
+
+function normalizeCanvasConnectionMap(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(raw).map(([canvasKey, connections]) => [
+      canvasKey,
+      normalizeCanvasConnectionList(connections)
+    ])
+  );
+}
+
+function getWorkspaceCanvasConnections(workspace, canvasKey = getWorkspaceCanvasKey(workspace)) {
+  return Array.isArray(workspace?.canvasConnections?.[canvasKey]) ? workspace.canvasConnections[canvasKey] : [];
+}
+
+function sameCanvasConnection(left, right) {
+  return Boolean(
+    left &&
+    right &&
+    left.id === right.id &&
+    left.fromId === right.fromId &&
+    left.toId === right.toId &&
+    left.createdAt === right.createdAt
+  );
+}
+
+function sameCanvasConnectionList(left, right) {
+  if (left === right) {
+    return true;
+  }
+
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((connection, index) => sameCanvasConnection(connection, right[index]));
+}
+
+function withWorkspaceCanvasConnections(workspace, canvasKey, connections) {
+  const currentConnections = getWorkspaceCanvasConnections(workspace, canvasKey);
+  const nextConnections = normalizeCanvasConnectionList(connections);
+
+  if (sameCanvasConnectionList(currentConnections, nextConnections)) {
+    return workspace;
+  }
+
+  const nextCanvasConnections = { ...(workspace.canvasConnections || {}) };
+  if (nextConnections.length === 0) {
+    delete nextCanvasConnections[canvasKey];
+  } else {
+    nextCanvasConnections[canvasKey] = nextConnections;
+  }
+
+  return {
+    ...workspace,
+    canvasConnections: nextCanvasConnections
+  };
+}
+
+function withoutWorkspaceCanvasConnectionsForSession(workspace, sessionId) {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId) {
+    return workspace;
+  }
+
+  const nextCanvasConnections = {};
+  let changed = false;
+  Object.entries(workspace.canvasConnections || {}).forEach(([canvasKey, connections]) => {
+    const nextConnections = normalizeCanvasConnectionList(connections).filter((connection) => (
+      connection.fromId !== normalizedSessionId && connection.toId !== normalizedSessionId
+    ));
+    if (nextConnections.length !== (Array.isArray(connections) ? connections.length : 0)) {
+      changed = true;
+    }
+    if (nextConnections.length > 0) {
+      nextCanvasConnections[canvasKey] = nextConnections;
+    }
+  });
+
+  return changed ? { ...workspace, canvasConnections: nextCanvasConnections } : workspace;
+}
+
+function hashCanvasConnectionId(value) {
+  return String(value || '').split('').reduce((hash, char) => (
+    ((hash << 5) - hash + char.charCodeAt(0)) | 0
+  ), 0);
+}
+
+function getCanvasConnectionTone(connection) {
+  const hash = Math.abs(hashCanvasConnectionId(connection?.id || getCanvasConnectionPairKey(connection?.fromId, connection?.toId)));
+  return canvasConnectionTones[hash % canvasConnectionTones.length];
+}
+
+function getPanelCanvasRect(panel, panels, endpointGroups, workspace) {
+  if (!panel || !workspace) {
+    return null;
+  }
+
+  if (panel.minimized) {
+    const group = panel.groupId
+      ? endpointGroups.find((item) => item.id === panel.groupId)
+      : null;
+
+    if (group && group.canvasKey === getWorkspaceCanvasKey(workspace)) {
+      const members = panels.filter((item) => (
+        item.groupId === group.id &&
+        item.minimized &&
+        isPanelVisibleInWorkspace(item, workspace)
+      ));
+      const index = Math.max(0, members.findIndex((item) => item.id === panel.id));
+      return {
+        x: group.x + 14,
+        y: group.y + 58 + index * 42,
+        width: Math.max(group.width - 28, 1),
+        height: 36
+      };
+    }
+
+    return {
+      x: panel.x,
+      y: panel.y,
+      width: endpointWidth,
+      height: endpointHeight
+    };
+  }
+
+  return {
+    x: panel.x,
+    y: panel.y,
+    width: panel.width,
+    height: panel.height
+  };
+}
+
+function getCanvasConnectionAnchors(fromRect, toRect) {
+  const fromCenter = {
+    x: fromRect.x + fromRect.width / 2,
+    y: fromRect.y + fromRect.height / 2
+  };
+  const toCenter = {
+    x: toRect.x + toRect.width / 2,
+    y: toRect.y + toRect.height / 2
+  };
+  const leftToRight = fromCenter.x <= toCenter.x;
+
+  return {
+    from: {
+      x: leftToRight ? fromRect.x + fromRect.width : fromRect.x,
+      y: fromCenter.y
+    },
+    to: {
+      x: leftToRight ? toRect.x : toRect.x + toRect.width,
+      y: toCenter.y
+    },
+    direction: leftToRight ? 1 : -1
+  };
+}
+
+function buildCanvasConnectionPath(fromRect, toRect) {
+  const anchors = getCanvasConnectionAnchors(fromRect, toRect);
+  const distance = Math.abs(anchors.to.x - anchors.from.x);
+  const curve = clamp(distance * 0.48, 84, 260);
+  const c1x = anchors.from.x + curve * anchors.direction;
+  const c2x = anchors.to.x - curve * anchors.direction;
+
+  return {
+    ...anchors,
+    midpoint: {
+      x: (anchors.from.x + anchors.to.x) / 2,
+      y: (anchors.from.y + anchors.to.y) / 2
+    },
+    path: `M ${anchors.from.x} ${anchors.from.y} C ${c1x} ${anchors.from.y}, ${c2x} ${anchors.to.y}, ${anchors.to.x} ${anchors.to.y}`
+  };
+}
+
 function closestElement(target, selector) {
   return target instanceof Element ? target.closest(selector) : null;
 }
@@ -2890,12 +3226,16 @@ function SessionStatusTag({ count, panel, state, t }) {
   );
 }
 
-function SessionRuntimeTag({ panel, now, t }) {
+function getSessionRuntimeElapsed(panel, now) {
   const startedAt = Number.isFinite(panel?.createdAt) ? panel.createdAt : now;
   const endedAt = isPanelLive(panel)
     ? now
     : Number.isFinite(panel?.endedAt) ? panel.endedAt : now;
-  const elapsed = formatElapsedDuration(startedAt, endedAt);
+  return formatElapsedDuration(startedAt, endedAt);
+}
+
+function SessionRuntimeTag({ panel, now, t }) {
+  const elapsed = getSessionRuntimeElapsed(panel, now);
 
   return (
     <span
@@ -2950,6 +3290,160 @@ function SessionContextTag({ panel, t }) {
       <span className="shrink-0 text-muted-foreground">{t('sessionContext')}</span>
       <span className="font-mono">{label}</span>
     </span>
+  );
+}
+
+function SessionHeaderMetaMenu({
+  availableTags,
+  onTagChange,
+  panel,
+  runtimeNow,
+  sessionTag,
+  t
+}) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ left: 8, top: 8 });
+  const rootRef = useRef(null);
+  const menuRef = useRef(null);
+  const buttonRef = useRef(null);
+  const modelAvailable = hasPanelModelTag(panel);
+  const contextAvailable = hasPanelContextTag(panel);
+  const state = getPanelExecutionState(panel);
+  const stateLabel = getExecutionStateLabel(state, t);
+  const runtime = getSessionRuntimeElapsed(panel, runtimeNow);
+  const contextLabel = String(panel?.contextWindowLabel || '').trim();
+  const exactContextCount = Number.isFinite(panel?.contextWindowTokens)
+    ? Number(panel.contextWindowTokens).toLocaleString()
+    : '';
+  const modelLabel = modelAvailable ? formatPanelModelLabel(panel, t) : '';
+  const modelProvider = String(panel?.codexProviderName || '').trim();
+
+  const updatePosition = useCallback(() => {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect || typeof window === 'undefined') {
+      return;
+    }
+
+    const width = 276;
+    const estimatedHeight = 272;
+    const gap = 6;
+    const left = Math.min(
+      Math.max(8, rect.right - width),
+      Math.max(8, window.innerWidth - width - 8)
+    );
+    const belowTop = rect.bottom + gap;
+    const top = belowTop + estimatedHeight > window.innerHeight
+      ? Math.max(8, rect.top - estimatedHeight - gap)
+      : belowTop;
+
+    setPosition({ left, top });
+  }, []);
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+
+    updatePosition();
+    const closeOnPointerDown = (event) => {
+      if (
+        rootRef.current?.contains(event.target) ||
+        menuRef.current?.contains(event.target)
+      ) {
+        return;
+      }
+
+      setOpen(false);
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', closeOnPointerDown, true);
+    document.addEventListener('keydown', closeOnEscape);
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown, true);
+      document.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [open, updatePosition]);
+
+  const menu = open ? createPortal(
+    <div
+      ref={menuRef}
+      className="session-header-meta-menu"
+      role="menu"
+      aria-label={t('sessionHeaderMore')}
+      style={{ left: position.left, top: position.top }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <div className="session-header-meta-menu-title">{t('sessionHeaderMore')}</div>
+      <div className="session-header-meta-row">
+        <span className="session-header-meta-label">{t('sessionTag')}</span>
+        <SessionTagControl
+          availableTags={availableTags}
+          className="session-header-meta-tag"
+          value={sessionTag}
+          t={t}
+          onChange={(nextTag) => onTagChange?.(panel.id, nextTag)}
+        />
+      </div>
+      {modelAvailable && (
+        <div className="session-header-meta-row">
+          <span className="session-header-meta-label">{t('model')}</span>
+          <span className="session-header-meta-value" title={[modelProvider, modelLabel].filter(Boolean).join(' / ')}>
+            {modelProvider ? `${modelProvider} / ${modelLabel}` : modelLabel}
+          </span>
+        </div>
+      )}
+      {contextAvailable && (
+        <div className="session-header-meta-row">
+          <span className="session-header-meta-label">{t('sessionContext')}</span>
+          <span className="session-header-meta-value" title={exactContextCount || contextLabel}>
+            {contextLabel}{exactContextCount ? ` (${exactContextCount})` : ''}
+          </span>
+        </div>
+      )}
+      <div className="session-header-meta-row">
+        <span className="session-header-meta-label">{t('sessionHeaderShowStatus')}</span>
+        <SessionStatusTag panel={panel} state={state} t={t} />
+      </div>
+      <div className="session-header-meta-row">
+        <span className="session-header-meta-label">{t('sessionRuntime')}</span>
+        <span className="session-header-meta-value is-mono">{runtime}</span>
+      </div>
+    </div>,
+    document.body
+  ) : null;
+
+  return (
+    <div ref={rootRef} className="session-header-meta-root">
+      <Button
+        ref={buttonRef}
+        type="button"
+        variant={open ? 'primary' : 'outline'}
+        size="icon"
+        className="h-6 w-6"
+        title={t('sessionHeaderMore')}
+        aria-label={t('sessionHeaderMore')}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen((current) => !current);
+        }}
+      >
+        <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', open && 'rotate-180')} />
+      </Button>
+      {menu}
+    </div>
   );
 }
 
@@ -3051,6 +3545,8 @@ function loadSettings() {
       theme: saved.theme === 'light' ? 'light' : 'dark',
       language: saved.language === 'en' ? 'en' : 'zh',
       view: normalizeCanvasView(saved.view),
+      appZoomFactor: normalizeAppZoomFactor(saved.appZoomFactor),
+      sessionHeaderVisibility: normalizeLoadedSessionHeaderVisibility(saved.sessionHeaderVisibility),
       commandDockDispatchMode: normalizeCommandDockDispatchMode(saved.commandDockDispatchMode),
       commandDockShortcuts: normalizeCommandDockShortcutSettings(saved.commandDockShortcuts),
       commandDockPosition: normalizeCommandDockPosition(saved.commandDockPosition),
@@ -3063,6 +3559,8 @@ function loadSettings() {
       theme: 'dark',
       language: 'zh',
       view: createDefaultView(),
+      appZoomFactor: appZoomDefaultFactor,
+      sessionHeaderVisibility: normalizeSessionHeaderVisibility(),
       commandDockDispatchMode: 'reuse',
       commandDockShortcuts: normalizeCommandDockShortcutSettings(commandDockDefaultShortcuts),
       commandDockPosition: null,
@@ -3514,6 +4012,7 @@ function createEmptyWorkspace() {
     sharedView: createDefaultView(),
     canvasFrames: {},
     canvasTodos: {},
+    canvasConnections: {},
     projectViews: {},
     projects: []
   };
@@ -3609,6 +4108,7 @@ function normalizeWorkspace(raw) {
     : {};
   const canvasFrames = normalizeCanvasFrameMap(raw.canvasFrames);
   const canvasTodos = normalizeCanvasTodoMap(raw.canvasTodos);
+  const canvasConnections = normalizeCanvasConnectionMap(raw.canvasConnections);
 
   return {
     ...fallback,
@@ -3619,6 +4119,7 @@ function normalizeWorkspace(raw) {
     sharedView: normalizeCanvasView(raw.sharedView),
     canvasFrames,
     canvasTodos,
+    canvasConnections,
     projectViews,
     projects
   };
@@ -4109,12 +4610,19 @@ function CanvasTodoList({
 
 function CanvasContextMenu({
   groupableEndpointCount,
+  idleCommandLineCount,
+  language,
+  launchProviders = [],
   menu,
   t,
   onAddFrame,
+  onAddGrid,
+  onAddProviderSession,
   onArrange,
   onClose,
-  onGroupEndpoints
+  onCollectIdleCommandLines,
+  onGroupEndpoints,
+  onOpenGridSessionDialog
 }) {
   if (!menu) {
     return null;
@@ -4129,6 +4637,9 @@ function CanvasContextMenu({
   const groupLabel = groupableEndpointCount > 0
     ? `${t('groupEndpoints')} ${groupableEndpointCount}`
     : t('groupEndpoints');
+  const collectIdleLabel = idleCommandLineCount > 0
+    ? `${t('collectIdleCmd')} ${idleCommandLineCount}`
+    : t('collectIdleCmd');
 
   return (
     <div
@@ -4145,6 +4656,46 @@ function CanvasContextMenu({
         event.stopPropagation();
       }}
     >
+      {launchProviders.length > 0 && (
+        <>
+          <div className="canvas-context-menu-label">{t('addCliSession')}</div>
+          {launchProviders.map((provider) => {
+            const providerLabel = getCliProviderBadgeLabel(provider, language);
+
+            return (
+              <button
+                key={provider.id}
+                type="button"
+                className="canvas-context-menu-item"
+                role="menuitem"
+                onClick={runAction(() => onAddProviderSession(provider.id, menu.canvasPoint))}
+              >
+                <CliProviderIcon provider={provider} className="canvas-context-menu-icon" />
+                <span>{t('addProviderSession', { provider: providerLabel })}</span>
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            className="canvas-context-menu-item"
+            role="menuitem"
+            onClick={runAction(() => onAddGrid(menu.canvasPoint))}
+          >
+            <Grid2X2 className="canvas-context-menu-icon" aria-hidden="true" />
+            <span>{t('quickGrid2x2')}</span>
+          </button>
+          <button
+            type="button"
+            className="canvas-context-menu-item"
+            role="menuitem"
+            onClick={runAction(onOpenGridSessionDialog)}
+          >
+            <LayoutGrid className="canvas-context-menu-icon" aria-hidden="true" />
+            <span>{t('addSessionGrid')}</span>
+          </button>
+          <div className="canvas-context-menu-separator" />
+        </>
+      )}
       <button
         type="button"
         className="canvas-context-menu-item"
@@ -4172,7 +4723,122 @@ function CanvasContextMenu({
         <Grid2X2 className="canvas-context-menu-icon" aria-hidden="true" />
         <span>{groupLabel}</span>
       </button>
+      <button
+        type="button"
+        className="canvas-context-menu-item"
+        role="menuitem"
+        onClick={runAction(onCollectIdleCommandLines)}
+      >
+        <Archive className="canvas-context-menu-icon" aria-hidden="true" />
+        <span>{collectIdleLabel}</span>
+      </button>
     </div>
+  );
+}
+
+function SessionConnectionPort({
+  active = false,
+  className,
+  panelId,
+  side,
+  t,
+  onClick
+}) {
+  return (
+    <button
+      type="button"
+      className={cn('terminal-connection-port', `is-${side}`, active && 'is-active', className)}
+      title={t('canvasConnectHint')}
+      aria-label={t('canvasConnect')}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClick?.(panelId);
+      }}
+    >
+      <span aria-hidden="true" />
+    </button>
+  );
+}
+
+function CanvasConnectionLayer({
+  activeConnectionId,
+  connections,
+  t,
+  onDeleteConnection,
+  onSelectConnection
+}) {
+  if (connections.length === 0) {
+    return <svg className="canvas-connection-layer" aria-hidden="true" />;
+  }
+
+  return (
+    <svg className="canvas-connection-layer" aria-label={t('canvasConnect')}>
+      {connections.map((record) => {
+        const active = record.connection.id === activeConnectionId;
+        const tone = record.tone || canvasConnectionTones[0];
+        return (
+          <g
+            key={record.connection.id}
+            className={cn('canvas-connection', active && 'is-active')}
+            style={{
+              '--connection-color': tone.color,
+              '--connection-glow': tone.glow
+            }}
+          >
+            <path
+              className="canvas-connection-hit-area"
+              d={record.path}
+              role="button"
+              tabIndex={0}
+              aria-label={t('canvasConnect')}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onSelectConnection?.(record.connection.id);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onSelectConnection?.(record.connection.id);
+                }
+              }}
+            />
+            <path className="canvas-connection-path" d={record.path} />
+            <circle className="canvas-connection-terminal" cx={record.from.x} cy={record.from.y} r="4.5" />
+            <circle className="canvas-connection-terminal" cx={record.to.x} cy={record.to.y} r="4.5" />
+            {active && (
+              <foreignObject
+                className="canvas-connection-action-wrap"
+                x={record.midpoint.x - 14}
+                y={record.midpoint.y - 14}
+                width="28"
+                height="28"
+              >
+                <button
+                  type="button"
+                  className="canvas-connection-action"
+                  title={t('deleteCanvasConnection')}
+                  aria-label={t('deleteCanvasConnection')}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onDeleteConnection?.(record.connection.id);
+                  }}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </foreignObject>
+            )}
+          </g>
+        );
+      })}
+    </svg>
   );
 }
 
@@ -4182,10 +4848,13 @@ function EndpointGroup({
   runtimeNow,
   scale,
   commandTargetId,
+  connectionMode,
+  pendingConnectionSourceId,
   dispatchSparkles = {},
   selectedIds,
   t,
   onActivate,
+  onConnectionPortClick,
   onExpandPanel,
   onMove,
   onPanelTitleChange,
@@ -4248,7 +4917,7 @@ function EndpointGroup({
 
   return (
     <div
-      className="endpoint-group"
+      className={cn('endpoint-group', connectionMode && 'is-connection-mode')}
       data-endpoint-group-id={group.id}
       style={{
         left: group.x,
@@ -4305,6 +4974,7 @@ function EndpointGroup({
                 'endpoint-group-row',
                 selected && 'is-selected',
                 commandTargeted && 'is-command-target',
+                pendingConnectionSourceId === panel.id && 'is-connection-source',
                 dispatchSparkleKey && 'is-dispatch-sparkling'
               )}
               role="button"
@@ -4317,6 +4987,22 @@ function EndpointGroup({
                 }
               }}
             >
+              <SessionConnectionPort
+                active={pendingConnectionSourceId === panel.id}
+                className="endpoint-group-connection-port"
+                panelId={panel.id}
+                side="left"
+                t={t}
+                onClick={onConnectionPortClick}
+              />
+              <SessionConnectionPort
+                active={pendingConnectionSourceId === panel.id}
+                className="endpoint-group-connection-port"
+                panelId={panel.id}
+                side="right"
+                t={t}
+                onClick={onConnectionPortClick}
+              />
               {dispatchSparkleKey && (
                 <span key={dispatchSparkleKey} className="endpoint-group-row-sparkle" aria-hidden="true">
                   <Sparkles className="h-3.5 w-3.5" />
@@ -4367,16 +5053,20 @@ function TerminalPanel({
   active,
   runtimeNow,
   scale,
+  sessionHeaderVisibility,
   t,
   theme,
   availableSessionTags,
   visible = true,
   selected = false,
   commandTargeted = false,
+  connectionMode = false,
+  pendingConnectionSourceId = '',
   arrangeAnimation = null,
   dispatchSparkleKey = '',
   onActivate,
   onClose,
+  onConnectionPortClick,
   onExpand,
   onMinimize,
   onMove,
@@ -4399,6 +5089,17 @@ function TerminalPanel({
   const [contextMenu, setContextMenu] = useState(null);
   const panelProvider = getPanelCliProvider(panel);
   const sessionTag = getPanelSessionTag(panel);
+  const headerVisibility = normalizeSessionHeaderVisibility(sessionHeaderVisibility);
+  const showHeaderTag = headerVisibility.tag;
+  const showHeaderModel = headerVisibility.model && hasPanelModelTag(panel);
+  const showHeaderContext = headerVisibility.context && hasPanelContextTag(panel);
+  const showHeaderStatus = headerVisibility.status;
+  const showHeaderRuntime = headerVisibility.runtime;
+  const hasHeaderDetails = showHeaderTag
+    || showHeaderModel
+    || showHeaderContext
+    || showHeaderStatus
+    || showHeaderRuntime;
   const arrangeStyle = arrangeAnimation ? {
     '--canvas-arrange-delay': `${arrangeAnimation.delay || 0}ms`,
     '--canvas-arrange-duration': `${canvasArrangeDurationMs}ms`,
@@ -4941,6 +5642,8 @@ function TerminalPanel({
         panel.minimized && 'is-minimized',
         panel.minimized && selected && 'is-selected',
         commandTargeted && 'is-command-target',
+        connectionMode && 'is-connection-mode',
+        pendingConnectionSourceId === panel.id && 'is-connection-source',
         arrangeAnimation && 'is-arranging',
         dispatchSparkleKey && 'is-dispatch-sparkling',
         !visible && 'is-hidden'
@@ -4963,6 +5666,24 @@ function TerminalPanel({
       onContextMenu={openPanelContextMenu}
     >
       {contextMenuPortal}
+      {visible && (
+        <>
+          <SessionConnectionPort
+            active={pendingConnectionSourceId === panel.id}
+            panelId={panel.id}
+            side="left"
+            t={t}
+            onClick={onConnectionPortClick}
+          />
+          <SessionConnectionPort
+            active={pendingConnectionSourceId === panel.id}
+            panelId={panel.id}
+            side="right"
+            t={t}
+            onClick={onConnectionPortClick}
+          />
+        </>
+      )}
       {dispatchSparkleKey && (
         <div key={dispatchSparkleKey} className="terminal-panel-dispatch-sparkle" aria-hidden="true">
           <Sparkles className="terminal-panel-dispatch-sparkle-icon h-4 w-4" />
@@ -5039,18 +5760,21 @@ function TerminalPanel({
         </div>
       ) : (
         <CardHeader
-          className={cn(
-            'grid h-9 flex-none cursor-grab items-center gap-1.5 space-y-0 border-b border-[var(--panel-header-border)] bg-[var(--panel-header)] px-1.5 py-1 active:cursor-grabbing',
-            getSessionHeaderGridClass(panel)
-          )}
+          className="terminal-panel-header space-y-0"
           title={t('movePanel')}
           onPointerDown={startDrag}
         >
-          <Button type="button" variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" tabIndex={-1}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="terminal-panel-provider h-6 w-6 text-muted-foreground"
+            tabIndex={-1}
+          >
             <CliProviderIcon provider={panelProvider} className="h-4 w-4" />
           </Button>
           <Input
-            className="h-6 min-w-0 cursor-text border-transparent bg-transparent px-2 text-sm font-semibold shadow-none focus:border-border focus:bg-background focus-visible:ring-0"
+            className="terminal-panel-title-input h-6 min-w-0 cursor-text border-transparent bg-transparent px-2 text-sm font-semibold shadow-none focus:border-border focus:bg-background focus-visible:ring-0"
             value={panel.title}
             aria-label={t('renameSession')}
             spellCheck={false}
@@ -5060,60 +5784,76 @@ function TerminalPanel({
             onBlur={(event) => onTitleCommit(panel.id, event.target.value)}
             onKeyDown={handleTitleKeyDown}
           />
-          <SessionTagControl
-            availableTags={availableSessionTags}
-            value={sessionTag}
-            t={t}
-            onChange={(nextTag) => onTagChange?.(panel.id, nextTag)}
-          />
-          <SessionModelTag panel={panel} t={t} />
-          <SessionContextTag panel={panel} t={t} />
-          <SessionStatusTag panel={panel} t={t} />
-          <SessionRuntimeTag panel={panel} now={runtimeNow} t={t} />
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="h-6 w-6 text-xs font-bold"
-            title={t('minimizeSession')}
-            aria-label={t('minimizeSession')}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={() => onMinimize(panel.id)}
-          >
-            <Minimize2 className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="h-6 w-6 text-xs font-bold"
-            title={t('restart')}
-            aria-label={t('restart')}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={() => {
-              if (window.confirm(t('restartConfirm'))) {
-                onRestart(panel.id);
-              }
-            }}
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="destructive"
-            size="icon"
-            className="h-6 w-6"
-            title={t('close')}
-            aria-label={t('close')}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={() => {
-              if (window.confirm(t('closeConfirm'))) {
-                onClose(panel.id);
-              }
-            }}
-          >
-            <X className="h-3.5 w-3.5" />
-          </Button>
+          {hasHeaderDetails && (
+            <div className="terminal-panel-header-details">
+              {showHeaderTag && (
+                <SessionTagControl
+                  availableTags={availableSessionTags}
+                  value={sessionTag}
+                  t={t}
+                  onChange={(nextTag) => onTagChange?.(panel.id, nextTag)}
+                />
+              )}
+              {showHeaderModel && <SessionModelTag panel={panel} t={t} />}
+              {showHeaderContext && <SessionContextTag panel={panel} t={t} />}
+              {showHeaderStatus && <SessionStatusTag panel={panel} t={t} />}
+              {showHeaderRuntime && <SessionRuntimeTag panel={panel} now={runtimeNow} t={t} />}
+            </div>
+          )}
+          <div className="terminal-panel-actions">
+            <SessionHeaderMetaMenu
+              availableTags={availableSessionTags}
+              onTagChange={onTagChange}
+              panel={panel}
+              runtimeNow={runtimeNow}
+              sessionTag={sessionTag}
+              t={t}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="h-6 w-6 text-xs font-bold"
+              title={t('minimizeSession')}
+              aria-label={t('minimizeSession')}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => onMinimize(panel.id)}
+            >
+              <Minimize2 className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="h-6 w-6 text-xs font-bold"
+              title={t('restart')}
+              aria-label={t('restart')}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => {
+                if (window.confirm(t('restartConfirm'))) {
+                  onRestart(panel.id);
+                }
+              }}
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              size="icon"
+              className="h-6 w-6"
+              title={t('close')}
+              aria-label={t('close')}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => {
+                if (window.confirm(t('closeConfirm'))) {
+                  onClose(panel.id);
+                }
+              }}
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
         </CardHeader>
       )}
       <CardContent className="terminal-host p-2" onWheel={(event) => event.stopPropagation()}>
@@ -5358,14 +6098,18 @@ function UsageTrackingPanel({
 }
 
 function CodexConfigDialog({
+  appZoomFactor,
   commandDockShortcuts,
   initialSettingsTab = 'preferences',
   language,
+  onAppZoomFactorChange,
   onCommandDockShortcutChange,
   onLanguageChange,
   onOpenChange,
   onProfileChanged,
+  onSessionHeaderVisibilityChange,
   open,
+  sessionHeaderVisibility,
   showToast,
   t
 }) {
@@ -6273,6 +7017,7 @@ function CodexConfigDialog({
 
   const selectClassName = 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50';
   const normalizedCommandDockShortcuts = normalizeCommandDockShortcutSettings(commandDockShortcuts);
+  const normalizedSessionHeaderVisibility = normalizeSessionHeaderVisibility(sessionHeaderVisibility);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -6313,6 +7058,82 @@ function CodexConfigDialog({
                   <Button type="button" variant={language === 'en' ? 'primary' : 'outline'} onClick={() => onLanguageChange('en')}>
                     {t('english')}
                   </Button>
+                </div>
+              </div>
+              <div className="grid gap-2 border-t border-border/70 pt-3">
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <Label htmlFor="appZoomSlider" className="flex items-center gap-2 text-sm font-medium">
+                    <ZoomIn className="h-4 w-4" />
+                    {t('appZoom')}
+                  </Label>
+                  <Badge variant="outline" className="font-mono text-xs">
+                    {formatAppZoomPercent(appZoomFactor)}%
+                  </Badge>
+                </div>
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <input
+                    id="appZoomSlider"
+                    type="range"
+                    className="h-2 min-w-[180px] flex-1 accent-primary"
+                    min={appZoomMinFactor}
+                    max={appZoomMaxFactor}
+                    step={appZoomStep}
+                    value={normalizeAppZoomFactor(appZoomFactor)}
+                    aria-label={t('appZoom')}
+                    onChange={(event) => onAppZoomFactorChange?.(normalizeAppZoomFactor(event.target.value))}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onAppZoomFactorChange?.(appZoomDefaultFactor)}
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    {t('appZoomReset')}
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {appZoomPresetFactors.map((factor) => {
+                    const percent = formatAppZoomPercent(factor);
+                    const active = Math.abs(normalizeAppZoomFactor(appZoomFactor) - factor) < 0.01;
+                    return (
+                      <Button
+                        key={factor}
+                        type="button"
+                        size="sm"
+                        variant={active ? 'primary' : 'outline'}
+                        title={t('appZoomPreset', { percent })}
+                        onClick={() => onAppZoomFactorChange?.(factor)}
+                      >
+                        {percent}%
+                      </Button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="grid gap-2 border-t border-border/70 pt-3">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <SquareTerminal className="h-4 w-4" />
+                  {t('sessionHeaderDisplay')}
+                </Label>
+                <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-5">
+                  {sessionHeaderItemOptions.map((option) => (
+                    <Label
+                      key={option.id}
+                      className="inline-flex min-h-8 items-center gap-2 rounded-md border border-border bg-background/70 px-2.5 py-1.5 text-xs text-foreground"
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 accent-primary"
+                        checked={normalizedSessionHeaderVisibility[option.id]}
+                        onChange={(event) => onSessionHeaderVisibilityChange?.(option.id, event.target.checked)}
+                      />
+                      <span className="truncate">{t(option.labelKey)}</span>
+                    </Label>
+                  ))}
+                </div>
+                <div className="text-xs leading-5 text-muted-foreground">
+                  {t('sessionHeaderDisplayHint')}
                 </div>
               </div>
               <div className="grid gap-2 border-t border-border/70 pt-3">
@@ -7511,157 +8332,6 @@ function AgentsDialog({
   );
 }
 
-function TopbarLaunchMenu({
-  cliProviderId,
-  language,
-  onAddCommandLine,
-  onAddGrid,
-  onAddSession,
-  onCliProviderChange,
-  onOpenGridSessionDialog,
-  onOpenSessionPicker,
-  t
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef(null);
-  const selectableCliProviders = useMemo(() => getSelectableCliProviders(['project', 'directory']), []);
-  const selectedCliProviderId = getInitialCliProviderId(cliProviderId, selectableCliProviders);
-  const selectedCliProvider = resolveSelectableCliProvider(selectedCliProviderId, selectableCliProviders);
-  const selectedLabel = selectedCliProvider
-    ? getCliProviderBadgeLabel(selectedCliProvider, language)
-    : t('cliProvider');
-
-  useEffect(() => {
-    if (!open) {
-      return undefined;
-    }
-
-    const closeOnPointerDown = (event) => {
-      if (!rootRef.current?.contains(event.target)) {
-        setOpen(false);
-      }
-    };
-    const closeOnEscape = (event) => {
-      if (event.key === 'Escape') {
-        setOpen(false);
-      }
-    };
-
-    document.addEventListener('pointerdown', closeOnPointerDown);
-    document.addEventListener('keydown', closeOnEscape);
-    return () => {
-      document.removeEventListener('pointerdown', closeOnPointerDown);
-      document.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [open]);
-
-  const runAction = useCallback((handler, providerId = selectedCliProviderId) => {
-    setOpen(false);
-    handler(providerId);
-  }, [selectedCliProviderId]);
-
-  return (
-    <div className="launch-menu" ref={rootRef}>
-      <Button
-        id="launchMenuButton"
-        type="button"
-        variant="primary"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={t('launchMenuAria')}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <Plus className="h-4 w-4" />
-        {t('launchMenu')}
-        <span className="launch-menu-button-provider">
-          {selectedLabel}
-        </span>
-        <ChevronDown className={cn('h-4 w-4 transition-transform', open && 'rotate-180')} />
-      </Button>
-
-      {open && (
-        <div className="launch-menu-panel" role="menu" aria-label={t('launchMenuAria')}>
-          <CliProviderSelectField
-            id="topbarLaunchCliProvider"
-            language={language}
-            label={t('cliProvider')}
-            onChange={onCliProviderChange}
-            providerId={selectedCliProviderId}
-            providers={selectableCliProviders}
-            targetType="project"
-            t={t}
-          />
-
-          <div className="launch-menu-divider" />
-
-          <div className="launch-menu-actions">
-            <button
-              type="button"
-              className="launch-menu-item"
-              role="menuitem"
-              onClick={() => runAction(onAddSession)}
-            >
-              <MessageSquarePlus className="launch-menu-item-icon" />
-              <span className="launch-menu-item-copy">
-                <span className="launch-menu-item-title">{t('addSession')}</span>
-                <span className="launch-menu-item-subtitle">{t('launchAtCurrentWorkspace')}</span>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="launch-menu-item"
-              role="menuitem"
-              onClick={() => runAction(onOpenSessionPicker)}
-            >
-              <FolderOpen className="launch-menu-item-icon" />
-              <span className="launch-menu-item-copy">
-                <span className="launch-menu-item-title">{t('newSessionSource')}</span>
-                <span className="launch-menu-item-subtitle">{t('launchChooseTarget')}</span>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="launch-menu-item"
-              role="menuitem"
-              onClick={() => runAction(onAddCommandLine, 'shell')}
-            >
-              <SquareTerminal className="launch-menu-item-icon" />
-              <span className="launch-menu-item-copy">
-                <span className="launch-menu-item-title">{t('addCommandLine')}</span>
-                <span className="launch-menu-item-subtitle">{t('launchCurrentDirectory')}</span>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="launch-menu-item"
-              role="menuitem"
-              onClick={() => runAction(onAddGrid)}
-            >
-              <Grid2X2 className="launch-menu-item-icon" />
-              <span className="launch-menu-item-copy">
-                <span className="launch-menu-item-title">{t('quickGrid2x2')}</span>
-                <span className="launch-menu-item-subtitle">{t('launchFourSessions')}</span>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="launch-menu-item"
-              role="menuitem"
-              onClick={() => runAction(onOpenGridSessionDialog)}
-            >
-              <LayoutGrid className="launch-menu-item-icon" />
-              <span className="launch-menu-item-copy">
-                <span className="launch-menu-item-title">{t('addSessionGrid')}</span>
-                <span className="launch-menu-item-subtitle">{t('launchCustomCount')}</span>
-              </span>
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function SystemStats({ stats, t }) {
   const cpuText = formatUsagePercent(stats?.cpuUsage);
   const memoryText = formatUsagePercent(stats?.memoryUsage);
@@ -7935,19 +8605,7 @@ function CommandLineConfigDialog({
     }
 
     const fallbackName = deriveCommandPresetTitle(normalizedCommand, t('commandPresetCommand'));
-    const requestedName = window.prompt(
-      t('commandPresetNamePrompt'),
-      selectedCommandPreset?.name || fallbackName
-    );
-    if (requestedName === null) {
-      return;
-    }
-
-    const name = requestedName.trim();
-    if (!name) {
-      showToast?.(t('commandPresetNameRequired'));
-      return;
-    }
+    const name = selectedCommandPreset?.name || fallbackName;
 
     setCommandPresetSaving(true);
     try {
@@ -7956,7 +8614,12 @@ function CommandLineConfigDialog({
         name,
         command: normalizedCommand
       });
-      const savedPreset = store?.savedPreset || null;
+      const savedPreset = store?.savedPreset
+        || (Array.isArray(store?.presets)
+          ? store.presets.find((preset) => (
+            preset.command === normalizedCommand && preset.name === name
+          ))
+          : null);
       if (savedPreset?.id) {
         setSelectedCommandPresetId(savedPreset.id);
         setCommand(savedPreset.command || normalizedCommand);
@@ -9060,6 +9723,8 @@ export default function App() {
   const [cwd, setCwd] = useState(initialSettings.cwd);
   const [theme, setTheme] = useState(initialSettings.theme);
   const [language, setLanguage] = useState(initialSettings.language);
+  const [appZoomFactor, setAppZoomFactor] = useState(initialSettings.appZoomFactor);
+  const [sessionHeaderVisibility, setSessionHeaderVisibility] = useState(initialSettings.sessionHeaderVisibility);
   const [view, setView] = useState(initialView);
   const [workspace, setWorkspace] = useState(initialWorkspace);
   const [agents, setAgents] = useState(initialAgents);
@@ -9070,6 +9735,9 @@ export default function App() {
   const [activeCanvasFrameId, setActiveCanvasFrameId] = useState(null);
   const [activeCanvasTodoId, setActiveCanvasTodoId] = useState(null);
   const [pendingCanvasFrame, setPendingCanvasFrame] = useState(false);
+  const [connectionMode, setConnectionMode] = useState(false);
+  const [pendingConnectionSourceId, setPendingConnectionSourceId] = useState('');
+  const [activeCanvasConnectionId, setActiveCanvasConnectionId] = useState(null);
   const [canvasContextMenu, setCanvasContextMenu] = useState(null);
   const [launchCliProviderId, setLaunchCliProviderId] = useState(defaultCliProviderId);
   const [codexOpen, setCodexOpen] = useState(false);
@@ -9137,6 +9805,7 @@ export default function App() {
   const commandDockDispatchTasksRef = useRef(null);
   const commandDockDispatchSparkleTimersRef = useRef(new Map());
   const canvasArrangeTimerRef = useRef(null);
+  const idleCommandCollectTimerRef = useRef(null);
   const panelActivityQueueRef = useRef(new Map());
   const panelActivityFlushTimer = useRef(null);
   const sessionReviewRecordsRef = useRef({});
@@ -9152,6 +9821,7 @@ export default function App() {
   const activeIdRef = useRef(null);
   const activeCanvasFrameIdRef = useRef(null);
   const activeCanvasTodoIdRef = useRef(null);
+  const activeCanvasConnectionIdRef = useRef(null);
   const cwdRef = useRef(cwd);
   const activeCommandPresetRef = useRef(null);
   const workspaceTreeRequestIdRef = useRef(0);
@@ -9186,6 +9856,7 @@ export default function App() {
   );
   const skillsRootPath = currentWorkspacePath;
   const t = useCallback((key, values) => translate(language, key, values), [language]);
+  const canvasLaunchProviders = useMemo(() => getSelectableCliProviders(['project', 'directory']), []);
   const activeCommandPreset = useMemo(() => (
     commandPresets.find((preset) => preset.id === activeCommandPresetId) || null
   ), [activeCommandPresetId, commandPresets]);
@@ -9259,6 +9930,10 @@ export default function App() {
     () => getWorkspaceCanvasTodos(workspace),
     [workspace]
   );
+  const visibleCanvasConnections = useMemo(
+    () => getWorkspaceCanvasConnections(workspace),
+    [workspace]
+  );
   const visiblePinnedCanvasTodos = useMemo(
     () => visibleCanvasTodos.filter((todo) => todo.pinned),
     [visibleCanvasTodos]
@@ -9289,11 +9964,40 @@ export default function App() {
     () => new Set(visibleEndpointGroups.flatMap((record) => record.panels.map((panel) => panel.id))),
     [visibleEndpointGroups]
   );
+  const visibleConnectionRecords = useMemo(() => {
+    const visiblePanelMap = new Map(visiblePanels.map((panel) => [panel.id, panel]));
+    return visibleCanvasConnections
+      .map((connection) => {
+        const fromPanel = visiblePanelMap.get(connection.fromId);
+        const toPanel = visiblePanelMap.get(connection.toId);
+        if (!fromPanel || !toPanel) {
+          return null;
+        }
+
+        const fromRect = getPanelCanvasRect(fromPanel, panels, endpointGroups, workspace);
+        const toRect = getPanelCanvasRect(toPanel, panels, endpointGroups, workspace);
+        if (!fromRect || !toRect) {
+          return null;
+        }
+
+        return {
+          connection,
+          ...buildCanvasConnectionPath(fromRect, toRect),
+          tone: getCanvasConnectionTone(connection)
+        };
+      })
+      .filter(Boolean);
+  }, [endpointGroups, panels, visibleCanvasConnections, visiblePanels, workspace]);
   const groupableEndpointCount = useMemo(() => {
     const visibleEndpoints = visiblePanels.filter((panel) => panel.minimized);
     const selectedVisibleCount = visibleEndpoints.filter((panel) => selectedEndpointIds.has(panel.id)).length;
     return selectedVisibleCount || visibleEndpoints.length;
   }, [selectedEndpointIds, visiblePanels]);
+  const idleCommandLineCount = useMemo(() => (
+    visiblePanels.filter((panel) => (
+      getPanelExecutionState(panel, runtimeNow) === 'idle'
+    )).length
+  ), [runtimeNow, visiblePanels]);
   const commandDockPanels = useMemo(() => {
     const stateRank = {
       running: 0,
@@ -9382,6 +10086,10 @@ export default function App() {
   }, [activeCanvasTodoId]);
 
   useEffect(() => {
+    activeCanvasConnectionIdRef.current = activeCanvasConnectionId;
+  }, [activeCanvasConnectionId]);
+
+  useEffect(() => {
     cwdRef.current = cwd;
   }, [cwd]);
 
@@ -9419,7 +10127,15 @@ export default function App() {
   }, [activeCanvasTodoId, visibleCanvasTodos]);
 
   useEffect(() => {
+    if (activeCanvasConnectionId && !visibleConnectionRecords.some((record) => record.connection.id === activeCanvasConnectionId)) {
+      setActiveCanvasConnectionId(null);
+    }
+  }, [activeCanvasConnectionId, visibleConnectionRecords]);
+
+  useEffect(() => {
     setPendingCanvasFrame(false);
+    setPendingConnectionSourceId('');
+    setActiveCanvasConnectionId(null);
   }, [workspace.activeProjectId, workspace.canvasMode]);
 
   useEffect(() => {
@@ -9952,6 +10668,7 @@ export default function App() {
     commandDockDispatchSparkleTimersRef.current.clear();
   }, []);
   useEffect(() => () => window.clearTimeout(canvasArrangeTimerRef.current), []);
+  useEffect(() => () => window.clearTimeout(idleCommandCollectTimerRef.current), []);
 
   const closeCommandDockSkillMention = useCallback(() => {
     setCommandDockSkillMention((current) => (
@@ -10047,6 +10764,12 @@ export default function App() {
   const changeCommandDockShortcut = useCallback((action, value) => {
     setCommandDockShortcuts((current) => (
       updateCommandDockShortcutSetting(current, action, value)
+    ));
+  }, []);
+
+  const changeSessionHeaderVisibility = useCallback((itemId, visible) => {
+    setSessionHeaderVisibility((current) => (
+      updateSessionHeaderVisibilitySetting(current, itemId, visible)
     ));
   }, []);
 
@@ -10589,6 +11312,35 @@ export default function App() {
     submitTerminalTextPayload(panelId, value)
   ), [submitTerminalTextPayload]);
 
+  const focusCommandDockTerminal = useCallback((target) => {
+    const targetId = String((typeof target === 'string' ? target : target?.id) || '').trim();
+    if (!targetId) {
+      return;
+    }
+
+    let attempts = 0;
+    const focus = () => {
+      const panel = panelsRef.current.find((item) => item.id === targetId) || target;
+      if (panel?.minimized) {
+        return;
+      }
+
+      const instance = terminalInstances.current.get(targetId);
+      if (instance?.term) {
+        instance?.fit?.();
+        focusTerminalForTextInput(instance.term);
+        return;
+      }
+
+      attempts += 1;
+      if (attempts < 4) {
+        window.setTimeout(focus, 60);
+      }
+    };
+
+    window.requestAnimationFrame(focus);
+  }, []);
+
   const getCommandDockTargetRect = useCallback((panel) => {
     if (!panel) {
       return null;
@@ -10723,10 +11475,10 @@ export default function App() {
     showToast(t('floatingComposerSent', { name: targetPanel.title }));
     window.requestAnimationFrame(() => {
       resizeCommandDockInput();
-      commandDockInputRef.current?.focus();
     });
+    focusCommandDockTerminal(targetPanel);
     return true;
-  }, [centerCanvasOnCommandDockTarget, closeCommandDockSkillMention, commandDockPanels, commandDockTargetId, commandDockValue, flashCommandDockDispatchTargets, rememberCommandDockHistory, resizeCommandDockInput, showToast, submitCommandDockPayload, t, touchPanelActivity]);
+  }, [centerCanvasOnCommandDockTarget, closeCommandDockSkillMention, commandDockPanels, commandDockTargetId, commandDockValue, flashCommandDockDispatchTargets, focusCommandDockTerminal, rememberCommandDockHistory, resizeCommandDockInput, showToast, submitCommandDockPayload, t, touchPanelActivity]);
 
   const handleCommandDockCompositionStart = useCallback(() => {
     commandDockComposingRef.current = true;
@@ -10882,6 +11634,14 @@ export default function App() {
     });
   }, [commitWorkspace]);
 
+  const updateCanvasConnectionsForKey = useCallback((canvasKey, updater) => {
+    commitWorkspace((currentWorkspace) => {
+      const currentConnections = getWorkspaceCanvasConnections(currentWorkspace, canvasKey);
+      const nextConnections = updater(currentConnections);
+      return withWorkspaceCanvasConnections(currentWorkspace, canvasKey, nextConnections);
+    });
+  }, [commitWorkspace]);
+
   useEffect(() => {
     bridge.getAppInfo().then((info) => {
       setAppInfo(info);
@@ -10936,6 +11696,8 @@ export default function App() {
         cwd,
         theme,
         language,
+        appZoomFactor: normalizeAppZoomFactor(appZoomFactor),
+        sessionHeaderVisibility: normalizeSessionHeaderVisibility(sessionHeaderVisibility),
         view,
         commandDockDispatchMode,
         commandDockShortcuts: normalizeCommandDockShortcutSettings(commandDockShortcuts),
@@ -10943,7 +11705,7 @@ export default function App() {
         commandDockHistory
       }));
     }, 180);
-  }, [commandDockDispatchMode, commandDockHistory, commandDockPosition, commandDockShortcuts, cwd, language, theme, view]);
+  }, [appZoomFactor, commandDockDispatchMode, commandDockHistory, commandDockPosition, commandDockShortcuts, cwd, language, sessionHeaderVisibility, theme, view]);
 
   useEffect(() => () => window.clearTimeout(saveSettingsTimer.current), []);
 
@@ -10991,6 +11753,44 @@ export default function App() {
 
     focusTerminalForTextInput(instance.term);
   }, []);
+
+  const refitTerminalInstances = useCallback(() => {
+    const fitAll = () => {
+      terminalInstances.current.forEach((instance) => {
+        try {
+          instance?.fit?.();
+        } catch {
+          // A terminal can unmount while Electron is applying page zoom.
+        }
+      });
+    };
+
+    window.requestAnimationFrame(() => {
+      fitAll();
+      window.setTimeout(fitAll, 120);
+    });
+  }, []);
+
+  useEffect(() => {
+    let canceled = false;
+    const zoomFactor = normalizeAppZoomFactor(appZoomFactor);
+
+    bridge.setAppZoomFactor(zoomFactor)
+      .then(() => {
+        if (!canceled) {
+          refitTerminalInstances();
+        }
+      })
+      .catch((error) => {
+        if (!canceled) {
+          showToast(t('appZoomApplyFailed', { message: error.message }));
+        }
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [appZoomFactor, refitTerminalInstances, showToast, t]);
 
   const flushSessionReviewRecords = useCallback(() => {
     sessionReviewFlushTimer.current = null;
@@ -11133,6 +11933,7 @@ export default function App() {
     setActiveId(id);
     setActiveCanvasFrameId(null);
     setActiveCanvasTodoId(null);
+    setActiveCanvasConnectionId(null);
     setPanels((current) => current.map((panel) => (
       panel.id === id ? { ...panel, zIndex: nextZIndex.current } : panel
     )));
@@ -11146,6 +11947,7 @@ export default function App() {
     setActiveCanvasFrameId(id);
     setActiveCanvasTodoId(null);
     setActiveId(null);
+    setActiveCanvasConnectionId(null);
     updateCanvasFramesForKey(canvasKey, (currentFrames) => {
       const index = currentFrames.findIndex((frame) => frame.id === id);
       if (index < 0 || index === currentFrames.length - 1) {
@@ -11163,6 +11965,7 @@ export default function App() {
     const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
     setActiveCanvasFrameId(id);
     setActiveCanvasTodoId(null);
+    setActiveCanvasConnectionId(null);
     updateCanvasFramesForKey(canvasKey, (currentFrames) => currentFrames.map((frame) => (
       frame.id === id ? normalizeCanvasFrame({ ...frame, ...patch }) : frame
     )));
@@ -11195,6 +11998,7 @@ export default function App() {
     setActiveId(null);
     setActiveCanvasTodoId(null);
     setActiveCanvasFrameId(frameId);
+    setActiveCanvasConnectionId(null);
     updateCanvasFramesForKey(canvasKey, (currentFrames) => [...currentFrames, frame]);
   }, [t, updateCanvasFramesForKey]);
 
@@ -11203,6 +12007,7 @@ export default function App() {
     setActiveCanvasTodoId(id);
     setActiveCanvasFrameId(null);
     setActiveId(null);
+    setActiveCanvasConnectionId(null);
     updateCanvasTodosForKey(canvasKey, (currentTodos) => {
       const index = currentTodos.findIndex((todo) => todo.id === id);
       if (index < 0 || index === currentTodos.length - 1) {
@@ -11220,6 +12025,7 @@ export default function App() {
     const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
     setActiveCanvasTodoId(id);
     setActiveCanvasFrameId(null);
+    setActiveCanvasConnectionId(null);
     updateCanvasTodosForKey(canvasKey, (currentTodos) => currentTodos.map((todo) => (
       todo.id === id ? normalizeCanvasTodo({ ...todo, ...patch }) : todo
     )));
@@ -11229,6 +12035,7 @@ export default function App() {
     const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
     setActiveCanvasTodoId(id);
     setActiveCanvasFrameId(null);
+    setActiveCanvasConnectionId(null);
     updateCanvasTodosForKey(canvasKey, (currentTodos) => currentTodos.map((todo) => {
       if (todo.id !== id) {
         return todo;
@@ -11260,6 +12067,7 @@ export default function App() {
     setActiveCanvasTodoId(todoId);
     setActiveCanvasFrameId(null);
     setActiveId(null);
+    setActiveCanvasConnectionId(null);
     updateCanvasTodosForKey(canvasKey, (currentTodos) => [...currentTodos, todo]);
     showToast(t('canvasTodoAdded'));
   }, [showToast, t, updateCanvasTodosForKey, viewportCenterOnCanvas]);
@@ -11273,6 +12081,7 @@ export default function App() {
     const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
     setActiveCanvasTodoId(id);
     setActiveCanvasFrameId(null);
+    setActiveCanvasConnectionId(null);
     updateCanvasTodosForKey(canvasKey, (currentTodos) => currentTodos.map((todo) => (
       todo.id === id ? normalizeCanvasTodo({ ...todo, pinned: !todo.pinned }) : todo
     )));
@@ -11324,6 +12133,103 @@ export default function App() {
   const removeCanvasTodoItem = useCallback((todoId, itemId) => {
     updateCanvasTodoItems(todoId, (items) => items.filter((item) => item.id !== itemId));
   }, [updateCanvasTodoItems]);
+
+  const selectCanvasConnection = useCallback((id) => {
+    setActiveCanvasConnectionId(id);
+    setActiveId(null);
+    setActiveCanvasFrameId(null);
+    setActiveCanvasTodoId(null);
+  }, []);
+
+  const deleteCanvasConnection = useCallback((id) => {
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    updateCanvasConnectionsForKey(canvasKey, (currentConnections) => (
+      currentConnections.filter((connection) => connection.id !== id)
+    ));
+    setActiveCanvasConnectionId((current) => (current === id ? null : current));
+    showToast(t('canvasConnectionRemoved'));
+  }, [showToast, t, updateCanvasConnectionsForKey]);
+
+  const connectCanvasSessions = useCallback((fromId, toId) => {
+    const sourceId = String(fromId || '').trim();
+    const targetId = String(toId || '').trim();
+    if (!sourceId || !targetId || sourceId === targetId) {
+      setPendingConnectionSourceId('');
+      showToast(t('canvasConnectionCancel'));
+      return;
+    }
+
+    const currentWorkspace = workspaceRef.current;
+    const canvasKey = getWorkspaceCanvasKey(currentWorkspace);
+    const currentConnections = getWorkspaceCanvasConnections(currentWorkspace, canvasKey);
+    const pairKey = getCanvasConnectionPairKey(sourceId, targetId);
+    const existingConnection = currentConnections.find((connection) => (
+      getCanvasConnectionPairKey(connection.fromId, connection.toId) === pairKey
+    ));
+
+    if (existingConnection) {
+      updateCanvasConnectionsForKey(canvasKey, (connections) => (
+        connections.filter((connection) => connection.id !== existingConnection.id)
+      ));
+      setActiveCanvasConnectionId(null);
+      showToast(t('canvasConnectionRemoved'));
+      return;
+    }
+
+    const nextConnection = {
+      id: createLocalId('canvas-connection'),
+      fromId: sourceId,
+      toId: targetId,
+      createdAt: Date.now()
+    };
+    updateCanvasConnectionsForKey(canvasKey, (connections) => [...connections, nextConnection]);
+    setActiveCanvasConnectionId(nextConnection.id);
+    setActiveId(null);
+    setActiveCanvasFrameId(null);
+    setActiveCanvasTodoId(null);
+    showToast(t('canvasConnectionCreated'));
+  }, [showToast, t, updateCanvasConnectionsForKey]);
+
+  const handleSessionConnectionPortClick = useCallback((panelId) => {
+    const normalizedPanelId = String(panelId || '').trim();
+    const panel = panelsRef.current.find((item) => item.id === normalizedPanelId);
+    if (!panel || !isPanelVisibleInWorkspace(panel, workspaceRef.current)) {
+      return;
+    }
+
+    setConnectionMode(true);
+    setActiveCanvasConnectionId(null);
+    setActiveCanvasFrameId(null);
+    setActiveCanvasTodoId(null);
+    setActiveId(panel.id);
+
+    if (!pendingConnectionSourceId) {
+      setPendingConnectionSourceId(panel.id);
+      showToast(t('canvasConnectionStart'));
+      return;
+    }
+
+    if (pendingConnectionSourceId === panel.id) {
+      setPendingConnectionSourceId('');
+      showToast(t('canvasConnectionCancel'));
+      return;
+    }
+
+    connectCanvasSessions(pendingConnectionSourceId, panel.id);
+    setPendingConnectionSourceId('');
+  }, [connectCanvasSessions, pendingConnectionSourceId, showToast, t]);
+
+  const toggleCanvasConnectionMode = useCallback(() => {
+    const nextMode = !connectionMode;
+    setConnectionMode(nextMode);
+    if (nextMode) {
+      setPendingCanvasFrame(false);
+      showToast(t('canvasConnectHint'));
+      return;
+    }
+
+    setPendingConnectionSourceId('');
+  }, [connectionMode, showToast, t]);
 
   const createTerminal = useCallback(async (slot = {}) => {
     const center = viewportCenterOnCanvas();
@@ -11391,6 +12297,7 @@ export default function App() {
     setActiveId(meta.id);
     setActiveCanvasFrameId(null);
     setActiveCanvasTodoId(null);
+    setActiveCanvasConnectionId(null);
     window.requestAnimationFrame(() => focusTerminalInstance(meta.id));
     return panel;
   }, [focusTerminalInstance, getVisiblePanels, language, viewportCenterOnCanvas]);
@@ -11559,8 +12466,8 @@ export default function App() {
           : dispatchDoneMessage);
         window.requestAnimationFrame(() => {
           resizeCommandDockInput();
-          commandDockInputRef.current?.focus();
         });
+        focusCommandDockTerminal(dispatchTargets[0]);
         return true;
       } catch (error) {
         showToast(t('floatingComposerDispatchFailed', { message: error.message }));
@@ -11582,6 +12489,7 @@ export default function App() {
     commandDockValue,
     createTerminal,
     flashCommandDockDispatchTargets,
+    focusCommandDockTerminal,
     getCenteredTerminalSlot,
     getCurrentSessionLaunchContext,
     language,
@@ -11640,6 +12548,7 @@ export default function App() {
     }
 
     setPanels((current) => current.filter((panel) => panel.id !== id));
+    commitWorkspace((currentWorkspace) => withoutWorkspaceCanvasConnectionsForSession(currentWorkspace, id));
     setSelectedEndpointIds((current) => {
       if (!current.has(id)) {
         return current;
@@ -11651,7 +12560,9 @@ export default function App() {
     if (activeIdRef.current === id) {
       setActiveId(null);
     }
-  }, []);
+    setPendingConnectionSourceId((current) => (current === id ? '' : current));
+    setActiveCanvasConnectionId(null);
+  }, [commitWorkspace]);
 
   const restartTerminal = useCallback(async (id) => {
     const panel = panelsRef.current.find((item) => item.id === id);
@@ -11743,6 +12654,7 @@ export default function App() {
     setActiveId(id);
     setActiveCanvasFrameId(null);
     setActiveCanvasTodoId(null);
+    setActiveCanvasConnectionId(null);
     setPanels((current) => current.map((panel) => (
       panel.id === id
         ? {
@@ -11801,6 +12713,7 @@ export default function App() {
     nextZIndex.current += 1;
     setActiveCanvasFrameId(null);
     setActiveCanvasTodoId(null);
+    setActiveCanvasConnectionId(null);
     setEndpointGroups((current) => current.map((group) => (
       group.id === id ? { ...group, zIndex: nextZIndex.current } : group
     )));
@@ -11908,6 +12821,243 @@ export default function App() {
     });
     setSelectedEndpointIds(new Set());
   }, [getEndpointVisualRect, selectedEndpointIds, showToast, t]);
+
+  const startCanvasArrangeAnimation = useCallback((records, positions) => {
+    const animations = {};
+    const orderedRecords = [...records].sort((left, right) => (
+      (left.y - right.y) || (left.x - right.x) || left.title.localeCompare(right.title)
+    ));
+    const orderIndex = new Map(orderedRecords.map((panel, index) => [panel.id, index]));
+
+    records.forEach((panel) => {
+      const nextLayout = positions.get(panel.id);
+      if (!nextLayout || (panel.groupId && panel.minimized)) {
+        return;
+      }
+
+      const fromRect = {
+        x: panel.x,
+        y: panel.y,
+        width: panel.minimized ? endpointWidth : panel.width,
+        height: panel.minimized ? endpointHeight : panel.height
+      };
+      const toRect = {
+        x: nextLayout.x,
+        y: nextLayout.y,
+        width: panel.minimized ? endpointWidth : nextLayout.width,
+        height: panel.minimized ? endpointHeight : nextLayout.height
+      };
+      const dx = Math.round(fromRect.x - toRect.x);
+      const dy = Math.round(fromRect.y - toRect.y);
+      const scaleX = toRect.width > 0 ? clamp(fromRect.width / toRect.width, 0.25, 4) : 1;
+      const scaleY = toRect.height > 0 ? clamp(fromRect.height / toRect.height, 0.25, 4) : 1;
+      const changed = Math.abs(dx) > 0
+        || Math.abs(dy) > 0
+        || Math.abs(scaleX - 1) > 0.01
+        || Math.abs(scaleY - 1) > 0.01;
+
+      if (!changed) {
+        return;
+      }
+
+      animations[panel.id] = {
+        dx,
+        dy,
+        scaleX: Number(scaleX.toFixed(4)),
+        scaleY: Number(scaleY.toFixed(4)),
+        delay: Math.min((orderIndex.get(panel.id) || 0) * 24, canvasArrangeMaxStaggerMs)
+      };
+    });
+
+    window.clearTimeout(canvasArrangeTimerRef.current);
+
+    if (Object.keys(animations).length === 0) {
+      setCanvasArrangeAnimations({});
+      setCanvasArrangeActive(false);
+      return;
+    }
+
+    const longestDelay = Math.max(...Object.values(animations).map((item) => item.delay || 0));
+    setCanvasArrangeAnimations(animations);
+    setCanvasArrangeActive(true);
+    canvasArrangeTimerRef.current = window.setTimeout(() => {
+      setCanvasArrangeAnimations({});
+      setCanvasArrangeActive(false);
+      canvasArrangeTimerRef.current = null;
+    }, canvasArrangeDurationMs + longestDelay + 160);
+  }, []);
+
+  const collectIdleCommandLines = useCallback(() => {
+    const currentWorkspace = workspaceRef.current;
+    const canvasKey = getWorkspaceCanvasKey(currentWorkspace);
+    const currentPanels = panelsRef.current;
+    const now = Date.now();
+    const eligiblePanels = currentPanels.filter((panel) => (
+      isPanelVisibleInWorkspace(panel, currentWorkspace) &&
+      getPanelExecutionState(panel, now) === 'idle'
+    ));
+
+    if (eligiblePanels.length === 0) {
+      showToast(t('collectIdleCmdUnavailable'));
+      return;
+    }
+
+    const getCollectVisualRect = (panel) => {
+      if (panel.minimized) {
+        return getEndpointVisualRect(panel);
+      }
+
+      return {
+        x: panel.x,
+        y: panel.y,
+        width: panel.width,
+        height: panel.height
+      };
+    };
+    const visualRects = new Map(eligiblePanels.map((panel) => [panel.id, getCollectVisualRect(panel)]));
+    const locale = language === 'en' ? 'en-US' : 'zh-CN';
+    const candidates = [...eligiblePanels].sort((left, right) => {
+      const leftRect = visualRects.get(left.id) || getCollectVisualRect(left);
+      const rightRect = visualRects.get(right.id) || getCollectVisualRect(right);
+      return (leftRect.y - rightRect.y) ||
+        (leftRect.x - rightRect.x) ||
+        ((left.createdAt || 0) - (right.createdAt || 0)) ||
+        String(left.title || '').localeCompare(String(right.title || ''), locale);
+    });
+    const memberIds = new Set(candidates.map((panel) => panel.id));
+    const currentGroup = endpointGroupsRef.current.find((group) => (
+      group.canvasKey === canvasKey && group.kind === idleCommandLineGroupKind
+    ));
+    const groupId = currentGroup?.id || createLocalId('endpoint-group');
+
+    if (
+      currentGroup &&
+      candidates.every((panel) => panel.minimized && panel.groupId === currentGroup.id)
+    ) {
+      nextZIndex.current += 1;
+      setEndpointGroups((current) => current.map((group) => (
+        group.id === currentGroup.id ? { ...group, zIndex: nextZIndex.current } : group
+      )));
+      showToast(t('collectIdleCmdDone', { count: candidates.length }));
+      return;
+    }
+
+    const existingTargetMembers = currentGroup
+      ? currentPanels.filter((panel) => (
+          panel.groupId === currentGroup.id &&
+          panel.minimized &&
+          !memberIds.has(panel.id) &&
+          isPanelVisibleInWorkspace(panel, currentWorkspace)
+        ))
+      : [];
+    const groupWidth = Math.round(clamp(currentGroup?.width || idleCommandLineGroupWidth, 340, 520));
+    const finalMemberCount = existingTargetMembers.length + candidates.length;
+    const groupHeight = Math.min(460, 58 + finalMemberCount * 42 + 12);
+    const center = viewportCenterOnCanvas();
+    const groupX = Math.round(Number.isFinite(currentGroup?.x)
+      ? currentGroup.x
+      : center.x - groupWidth / 2);
+    const groupY = Math.round(Number.isFinite(currentGroup?.y)
+      ? currentGroup.y
+      : center.y - groupHeight / 2);
+    const targetPositions = new Map(candidates.map((panel, index) => [panel.id, {
+      x: groupX + 14,
+      y: groupY + 58 + (existingTargetMembers.length + index) * 42,
+      width: endpointWidth,
+      height: endpointHeight
+    }]));
+    const orderIndex = new Map(candidates.map((panel, index) => [panel.id, index]));
+    const animationRecords = candidates.map((panel) => {
+      const rect = visualRects.get(panel.id) || getCollectVisualRect(panel);
+      return {
+        ...panel,
+        groupId: null,
+        x: Math.round(rect.x),
+        y: Math.round(rect.y)
+      };
+    });
+    const animationRecordById = new Map(animationRecords.map((record) => [record.id, record]));
+    const groupZIndex = nextZIndex.current + 1;
+    const panelZIndexBase = groupZIndex + 1;
+    const nextGroup = {
+      ...(currentGroup || {}),
+      id: groupId,
+      kind: idleCommandLineGroupKind,
+      title: currentGroup?.title || t('idleCmdGroup'),
+      canvasKey,
+      x: groupX,
+      y: groupY,
+      width: groupWidth,
+      zIndex: groupZIndex
+    };
+
+    nextZIndex.current += candidates.length + 1;
+    window.clearTimeout(idleCommandCollectTimerRef.current);
+    setActiveId((current) => (memberIds.has(current) ? null : current));
+    setActiveCanvasFrameId(null);
+    setActiveCanvasTodoId(null);
+    setSelectedEndpointIds((current) => {
+      if (![...memberIds].some((id) => current.has(id))) {
+        return current;
+      }
+
+      const next = new Set(current);
+      memberIds.forEach((id) => next.delete(id));
+      return next;
+    });
+    setEndpointGroups((current) => current.filter((group) => (
+      group.id === groupId ||
+      currentPanels.some((panel) => panel.groupId === group.id && !memberIds.has(panel.id))
+    )));
+    setPanels((current) => current.map((panel) => {
+      if (!memberIds.has(panel.id)) {
+        return panel;
+      }
+
+      const record = animationRecordById.get(panel.id);
+      return {
+        ...panel,
+        groupId: null,
+        x: record?.x ?? panel.x,
+        y: record?.y ?? panel.y,
+        zIndex: panelZIndexBase + (orderIndex.get(panel.id) || 0)
+      };
+    }));
+
+    window.requestAnimationFrame(() => {
+      startCanvasArrangeAnimation(animationRecords, targetPositions);
+      setPanels((current) => current.map((panel) => {
+        const position = targetPositions.get(panel.id);
+        if (!position) {
+          return panel;
+        }
+
+        return {
+          ...panel,
+          groupId: null,
+          minimized: true,
+          x: position.x,
+          y: position.y,
+          zIndex: panelZIndexBase + (orderIndex.get(panel.id) || 0)
+        };
+      }));
+
+      const longestDelay = Math.min(Math.max(candidates.length - 1, 0) * 24, canvasArrangeMaxStaggerMs);
+      idleCommandCollectTimerRef.current = window.setTimeout(() => {
+        setPanels((current) => current.map((panel) => (
+          memberIds.has(panel.id)
+            ? { ...panel, groupId, minimized: true }
+            : panel
+        )));
+        setEndpointGroups((current) => [
+          ...current.filter((group) => group.id !== groupId),
+          nextGroup
+        ]);
+        showToast(t('collectIdleCmdDone', { count: candidates.length }));
+        idleCommandCollectTimerRef.current = null;
+      }, canvasArrangeDurationMs + longestDelay + 180);
+    });
+  }, [getEndpointVisualRect, language, showToast, startCanvasArrangeAnimation, t, viewportCenterOnCanvas]);
 
   const exportTerminal = useCallback(async (id, directory) => {
     try {
@@ -12034,71 +13184,6 @@ export default function App() {
     }
   }, [commandDockPanels, showToast, t]);
 
-  const startCanvasArrangeAnimation = useCallback((records, positions) => {
-    const animations = {};
-    const orderedRecords = [...records].sort((left, right) => (
-      (left.y - right.y) || (left.x - right.x) || left.title.localeCompare(right.title)
-    ));
-    const orderIndex = new Map(orderedRecords.map((panel, index) => [panel.id, index]));
-
-    records.forEach((panel) => {
-      const nextLayout = positions.get(panel.id);
-      if (!nextLayout || (panel.groupId && panel.minimized)) {
-        return;
-      }
-
-      const fromRect = {
-        x: panel.x,
-        y: panel.y,
-        width: panel.minimized ? endpointWidth : panel.width,
-        height: panel.minimized ? endpointHeight : panel.height
-      };
-      const toRect = {
-        x: nextLayout.x,
-        y: nextLayout.y,
-        width: panel.minimized ? endpointWidth : nextLayout.width,
-        height: panel.minimized ? endpointHeight : nextLayout.height
-      };
-      const dx = Math.round(fromRect.x - toRect.x);
-      const dy = Math.round(fromRect.y - toRect.y);
-      const scaleX = toRect.width > 0 ? clamp(fromRect.width / toRect.width, 0.25, 4) : 1;
-      const scaleY = toRect.height > 0 ? clamp(fromRect.height / toRect.height, 0.25, 4) : 1;
-      const changed = Math.abs(dx) > 0
-        || Math.abs(dy) > 0
-        || Math.abs(scaleX - 1) > 0.01
-        || Math.abs(scaleY - 1) > 0.01;
-
-      if (!changed) {
-        return;
-      }
-
-      animations[panel.id] = {
-        dx,
-        dy,
-        scaleX: Number(scaleX.toFixed(4)),
-        scaleY: Number(scaleY.toFixed(4)),
-        delay: Math.min((orderIndex.get(panel.id) || 0) * 24, canvasArrangeMaxStaggerMs)
-      };
-    });
-
-    window.clearTimeout(canvasArrangeTimerRef.current);
-
-    if (Object.keys(animations).length === 0) {
-      setCanvasArrangeAnimations({});
-      setCanvasArrangeActive(false);
-      return;
-    }
-
-    const longestDelay = Math.max(...Object.values(animations).map((item) => item.delay || 0));
-    setCanvasArrangeAnimations(animations);
-    setCanvasArrangeActive(true);
-    canvasArrangeTimerRef.current = window.setTimeout(() => {
-      setCanvasArrangeAnimations({});
-      setCanvasArrangeActive(false);
-      canvasArrangeTimerRef.current = null;
-    }, canvasArrangeDurationMs + longestDelay + 160);
-  }, []);
-
   const arrangeGrid = useCallback(() => {
     const records = getVisiblePanels();
     if (records.length === 0) {
@@ -12219,7 +13304,12 @@ export default function App() {
     const cliProvider = resolveCliProvider(config.cliProviderId || launchCliProviderId);
     const cliProviderId = cliProvider?.id || defaultCliProviderId;
     const launchContext = getCurrentSessionLaunchContext();
-    const center = viewportCenterOnCanvas();
+    const canvasPoint = config?.canvasPoint;
+    const center = canvasPoint
+      && Number.isFinite(canvasPoint.x)
+      && Number.isFinite(canvasPoint.y)
+      ? canvasPoint
+      : viewportCenterOnCanvas();
     const width = 620;
     const height = 340;
     const gap = 28;
@@ -12248,8 +13338,11 @@ export default function App() {
     }
   }, [createTerminal, getCurrentSessionLaunchContext, launchCliProviderId, viewportCenterOnCanvas]);
 
-  const addGrid = useCallback((cliProviderId) => {
-    createSessionGrid(4, typeof cliProviderId === 'string' ? { cliProviderId } : {})
+  const addGrid = useCallback((config) => {
+    const gridConfig = typeof config === 'string'
+      ? { cliProviderId: config }
+      : (config && !config.nativeEvent ? config : {});
+    createSessionGrid(4, gridConfig)
       .catch((error) => showToast(error.message));
   }, [createSessionGrid, showToast]);
 
@@ -12311,8 +13404,20 @@ export default function App() {
         setCwd(launchContext.cwd);
       }
 
+      const canvasPoint = config?.canvasPoint;
+      const terminalSlot = canvasPoint
+        && Number.isFinite(canvasPoint.x)
+        && Number.isFinite(canvasPoint.y)
+        ? {
+            width: 640,
+            height: 380,
+            x: Math.round(canvasPoint.x),
+            y: Math.round(canvasPoint.y)
+          }
+        : getCenteredTerminalSlot(workspaceRef.current);
+
       await createTerminal({
-        ...getCenteredTerminalSlot(workspaceRef.current),
+        ...terminalSlot,
         ...launchContext,
         cliProviderId,
         useCommandPreset: cliProviderId === 'shell'
@@ -12382,7 +13487,10 @@ export default function App() {
     setEndpointGroups([]);
     setSelectedEndpointIds(new Set());
     setActiveId(null);
-  }, [t]);
+    setPendingConnectionSourceId('');
+    setActiveCanvasConnectionId(null);
+    commitWorkspace((currentWorkspace) => ({ ...currentWorkspace, canvasConnections: {} }));
+  }, [commitWorkspace, t]);
 
   const createProjectFromDialog = useCallback(async (config = {}) => {
     setProjectDialogOpen(false);
@@ -12612,6 +13720,7 @@ export default function App() {
       event.preventDefault();
       setActiveId(null);
       setActiveCanvasTodoId(null);
+      setActiveCanvasConnectionId(null);
 
       const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
       const anchor = clientPointToCanvas(event.clientX, event.clientY);
@@ -12645,6 +13754,7 @@ export default function App() {
     setPanning(true);
     setActiveCanvasFrameId(null);
     setActiveCanvasTodoId(null);
+    setActiveCanvasConnectionId(null);
     const start = {
       clientX: event.clientX,
       clientY: event.clientY,
@@ -12720,6 +13830,15 @@ export default function App() {
         return;
       }
 
+      if (event.key === 'Escape' && (pendingConnectionSourceId || connectionMode)) {
+        event.preventDefault();
+        setPendingConnectionSourceId('');
+        if (!pendingConnectionSourceId) {
+          setConnectionMode(false);
+        }
+        return;
+      }
+
       if (event.ctrlKey && event.key.toLowerCase() === 'n') {
         event.preventDefault();
         if (event.shiftKey) {
@@ -12737,6 +13856,16 @@ export default function App() {
       }
 
       const activePanel = panelsRef.current.find((panel) => panel.id === activeIdRef.current);
+      if (
+        event.key === 'Delete' &&
+        activeCanvasConnectionIdRef.current &&
+        !editable &&
+        !closestElement(event.target, '.terminal-host')
+      ) {
+        deleteCanvasConnection(activeCanvasConnectionIdRef.current);
+        return;
+      }
+
       if (
         event.key === 'Delete' &&
         activeCanvasTodoIdRef.current &&
@@ -12773,14 +13902,17 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
     canvasContextMenu,
+    connectionMode,
     closeTerminal,
     closeCanvasContextMenu,
     createWorkspaceCommandLine,
     createWorkspaceSession,
+    deleteCanvasConnection,
     deleteCanvasFrame,
     deleteCanvasTodo,
     openNewSessionPicker,
-    pendingCanvasFrame
+    pendingCanvasFrame,
+    pendingConnectionSourceId
   ]);
 
   const minorGrid = 48 * view.scale;
@@ -12838,17 +13970,6 @@ export default function App() {
             <TopbarSessionStats counts={crossProjectSessionCounts} t={t} />
 
             <div className="flex shrink-0 items-center gap-2">
-              <TopbarLaunchMenu
-                cliProviderId={launchCliProviderId}
-                language={language}
-                onAddCommandLine={createWorkspaceCommandLine}
-                onAddGrid={addGrid}
-                onAddSession={(cliProviderId) => createWorkspaceSession(null, { cliProviderId })}
-                onCliProviderChange={setLaunchCliProviderId}
-                onOpenGridSessionDialog={openGridSessionDialog}
-                onOpenSessionPicker={openNewSessionPicker}
-                t={t}
-              />
               <Button type="button" variant="outline" onClick={() => setAgentsOpen(true)}>
                 <Bot className="h-4 w-4" />
                 {t('agents')}
@@ -12914,6 +14035,8 @@ export default function App() {
               'viewport',
               panning && 'is-panning',
               pendingCanvasFrame && 'is-creating-frame',
+              connectionMode && 'is-connection-mode',
+              pendingConnectionSourceId && 'is-connecting-session',
               canvasArrangeActive && 'is-arranging-canvas'
             )}
             tabIndex={0}
@@ -12939,6 +14062,9 @@ export default function App() {
                   setPendingCanvasFrame((current) => {
                     const next = !current;
                     if (next) {
+                      setConnectionMode(false);
+                      setPendingConnectionSourceId('');
+                      setActiveCanvasConnectionId(null);
                       showToast(t('canvasFrameHint'));
                     }
                     return next;
@@ -12948,6 +14074,14 @@ export default function App() {
                 <Plus className="h-4 w-4" />
                 {pendingCanvasFrame ? t('addCanvasFrameArmed') : t('addCanvasFrame')}
               </Button>
+              <Button
+                id="connectCanvasSessions"
+                variant={connectionMode ? 'default' : 'outline'}
+                onClick={toggleCanvasConnectionMode}
+              >
+                <GitBranch className="h-4 w-4" />
+                {connectionMode ? t('canvasConnectArmed') : t('canvasConnect')}
+              </Button>
               <Button id="addCanvasTodo" variant="outline" onClick={addCanvasTodo}>
                 <ListTodo className="h-4 w-4" />
                 {t('addCanvasTodo')}
@@ -12955,6 +14089,15 @@ export default function App() {
               <Button id="groupEndpoints" onClick={groupEndpoints} disabled={groupableEndpointCount < 2}>
                 <Grid2X2 className="h-4 w-4" />
                 {groupableEndpointCount > 0 ? `${t('groupEndpoints')} ${groupableEndpointCount}` : t('groupEndpoints')}
+              </Button>
+              <Button
+                id="collectIdleCmd"
+                variant="outline"
+                onClick={collectIdleCommandLines}
+                disabled={idleCommandLineCount === 0}
+              >
+                <Archive className="h-4 w-4" />
+                {idleCommandLineCount > 0 ? `${t('collectIdleCmd')} ${idleCommandLineCount}` : t('collectIdleCmd')}
               </Button>
             </div>
             <div
@@ -12975,12 +14118,19 @@ export default function App() {
             </div>
             <CanvasContextMenu
               groupableEndpointCount={groupableEndpointCount}
+              idleCommandLineCount={idleCommandLineCount}
+              language={language}
+              launchProviders={canvasLaunchProviders}
               menu={canvasContextMenu}
               t={t}
               onAddFrame={createCanvasFrameAtPoint}
+              onAddGrid={(canvasPoint) => addGrid({ canvasPoint })}
+              onAddProviderSession={(cliProviderId, canvasPoint) => createWorkspaceSession(null, { cliProviderId, canvasPoint })}
               onArrange={arrangeGrid}
               onClose={closeCanvasContextMenu}
+              onCollectIdleCommandLines={collectIdleCommandLines}
               onGroupEndpoints={groupEndpoints}
+              onOpenGridSessionDialog={openGridSessionDialog}
             />
             <div
               id="stage"
@@ -13026,6 +14176,13 @@ export default function App() {
                   />
                 ))}
               </div>
+              <CanvasConnectionLayer
+                activeConnectionId={activeCanvasConnectionId}
+                connections={visibleConnectionRecords}
+                t={t}
+                onDeleteConnection={deleteCanvasConnection}
+                onSelectConnection={selectCanvasConnection}
+              />
               <div className="canvas-session-layer">
               {visibleEndpointGroups.map(({ group, panels: groupPanels }) => (
                 <EndpointGroup
@@ -13035,10 +14192,13 @@ export default function App() {
                   runtimeNow={runtimeNow}
                   scale={view.scale}
                   commandTargetId={commandDockTargetId}
+                  connectionMode={connectionMode}
+                  pendingConnectionSourceId={pendingConnectionSourceId}
                   dispatchSparkles={commandDockDispatchSparkles}
                   selectedIds={selectedEndpointIds}
                   t={t}
                   onActivate={activateEndpointGroup}
+                  onConnectionPortClick={handleSessionConnectionPortClick}
                   onExpandPanel={expandPanel}
                   onMove={updateEndpointGroup}
                   onPanelTitleChange={(id, title) => updatePanel(id, { title })}
@@ -13056,16 +14216,20 @@ export default function App() {
                   active={visible && panel.id === activeId}
                   runtimeNow={runtimeNow}
                   scale={view.scale}
+                  sessionHeaderVisibility={sessionHeaderVisibility}
                   t={t}
                   theme={theme}
                   visible={visible}
                   selected={selectedEndpointIds.has(panel.id)}
                   commandTargeted={panel.id === commandDockTargetId}
+                  connectionMode={connectionMode}
+                  pendingConnectionSourceId={pendingConnectionSourceId}
                   arrangeAnimation={canvasArrangeAnimations[panel.id] || null}
                   availableSessionTags={availableSessionTags}
                   dispatchSparkleKey={commandDockDispatchSparkles[panel.id] || ''}
                   onActivate={activatePanel}
                   onClose={closeTerminal}
+                  onConnectionPortClick={handleSessionConnectionPortClick}
                   onExpand={expandPanel}
                   onMinimize={minimizePanel}
                   onMove={updatePanel}
@@ -13256,14 +14420,18 @@ export default function App() {
       )}
 
       <CodexConfigDialog
+        appZoomFactor={appZoomFactor}
         commandDockShortcuts={commandDockShortcuts}
         initialSettingsTab={codexInitialTab}
         language={language}
+        onAppZoomFactorChange={(factor) => setAppZoomFactor(normalizeAppZoomFactor(factor))}
         onCommandDockShortcutChange={changeCommandDockShortcut}
         onLanguageChange={setLanguage}
         onOpenChange={setCodexOpen}
         onProfileChanged={setCodexProfileState}
+        onSessionHeaderVisibilityChange={changeSessionHeaderVisibility}
         open={codexOpen}
+        sessionHeaderVisibility={sessionHeaderVisibility}
         showToast={showToast}
         t={t}
       />

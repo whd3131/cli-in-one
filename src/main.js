@@ -50,6 +50,9 @@ const IMAGE_API_HISTORY_FILE_NAME = 'image-generation-history.json';
 const IMAGE_API_HISTORY_MAX_ITEMS = 80;
 const USAGE_TRACKING_FILE_NAME = 'usage-tracking.json';
 const USAGE_TRACKING_MAX_RECORDS = 2000;
+const APP_ZOOM_DEFAULT_FACTOR = 1;
+const APP_ZOOM_MIN_FACTOR = 0.75;
+const APP_ZOOM_MAX_FACTOR = 1.75;
 const IMAGE_API_DEFAULT_MODEL = 'gpt-image-2';
 const IMAGE_API_DEFAULT_SIZE = '1024x1024';
 const IMAGE_API_DEFAULT_COUNT = 1;
@@ -311,6 +314,48 @@ async function openImageToolsPage() {
 
 function getUsageTrackingPath() {
   return path.join(getProgramStorageDir(), USAGE_TRACKING_FILE_NAME);
+}
+
+function normalizeAppZoomFactor(value) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return APP_ZOOM_DEFAULT_FACTOR;
+  }
+
+  const clamped = Math.min(APP_ZOOM_MAX_FACTOR, Math.max(APP_ZOOM_MIN_FACTOR, parsed));
+  return Math.round(clamped * 100) / 100;
+}
+
+function getAppZoomPayload(webContents = mainWindow?.webContents) {
+  let zoomFactor = APP_ZOOM_DEFAULT_FACTOR;
+
+  try {
+    if (webContents && !webContents.isDestroyed()) {
+      zoomFactor = normalizeAppZoomFactor(webContents.getZoomFactor());
+    }
+  } catch {
+    zoomFactor = APP_ZOOM_DEFAULT_FACTOR;
+  }
+
+  return {
+    defaultZoomFactor: APP_ZOOM_DEFAULT_FACTOR,
+    maxZoomFactor: APP_ZOOM_MAX_FACTOR,
+    minZoomFactor: APP_ZOOM_MIN_FACTOR,
+    zoomFactor
+  };
+}
+
+function applyAppZoomFactor(value, webContents = mainWindow?.webContents) {
+  const zoomFactor = normalizeAppZoomFactor(value);
+
+  if (webContents && !webContents.isDestroyed()) {
+    webContents.setZoomFactor(zoomFactor);
+  }
+
+  return {
+    ...getAppZoomPayload(webContents),
+    zoomFactor
+  };
 }
 
 function normalizeReleaseVersion(value) {
@@ -5284,6 +5329,14 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('app:system-stats', () => getSystemStats());
+
+  ipcMain.handle('app:get-zoom-factor', (event) => {
+    return getAppZoomPayload(event.sender);
+  });
+
+  ipcMain.handle('app:set-zoom-factor', (event, zoomFactor) => {
+    return applyAppZoomFactor(zoomFactor, event.sender);
+  });
 
   ipcMain.handle('usage:read', () => {
     return readUsageTrackingPayload();

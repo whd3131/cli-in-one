@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.0.0](https://github.com/whd3131/cli-in-one/compare/v0.9.0...v1.0.0) (2026-04-28)
+
+
+### Features
+
+* add persistent app-wide zoom controls with slider, preset buttons, reset action, startup restore, and Electron-side zoom clamping
+* add visual canvas connections between sessions and endpoint groups, including connection mode, colored dashed paths, selection, deletion, duplicate-toggle behavior, and per-canvas persistence
+* add right-click canvas actions for creating Codex, Claude, CMD, Copilot, Droid, and other configured CLI sessions directly at the clicked location
+* add an idle CMD collection action that gathers idle sessions into a dedicated endpoint group with arranged placement and animation
+* add configurable session CMD header visibility so tag, model, context, status, and runtime fields can stay visible or move into a compact info menu
+
+
+### Improvements
+
+* redesign terminal panel headers for a denser CMD-focused layout with clearer action grouping and a session info overflow menu
+* move the Quick Send target selector into the dock footer to keep the command composer focused while preserving searchable target selection
+* refine the light theme, topbar, canvas grid, panel shadows, endpoint groups, and command dock surfaces for a cleaner workspace
+* expand the canvas context menu with provider-specific session actions, labeled groups, separators, and scroll-safe sizing near viewport edges
+* make connection ports available on full panels and endpoint rows, with Escape handling for canceling connection mode
+* preserve app zoom and session header display preferences alongside the existing workspace UI settings
+
+
+### Bug Fixes
+
+* remove stale canvas connections when sessions are closed or all sessions are killed
+* avoid duplicate canvas connection records between the same pair of sessions
+* keep connection records normalized when loading older workspace data
+
 ## [0.9.0](https://github.com/whd3131/cli-in-one/compare/v0.8.0...v0.9.0) (2026-04-27)
 
 

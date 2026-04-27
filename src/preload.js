@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('cliBridge', {
   getAppInfo: () => ipcRenderer.invoke('app:info'),
   getReleaseChangelog: (version) => ipcRenderer.invoke('app:release-changelog', version),
   getSystemStats: () => ipcRenderer.invoke('app:system-stats'),
+  getAppZoomFactor: () => ipcRenderer.invoke('app:get-zoom-factor'),
+  setAppZoomFactor: (zoomFactor) => ipcRenderer.invoke('app:set-zoom-factor', zoomFactor),
   readUsageTracking: () => ipcRenderer.invoke('usage:read'),
   writeUsageRates: (rates) => ipcRenderer.invoke('usage:write-rates', rates),
   clearUsageRecords: () => ipcRenderer.invoke('usage:clear-records'),

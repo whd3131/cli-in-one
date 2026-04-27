@@ -587,7 +587,7 @@ export function FloatingCommandDock({
       style={dockStyle}
     >
       <Card
-        className="pointer-events-auto overflow-visible shadow-lg"
+        className="command-dock-card pointer-events-auto overflow-visible shadow-lg"
         onPointerDown={(event) => event.stopPropagation()}
         onWheel={(event) => event.stopPropagation()}
         onDragOver={onInputDragOver}
@@ -620,131 +620,6 @@ export function FloatingCommandDock({
               </CommandDockIconButton>
             </div>
           </div>
-          {!collapsed && (
-            <div className="command-dock-target-root" ref={targetMenuRootRef}>
-              <button
-                type="button"
-                className="command-dock-target-trigger"
-                aria-controls={targetMenuOpen ? 'commandDockTargetMenu' : undefined}
-                aria-expanded={targetMenuOpen}
-                aria-haspopup="listbox"
-                aria-label={t('floatingComposerTargetSelector')}
-                title={targetSelectorTitle}
-                onClick={() => setTargetMenuOpen((current) => !current)}
-                disabled={panels.length === 0}
-              >
-                {targetPanelOption ? (
-                  <>
-                    <span className={cn('terminal-endpoint-dot', `is-${targetPanelOption.executionState}`)} />
-                    <span className="command-dock-target-copy">
-                      <span className="command-dock-target-title-row">
-                        <span className="command-dock-target-title">{targetPanelOption.title}</span>
-                        {targetPanelOption.current && (
-                          <span className="command-dock-target-current">{t('floatingComposerCurrent')}</span>
-                        )}
-                      </span>
-                      <span className="command-dock-target-meta">
-                        {[targetPanelOption.providerLabel, targetPanelOption.stateLabel].filter(Boolean).join(' · ')}
-                      </span>
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <SquareTerminal className="h-4 w-4 text-muted-foreground" />
-                    <span className="command-dock-target-copy">
-                      <span className="command-dock-target-title-row">
-                        <span className="command-dock-target-title">{t('floatingComposerUnavailable')}</span>
-                      </span>
-                      <span className="command-dock-target-meta">{t('floatingComposerTarget')}</span>
-                    </span>
-                  </>
-                )}
-                <span className="command-dock-target-count">
-                  {t('floatingComposerTargetCount', { count: panels.length })}
-                </span>
-                <ChevronDown className={cn('command-dock-target-chevron h-4 w-4', targetMenuOpen && 'is-open')} />
-              </button>
-
-              {targetMenuOpen && (
-                <div
-                  id="commandDockTargetMenu"
-                  className={cn(
-                    'command-dock-target-menu',
-                    targetMenuLayout.placement === 'up' ? 'is-above' : 'is-below'
-                  )}
-                  role="dialog"
-                  aria-label={t('floatingComposerTargetMenu')}
-                  style={{ maxHeight: `${targetMenuLayout.maxHeight}px` }}
-                >
-                  <label className="command-dock-target-search">
-                    <Search className="h-3.5 w-3.5" />
-                    <input
-                      type="search"
-                      value={targetFilter}
-                      placeholder={t('floatingComposerTargetSearch')}
-                      aria-label={t('floatingComposerTargetSearch')}
-                      autoFocus
-                      onChange={(event) => setTargetFilter(event.target.value)}
-                    />
-                  </label>
-
-                  {visibleTargetOptions.length > 0 ? (
-                    <div
-                      className="command-dock-target-list"
-                      role="listbox"
-                      aria-label={t('floatingComposerTarget')}
-                    >
-                      {visibleTargetOptions.map((option) => {
-                        const detail = [
-                          option.providerLabel,
-                          option.stateLabel,
-                          option.cwd
-                        ].filter(Boolean).join(' · ');
-                        const optionTitle = [
-                          option.title,
-                          option.providerLabel,
-                          option.stateLabel,
-                          option.current ? t('floatingComposerCurrent') : '',
-                          option.cwd
-                        ].filter(Boolean).join('\n');
-
-                        return (
-                          <button
-                            key={option.panel.id}
-                            type="button"
-                            className={cn(
-                              'command-dock-target-option',
-                              option.targeted && 'is-selected',
-                              option.current && 'is-current',
-                              option.sendDisabled && 'is-unavailable'
-                            )}
-                            role="option"
-                            aria-selected={option.targeted}
-                            title={optionTitle}
-                            onClick={() => handleTargetSelect(option.panel.id)}
-                          >
-                            <span className={cn('terminal-endpoint-dot', `is-${option.executionState}`)} />
-                            <span className="command-dock-target-option-copy">
-                              <span className="command-dock-target-option-title-row">
-                                <span className="command-dock-target-option-title">{option.title}</span>
-                                {option.current && (
-                                  <span className="command-dock-target-current">{t('floatingComposerCurrent')}</span>
-                                )}
-                              </span>
-                              <span className="command-dock-target-option-meta">{detail}</span>
-                            </span>
-                            {option.targeted && <Check className="h-4 w-4" />}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="command-dock-target-empty">{t('floatingComposerTargetNoMatch')}</div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
         </CardHeader>
 
         {!collapsed && (
@@ -901,13 +776,128 @@ export function FloatingCommandDock({
             </CardContent>
 
             <CardFooter className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2">
-              <div className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={targetPanel?.cwd || undefined}>
-                {targetPanel?.cwd
-                  ? `${targetPanel.cwd} · ${t('floatingComposerHint', {
-                    sendShortcut: sendShortcutLabel,
-                    dispatchShortcut: dispatchShortcutLabel
-                  })}`
-                  : t('floatingComposerUnavailable')}
+              <div className="command-dock-target-root command-dock-toolbar-target" ref={targetMenuRootRef}>
+                <button
+                  type="button"
+                  className="command-dock-target-trigger"
+                  aria-controls={targetMenuOpen ? 'commandDockTargetMenu' : undefined}
+                  aria-expanded={targetMenuOpen}
+                  aria-haspopup="listbox"
+                  aria-label={t('floatingComposerTargetSelector')}
+                  title={targetSelectorTitle}
+                  onClick={() => setTargetMenuOpen((current) => !current)}
+                  disabled={panels.length === 0}
+                >
+                  {targetPanelOption ? (
+                    <>
+                      <span className={cn('terminal-endpoint-dot', `is-${targetPanelOption.executionState}`)} />
+                      <span className="command-dock-target-copy">
+                        <span className="command-dock-target-title-row">
+                          <span className="command-dock-target-title">{targetPanelOption.title}</span>
+                          {targetPanelOption.current && (
+                            <span className="command-dock-target-current">{t('floatingComposerCurrent')}</span>
+                          )}
+                        </span>
+                        <span className="command-dock-target-meta">
+                          {[targetPanelOption.providerLabel, targetPanelOption.stateLabel].filter(Boolean).join(' · ')}
+                        </span>
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <SquareTerminal className="h-4 w-4 text-muted-foreground" />
+                      <span className="command-dock-target-copy">
+                        <span className="command-dock-target-title-row">
+                          <span className="command-dock-target-title">{t('floatingComposerUnavailable')}</span>
+                        </span>
+                        <span className="command-dock-target-meta">{t('floatingComposerTarget')}</span>
+                      </span>
+                    </>
+                  )}
+                  <span className="command-dock-target-count">
+                    {t('floatingComposerTargetCount', { count: panels.length })}
+                  </span>
+                  <ChevronDown className={cn('command-dock-target-chevron h-4 w-4', targetMenuOpen && 'is-open')} />
+                </button>
+
+                {targetMenuOpen && (
+                  <div
+                    id="commandDockTargetMenu"
+                    className={cn(
+                      'command-dock-target-menu',
+                      targetMenuLayout.placement === 'up' ? 'is-above' : 'is-below'
+                    )}
+                    role="dialog"
+                    aria-label={t('floatingComposerTargetMenu')}
+                    style={{ maxHeight: `${targetMenuLayout.maxHeight}px` }}
+                  >
+                    <label className="command-dock-target-search">
+                      <Search className="h-3.5 w-3.5" />
+                      <input
+                        type="search"
+                        value={targetFilter}
+                        placeholder={t('floatingComposerTargetSearch')}
+                        aria-label={t('floatingComposerTargetSearch')}
+                        autoFocus
+                        onChange={(event) => setTargetFilter(event.target.value)}
+                      />
+                    </label>
+
+                    {visibleTargetOptions.length > 0 ? (
+                      <div
+                        className="command-dock-target-list"
+                        role="listbox"
+                        aria-label={t('floatingComposerTarget')}
+                      >
+                        {visibleTargetOptions.map((option) => {
+                          const detail = [
+                            option.providerLabel,
+                            option.stateLabel,
+                            option.cwd
+                          ].filter(Boolean).join(' · ');
+                          const optionTitle = [
+                            option.title,
+                            option.providerLabel,
+                            option.stateLabel,
+                            option.current ? t('floatingComposerCurrent') : '',
+                            option.cwd
+                          ].filter(Boolean).join('\n');
+
+                          return (
+                            <button
+                              key={option.panel.id}
+                              type="button"
+                              className={cn(
+                                'command-dock-target-option',
+                                option.targeted && 'is-selected',
+                                option.current && 'is-current',
+                                option.sendDisabled && 'is-unavailable'
+                              )}
+                              role="option"
+                              aria-selected={option.targeted}
+                              title={optionTitle}
+                              onClick={() => handleTargetSelect(option.panel.id)}
+                            >
+                              <span className={cn('terminal-endpoint-dot', `is-${option.executionState}`)} />
+                              <span className="command-dock-target-option-copy">
+                                <span className="command-dock-target-option-title-row">
+                                  <span className="command-dock-target-option-title">{option.title}</span>
+                                  {option.current && (
+                                    <span className="command-dock-target-current">{t('floatingComposerCurrent')}</span>
+                                  )}
+                                </span>
+                                <span className="command-dock-target-option-meta">{detail}</span>
+                              </span>
+                              {option.targeted && <Check className="h-4 w-4" />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="command-dock-target-empty">{t('floatingComposerTargetNoMatch')}</div>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
                 <Button
