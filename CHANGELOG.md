@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.2.0](https://github.com/whd3131/cli-in-one/compare/v1.1.0...v1.2.0) (2026-04-28)
+
+
+### Features
+
+* add tolerant Claude Code `settings.json` parsing so the quick-profile reader can load JSON5-style files that contain comments, trailing commas, BOM markers, single-quoted strings, or unquoted property names
+* add safer terminal shell resolution on macOS and Linux by validating the `SHELL` environment variable first, then falling back through known-good shells instead of assuming the configured path exists
+* add a pipe-mode fallback when `node-pty` fails to spawn a terminal, and surface the fallback reason directly inside the affected terminal session so startup failures stay debuggable
+
+
+### Improvements
+
+* cap in-memory terminal transcript buffers at 2 MiB while keeping total transcript byte accounting, then include an explicit truncation note when exporting or reviewing sessions whose earliest output was trimmed
+* reduce renderer-wide timer churn by moving runtime and system-stat refresh work closer to the components that need it, and by scheduling panel idle-state refreshes around real transition times instead of forcing a full app tick every second
+* defer workspace skill scans, image-generation history hydration, and Quick Send prompt loading until the related UI is actually visible, and show an explicit skill-scan loading state while the workspace probe is running
+* refresh GitHub latest-version status again when the release popover is opened so the visible update state can bypass the short-lived cache and reflect the newest release more reliably
+* refine free-session launch path behavior so dialogs, sidebar focus actions, agent launches, and batch session creation reuse the effective current workspace path without unnecessarily promoting the default home directory into active workspace state
+* slim packaged releases by limiting bundled static assets to the files the app actually opens and excluding unneeded `node-pty` sources, scripts, headers, and non-target prebuilds from the Electron package
+* move renderer-only libraries such as React, xterm, Base UI, and styling helpers into `devDependencies`, keeping runtime dependencies focused on what the packaged main process actually needs
+
+
+### Bug Fixes
+
+* fix `claude-config:read-profile` failures on machines whose local Claude configuration is valid for Claude Code but not strict JSON
+* make the Electron smoke test resilient when the host shell path is missing, stale, or non-executable, which avoids false-negative release verification failures on some macOS and Linux runners
+* prevent session creation from hard-failing when `node-pty` initialization breaks for a given shell, allowing the app to continue with the pipe backend instead of aborting the launch flow
+* keep session review summaries, idle-session reuse checks, and runtime badges based on fresh timestamps captured at action time rather than stale global timer state
+
+
+### Internal
+
+* add shared JSON object parsing helpers with optional JSON5 support, plus transcript-trimming utilities and shell-resolution helpers used by both the app runtime and smoke-test verification
+
 ## [1.1.0](https://github.com/whd3131/cli-in-one/compare/v1.0.0...v1.1.0) (2026-04-28)
 
 

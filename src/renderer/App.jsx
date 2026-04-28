@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -137,6 +137,7 @@ const appZoomMaxFactor = 1.75;
 const appZoomStep = 0.05;
 const appZoomPresetFactors = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75];
 const systemStatsRefreshMs = 2000;
+const terminalScrollbackLines = 1500;
 const memoryUsageWarningThreshold = 0.85;
 const memoryUsageCriticalThreshold = 0.95;
 const panelIdleThresholdMs = 12000;
@@ -145,6 +146,7 @@ const agentTaskSubmitDelayMs = 1800;
 const commandDockTaskSubmitDelayMs = 1800;
 const commandDockDispatchSparkleMs = 5200;
 const commandDockHistoryLimit = 10;
+const workspaceSkillsInitialLoadDelayMs = 180;
 const commandDockShortcutOptions = [
   { id: 'enter', label: 'Enter', ctrlKey: false, shiftKey: false, altKey: false, metaKey: false },
   { id: 'ctrlEnter', label: 'Ctrl+Enter', ctrlKey: true, shiftKey: false, altKey: false, metaKey: false },
@@ -1142,6 +1144,7 @@ const messages = {
     save: '保存',
     loading: '加载中',
     skills: 'Skills',
+    skillsLoading: '正在扫描当前工作区的 skill 文件…',
     skillsHint: '自动识别当前工作区里的 .cli-in-one/skills、.cursor、.claude、.agent、.github。',
     collapseSkills: '收起 Skills',
     expandSkills: '展开 Skills',
@@ -1711,6 +1714,7 @@ const messages = {
     save: 'Save',
     loading: 'Loading',
     skills: 'Skills',
+    skillsLoading: 'Scanning workspace skill files…',
     skillsHint: 'Auto-detects .cli-in-one/skills, .cursor, .claude, .agent, and .github in the current workspace.',
     collapseSkills: 'Collapse Skills',
     expandSkills: 'Expand Skills',
@@ -3505,8 +3509,30 @@ function getSessionRuntimeElapsed(panel, now) {
   return formatElapsedDuration(startedAt, endedAt);
 }
 
+function useLiveNow(active, intervalMs = 1000) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active) {
+      setNow(Date.now());
+      return undefined;
+    }
+
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(timer);
+  }, [active, intervalMs]);
+
+  return now;
+}
+
 function SessionRuntimeTag({ panel, now, t }) {
-  const elapsed = getSessionRuntimeElapsed(panel, now);
+  const live = isPanelLive(panel);
+  const liveNow = useLiveNow(live);
+  const elapsed = getSessionRuntimeElapsed(
+    panel,
+    live ? liveNow : (Number.isFinite(now) ? now : Date.now())
+  );
 
   return (
     <span
@@ -3581,7 +3607,11 @@ function SessionHeaderMetaMenu({
   const contextAvailable = hasPanelContextTag(panel);
   const state = getPanelExecutionState(panel);
   const stateLabel = getExecutionStateLabel(state, t);
-  const runtime = getSessionRuntimeElapsed(panel, runtimeNow);
+  const liveRuntimeNow = useLiveNow(open && isPanelLive(panel));
+  const runtime = getSessionRuntimeElapsed(
+    panel,
+    isPanelLive(panel) ? liveRuntimeNow : runtimeNow
+  );
   const contextLabel = String(panel?.contextWindowLabel || '').trim();
   const exactContextCount = Number.isFinite(panel?.contextWindowTokens)
     ? Number(panel.contextWindowTokens).toLocaleString()
@@ -5603,7 +5633,7 @@ function TerminalPanel({
       fontSize: 13,
       lineHeight: 1.14,
       letterSpacing: 0,
-      scrollback: 8000,
+      scrollback: terminalScrollbackLines,
       theme: terminalThemes[theme],
       windowsMode: true
     });
@@ -8760,7 +8790,32 @@ function AgentsDialog({
   );
 }
 
-function SystemStats({ stats, t }) {
+function SystemStats({ t }) {
+  const [stats, setStats] = useState(null);
+
+  useEffect(() => {
+    let canceled = false;
+
+    const refreshStats = () => {
+      bridge.getSystemStats().then((nextStats) => {
+        if (!canceled) {
+          setStats(nextStats);
+        }
+      }).catch(() => {
+        if (!canceled) {
+          setStats(null);
+        }
+      });
+    };
+
+    refreshStats();
+    const timer = window.setInterval(refreshStats, systemStatsRefreshMs);
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   const cpuText = formatUsagePercent(stats?.cpuUsage);
   const memoryText = formatUsagePercent(stats?.memoryUsage);
   const memoryTone = getMemoryUsageAlertTone(stats?.memoryUsage);
@@ -9509,7 +9564,7 @@ function ReleaseInfo({
   const versionStatusKind = getVersionStatusKind(versionState);
   const versionTip = getVersionStatusTip(versionState, versionLabel, t);
 
-  const loadVersionStatus = useCallback(async () => {
+  const loadVersionStatus = useCallback(async (options = {}) => {
     const version = normalizeVersionText(appVersion);
     const requestId = versionStatusRequestIdRef.current + 1;
     versionStatusRequestIdRef.current = requestId;
@@ -9525,7 +9580,9 @@ function ReleaseInfo({
     }));
 
     try {
-      const data = await bridge.getLatestReleaseStatus(version);
+      const data = await bridge.getLatestReleaseStatus(version, {
+        force: options.force === true
+      });
       if (versionStatusRequestIdRef.current === requestId) {
         setVersionState({
           status: 'ready',
@@ -9620,6 +9677,14 @@ function ReleaseInfo({
       versionStatusRequestIdRef.current += 1;
     };
   }, [loadVersionStatus]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    loadVersionStatus({ force: true });
+  }, [loadVersionStatus, open]);
 
   useEffect(() => {
     if (open && changelogState.status === 'idle') {
@@ -9790,7 +9855,12 @@ function WorkspaceSkillsSection({
           </div>
 
           {loading && (
-            <div className="sidebar-empty">{t('loading')}</div>
+            <div className="sidebar-empty">
+              <span className="inline-flex items-center gap-2">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                {t('skillsLoading')}
+              </span>
+            </div>
           )}
 
           {!loading && loadError && (
@@ -10355,11 +10425,8 @@ export default function App() {
   });
   const [defaultCwd, setDefaultCwd] = useState('');
   const [historyProject, setHistoryProject] = useState(null);
-  const [systemStats, setSystemStats] = useState(null);
-  const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
+  const [panelStateRevision, setPanelStateRevision] = useState(0);
   const [appInfo, setAppInfo] = useState({ appVersion: '' });
-  const [codexProfileState, setCodexProfileState] = useState(createEmptyCodexProfile);
-  const [codexProfileLoading, setCodexProfileLoading] = useState(true);
   const [panning, setPanning] = useState(false);
   const [toast, setToast] = useState('');
   const [commandDockValue, setCommandDockValue] = useState('');
@@ -10391,6 +10458,7 @@ export default function App() {
   const idleCommandCollectTimerRef = useRef(null);
   const panelActivityQueueRef = useRef(new Map());
   const panelActivityFlushTimer = useRef(null);
+  const panelStateTimerRef = useRef(null);
   const sessionReviewRecordsRef = useRef({});
   const sessionReviewFlushTimer = useRef(null);
   const panelExecutionStatesRef = useRef(new Map());
@@ -10419,6 +10487,8 @@ export default function App() {
   const imageGenerationHistorySkipNextSaveRef = useRef(false);
   const imageGenerationHistorySaveTimer = useRef(null);
   const imageGenerationHistorySaveErrorShownRef = useRef(false);
+  const runtimeNow = Date.now();
+  const quickPromptsLoadStartedRef = useRef(false);
 
   const projectsWithHistory = useMemo(() => {
     if (!historyProject) {
@@ -10435,10 +10505,31 @@ export default function App() {
     [projectsWithHistory, workspace.activeProjectId]
   );
   const currentWorkspacePath = useMemo(
-    () => String(cwd || activeProject?.path || defaultCwd || '').trim(),
-    [activeProject?.path, cwd, defaultCwd]
+    () => String(cwd || activeProject?.path || '').trim(),
+    [activeProject?.path, cwd]
+  );
+  const sessionLaunchPath = useMemo(
+    () => String(currentWorkspacePath || defaultCwd || '').trim(),
+    [currentWorkspacePath, defaultCwd]
   );
   const skillsRootPath = currentWorkspacePath;
+  const shouldPromoteWorkspacePath = useCallback((nextPath, projectId = null) => {
+    const normalizedPath = String(nextPath || '').trim();
+    if (!normalizedPath) {
+      return false;
+    }
+
+    if (projectId) {
+      return true;
+    }
+
+    const normalizedDefaultPath = String(defaultCwd || '').trim();
+    if (!normalizedDefaultPath) {
+      return true;
+    }
+
+    return normalizedPath.toLowerCase() !== normalizedDefaultPath.toLowerCase();
+  }, [defaultCwd]);
   const t = useCallback((key, values) => translate(language, key, values), [language]);
   const canvasLaunchProviders = useMemo(() => getSelectableCliProviders(['project', 'directory']), []);
   const activeCommandPreset = useMemo(() => (
@@ -10504,7 +10595,7 @@ export default function App() {
   );
   const crossProjectSessionCounts = useMemo(
     () => getSessionReviewStatusCounts(panels, runtimeNow, getPanelExecutionState),
-    [panels, runtimeNow]
+    [panelStateRevision, panels]
   );
   const visibleCanvasFrames = useMemo(
     () => getWorkspaceCanvasFrames(workspace),
@@ -10607,7 +10698,7 @@ export default function App() {
     visiblePanels.filter((panel) => (
       getPanelExecutionState(panel, runtimeNow) === 'idle'
     )).length
-  ), [runtimeNow, visiblePanels]);
+  ), [panelStateRevision, visiblePanels]);
   const commandDockPanels = useMemo(() => {
     const stateRank = {
       running: 0,
@@ -10633,7 +10724,7 @@ export default function App() {
       }
       return left.title.localeCompare(right.title, language === 'en' ? 'en-US' : 'zh-CN');
     });
-  }, [activeId, language, runtimeNow, visiblePanels]);
+  }, [activeId, language, panelStateRevision, visiblePanels]);
   const liveCommandDockPanels = useMemo(
     () => commandDockPanels.filter((panel) => canPanelReceiveInput(panel)),
     [commandDockPanels]
@@ -10659,13 +10750,42 @@ export default function App() {
   useEffect(() => {
     if (panels.length === 0) {
       panelExecutionStatesRef.current = new Map();
+      window.clearTimeout(panelStateTimerRef.current);
+      panelStateTimerRef.current = null;
       return undefined;
     }
 
-    setRuntimeNow(Date.now());
-    const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [panels.length]);
+    window.clearTimeout(panelStateTimerRef.current);
+    panelStateTimerRef.current = null;
+
+    const now = Date.now();
+    let nextTransitionDelay = Number.POSITIVE_INFINITY;
+
+    panels.forEach((panel) => {
+      if (!isPanelLive(panel)) {
+        return;
+      }
+
+      const delay = getPanelLastActivityAt(panel) + panelIdleThresholdMs - now;
+      if (delay > 0) {
+        nextTransitionDelay = Math.min(nextTransitionDelay, delay);
+      }
+    });
+
+    if (!Number.isFinite(nextTransitionDelay)) {
+      return undefined;
+    }
+
+    panelStateTimerRef.current = window.setTimeout(() => {
+      panelStateTimerRef.current = null;
+      setPanelStateRevision((current) => current + 1);
+    }, Math.max(80, Math.ceil(nextTransitionDelay) + 40));
+
+    return () => {
+      window.clearTimeout(panelStateTimerRef.current);
+      panelStateTimerRef.current = null;
+    };
+  }, [panelStateRevision, panels]);
 
   useEffect(() => {
     endpointGroupsRef.current = endpointGroups;
@@ -10878,10 +10998,10 @@ export default function App() {
         name: idlePanel.title || getPanelFallbackTitle(idlePanel, language)
       }));
     }
-  }, [language, panels, runtimeNow, showToast, t]);
+  }, [language, panelStateRevision, panels, showToast, t]);
 
   useEffect(() => {
-    if (imageGenerationHistoryLoadStartedRef.current) {
+    if (!imageGenerationOpen || imageGenerationHistoryLoadStartedRef.current) {
       return undefined;
     }
 
@@ -10891,29 +11011,16 @@ export default function App() {
       return undefined;
     }
 
-    let canceled = false;
     bridge.listImageGenerationHistory().then((store) => {
-      if (canceled) {
-        return;
-      }
-
       imageGenerationHistorySkipNextSaveRef.current = true;
       setImageGenerationResults(normalizeImageGenerationHistoryItems(store?.items));
       setImageGenerationHistoryLoaded(true);
     }).catch((error) => {
-      if (canceled) {
-        return;
-      }
-
       imageGenerationHistorySkipNextSaveRef.current = true;
       setImageGenerationHistoryLoaded(true);
       showToast(t('imageGenerationHistoryLoadFailed', { message: error.message }));
     });
-
-    return () => {
-      canceled = true;
-    };
-  }, [showToast, t]);
+  }, [imageGenerationOpen, showToast, t]);
 
   useEffect(() => {
     if (!imageGenerationHistoryLoaded || typeof bridge.writeImageGenerationHistory !== 'function') {
@@ -10989,12 +11096,17 @@ export default function App() {
   }, [applyCommandPresetStore]);
 
   useEffect(() => {
+    if (!commandDockVisible || quickPromptsLoadStartedRef.current) {
+      return;
+    }
+
+    quickPromptsLoadStartedRef.current = true;
     loadQuickPrompts().catch((error) => {
       setQuickPrompts([]);
       setQuickPromptsPath('');
       showToast(t('quickPromptLoadFailed', { message: error.message }));
     });
-  }, [loadQuickPrompts, showToast, t]);
+  }, [commandDockVisible, loadQuickPrompts, showToast, t]);
 
   useEffect(() => {
     loadCommandPresets().catch((error) => {
@@ -11148,6 +11260,7 @@ export default function App() {
   const loadWorkspaceSkills = useCallback(async (targetPath, options = {}) => {
     const requestedPath = String(targetPath || '').trim();
     const quiet = Boolean(options.quiet);
+    const deferred = Boolean(options.deferred);
 
     if (!requestedPath) {
       setWorkspaceSkillsState({
@@ -11172,6 +11285,13 @@ export default function App() {
     }));
 
     try {
+      if (deferred) {
+        await new Promise((resolve) => window.setTimeout(resolve, workspaceSkillsInitialLoadDelayMs));
+        if (workspaceSkillsRequestIdRef.current !== requestId) {
+          return null;
+        }
+      }
+
       const snapshot = normalizeWorkspaceSkillsSnapshot(
         await bridge.readWorkspaceSkills({ cwd: requestedPath }),
         requestedPath
@@ -11180,11 +11300,13 @@ export default function App() {
         return null;
       }
 
-      setWorkspaceSkillsState({
-        status: 'ready',
-        snapshot,
-        error: '',
-        requestedPath: snapshot.cwd || requestedPath
+      startTransition(() => {
+        setWorkspaceSkillsState({
+          status: 'ready',
+          snapshot,
+          error: '',
+          requestedPath: snapshot.cwd || requestedPath
+        });
       });
       return snapshot;
     } catch (error) {
@@ -11228,7 +11350,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void loadWorkspaceSkills(skillsRootPath, { quiet: true });
+    void loadWorkspaceSkills(skillsRootPath, { quiet: true, deferred: true });
   }, [loadWorkspaceSkills, skillsRootPath]);
 
   const flushPanelActivity = useCallback(() => {
@@ -11259,7 +11381,6 @@ export default function App() {
       });
       return changed ? next : current;
     });
-    setRuntimeNow(Date.now());
   }, []);
 
   const touchPanelActivity = useCallback((id, timestamp = Date.now()) => {
@@ -11284,6 +11405,7 @@ export default function App() {
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
   useEffect(() => () => window.clearTimeout(panelActivityFlushTimer.current), []);
+  useEffect(() => () => window.clearTimeout(panelStateTimerRef.current), []);
   useEffect(() => () => window.clearTimeout(sessionReviewFlushTimer.current), []);
   useEffect(() => () => {
     commandDockDispatchSparkleTimersRef.current.forEach((timer) => window.clearTimeout(timer));
@@ -12226,22 +12348,6 @@ export default function App() {
     sendCommandDockInput
   ]);
 
-  const loadCodexProfile = useCallback(async ({ quiet = false } = {}) => {
-    try {
-      const snapshot = await bridge.readCodexProfile();
-      const normalizedProfile = normalizeCodexProfile(snapshot.profile);
-      setCodexProfileState(normalizedProfile);
-      return normalizedProfile;
-    } catch (error) {
-      if (!quiet) {
-        showToast(t('codexProfileReadFailed', { message: error.message }));
-      }
-      throw error;
-    } finally {
-      setCodexProfileLoading(false);
-    }
-  }, [showToast, t]);
-
   const commitWorkspace = useCallback((updater) => {
     const currentCanvasKey = canvasScopeKeyRef.current;
     const currentWithView = withWorkspaceCanvasView(workspaceRef.current, currentCanvasKey, viewRef.current);
@@ -12284,47 +12390,29 @@ export default function App() {
   }, [commitWorkspace]);
 
   useEffect(() => {
+    let canceled = false;
+
     bridge.getAppInfo().then((info) => {
+      if (canceled) {
+        return;
+      }
+
       setAppInfo(info);
       setDefaultCwd(info.homeDir || '');
       setHistoryProject(createHistoryProject(info.historyDir));
-      if (!cwdRef.current) {
-        setCwd(activeProject?.path || info.homeDir || '');
-      }
       if (!info.ptyEnabled) {
         showToast(t('ptyFallback'));
       }
     }).catch((error) => {
-      showToast(error.message);
+      if (!canceled) {
+        showToast(error.message);
+      }
     });
-  }, [activeProject?.path, showToast, t]);
 
-  useEffect(() => {
-    loadCodexProfile({ quiet: true }).catch(() => {});
-  }, [loadCodexProfile]);
-
-  useEffect(() => {
-    let canceled = false;
-
-    const refreshStats = () => {
-      bridge.getSystemStats().then((stats) => {
-        if (!canceled) {
-          setSystemStats(stats);
-        }
-      }).catch(() => {
-        if (!canceled) {
-          setSystemStats(null);
-        }
-      });
-    };
-
-    refreshStats();
-    const timer = window.setInterval(refreshStats, systemStatsRefreshMs);
     return () => {
       canceled = true;
-      window.clearInterval(timer);
     };
-  }, []);
+  }, [showToast, t]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -13040,7 +13128,11 @@ export default function App() {
       const launchContext = getCurrentSessionLaunchContext();
       const prompt = buildAgentTaskPrompt(normalizedAgent, task);
 
-      if (launchContext.cwd && launchContext.cwd !== cwdRef.current) {
+      if (
+        launchContext.cwd
+        && launchContext.cwd !== cwdRef.current
+        && shouldPromoteWorkspacePath(launchContext.cwd, launchContext.projectId)
+      ) {
         setCwd(launchContext.cwd);
       }
 
@@ -13066,6 +13158,7 @@ export default function App() {
     getCenteredTerminalSlot,
     getCurrentSessionLaunchContext,
     launchCliProviderId,
+    shouldPromoteWorkspacePath,
     showToast,
     submitTerminalTextPayload,
     t,
@@ -13095,6 +13188,7 @@ export default function App() {
       closeCommandDockSkillMention();
 
       try {
+        const dispatchRuntimeNow = Date.now();
         const targetPanel = commandDockPanels.find((panel) => panel.id === commandDockTargetId)
           || commandDockPanels[0]
           || null;
@@ -13106,7 +13200,7 @@ export default function App() {
         const idlePanels = shouldReuseDispatchTargets
           ? commandDockPanels.filter((panel) => (
             canPanelReceiveInput(panel) &&
-            getPanelExecutionState(panel, runtimeNow) === 'idle'
+            getPanelExecutionState(panel, dispatchRuntimeNow) === 'idle'
           ))
           : [];
         let reused = 0;
@@ -13197,7 +13291,6 @@ export default function App() {
     launchCliProviderId,
     rememberCommandDockHistory,
     resizeCommandDockInput,
-    runtimeNow,
     showToast,
     submitTerminalTextPayload,
     t,
@@ -13814,7 +13907,11 @@ export default function App() {
       return;
     }
 
-    if (panel.cwd && panel.cwd !== cwdRef.current) {
+    if (
+      panel.cwd
+      && panel.cwd !== cwdRef.current
+      && shouldPromoteWorkspacePath(panel.cwd, panel.projectId)
+    ) {
       setCwd(panel.cwd);
     }
 
@@ -13830,7 +13927,7 @@ export default function App() {
 
     activatePanel(id);
     centerCanvasOnCommandDockTarget(id);
-  }, [activatePanel, centerCanvasOnCommandDockTarget, expandPanel]);
+  }, [activatePanel, centerCanvasOnCommandDockTarget, expandPanel, shouldPromoteWorkspacePath]);
 
   const setCommandTargetFromReview = useCallback((id) => {
     setCommandDockTargetId(id);
@@ -13841,10 +13938,11 @@ export default function App() {
   }, [commandDockCollapsed]);
 
   const copySessionReviewSummary = useCallback(() => {
+    const summaryRuntimeNow = Date.now();
     const text = buildSessionReviewSummaryText({
       panels: commandDockPanels,
       records: sessionReviewRecordsRef.current,
-      runtimeNow,
+      runtimeNow: summaryRuntimeNow,
       language,
       t,
       getPanelProviderLabel: (panel, activeLanguage) => (
@@ -13856,9 +13954,10 @@ export default function App() {
     if (writeClipboardText(text)) {
       showToast(t('sessionReviewCopied'));
     }
-  }, [commandDockPanels, language, runtimeNow, showToast, t]);
+  }, [commandDockPanels, language, showToast, t]);
 
   const copySessionReviewRecord = useCallback((id) => {
+    const summaryRuntimeNow = Date.now();
     const panel = commandDockPanels.find((item) => item.id === id)
       || panelsRef.current.find((item) => item.id === id);
     if (!panel) {
@@ -13868,7 +13967,7 @@ export default function App() {
     const text = buildSessionReviewSummaryText({
       panels: [panel],
       records: sessionReviewRecordsRef.current,
-      runtimeNow,
+      runtimeNow: summaryRuntimeNow,
       language,
       t,
       getPanelProviderLabel: (item, activeLanguage) => (
@@ -13880,7 +13979,7 @@ export default function App() {
     if (writeClipboardText(text)) {
       showToast(t('sessionReviewCopied'));
     }
-  }, [commandDockPanels, language, runtimeNow, showToast, t]);
+  }, [commandDockPanels, language, showToast, t]);
 
   const exportSessionReviewPanels = useCallback(async () => {
     let count = 0;
@@ -14032,7 +14131,11 @@ export default function App() {
     const startY = Math.round(center.y - totalHeight / 2);
 
     setLaunchCliProviderId(cliProviderId);
-    if (launchContext.cwd && launchContext.cwd !== cwdRef.current) {
+    if (
+      launchContext.cwd
+      && launchContext.cwd !== cwdRef.current
+      && shouldPromoteWorkspacePath(launchContext.cwd, launchContext.projectId)
+    ) {
       setCwd(launchContext.cwd);
     }
 
@@ -14047,7 +14150,7 @@ export default function App() {
         useCommandPreset: cliProviderId === 'shell'
       });
     }
-  }, [createTerminal, getCurrentSessionLaunchContext, launchCliProviderId, viewportCenterOnCanvas]);
+  }, [createTerminal, getCurrentSessionLaunchContext, launchCliProviderId, shouldPromoteWorkspacePath, viewportCenterOnCanvas]);
 
   const addGrid = useCallback((config) => {
     const gridConfig = typeof config === 'string'
@@ -14111,7 +14214,11 @@ export default function App() {
         return;
       }
 
-      if (launchContext.cwd && launchContext.cwd !== cwdRef.current) {
+      if (
+        launchContext.cwd
+        && launchContext.cwd !== cwdRef.current
+        && shouldPromoteWorkspacePath(launchContext.cwd, launchContext.projectId)
+      ) {
         setCwd(launchContext.cwd);
       }
 
@@ -14137,7 +14244,7 @@ export default function App() {
     };
 
     run().catch((error) => showToast(error.message));
-  }, [createTerminal, getCenteredTerminalSlot, getCurrentSessionLaunchContext, launchCliProviderId, openNewSessionPicker, showToast]);
+  }, [createTerminal, getCenteredTerminalSlot, getCurrentSessionLaunchContext, launchCliProviderId, openNewSessionPicker, shouldPromoteWorkspacePath, showToast]);
 
   const createSessionFromSelection = useCallback((selection) => {
     setNewSessionOpen(false);
@@ -14174,7 +14281,9 @@ export default function App() {
         ...currentWorkspace,
         activeProjectId: null
       }));
-      setCwd(sessionCwd);
+      if (shouldPromoteWorkspacePath(sessionCwd, null)) {
+        setCwd(sessionCwd);
+      }
       await createTerminal({
         ...getCenteredTerminalSlot(nextWorkspace),
         projectId: null,
@@ -14186,7 +14295,7 @@ export default function App() {
     };
 
     run().catch((error) => showToast(error.message));
-  }, [commitWorkspace, createTerminal, defaultCwd, getCenteredTerminalSlot, showToast]);
+  }, [commitWorkspace, createTerminal, defaultCwd, getCenteredTerminalSlot, shouldPromoteWorkspacePath, showToast]);
 
   const killAll = useCallback(async () => {
     if (panelsRef.current.length === 0 || !window.confirm(t('closeAllConfirm'))) {
@@ -14734,7 +14843,7 @@ export default function App() {
 
             <Separator orientation="vertical" className="h-8" />
 
-            <SystemStats stats={systemStats} t={t} />
+            <SystemStats t={t} />
           </header>
 
           <main
@@ -15140,7 +15249,6 @@ export default function App() {
         onCommandDockShortcutChange={changeCommandDockShortcut}
         onLanguageChange={setLanguage}
         onOpenChange={setCodexOpen}
-        onProfileChanged={setCodexProfileState}
         onSessionHeaderVisibilityChange={changeSessionHeaderVisibility}
         open={codexOpen}
         sessionHeaderVisibility={sessionHeaderVisibility}
@@ -15149,7 +15257,7 @@ export default function App() {
       />
 
       <NewSessionDialog
-        defaultCwd={currentWorkspacePath || defaultCwd}
+        defaultCwd={sessionLaunchPath}
         initialCliProviderId={launchCliProviderId}
         language={language}
         onOpenChange={setNewSessionOpen}
@@ -15177,7 +15285,7 @@ export default function App() {
         commandPresetsLoading={commandPresetsLoading}
         commandPresetsPath={commandPresetsPath}
         initialCliProviderId="shell"
-        initialDirectory={currentWorkspacePath}
+        initialDirectory={sessionLaunchPath}
         language={language}
         onCommandPresetDelete={deleteCommandPreset}
         onCommandPresetSave={saveCommandPreset}

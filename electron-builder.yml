@@ -11,8 +11,16 @@ files:
   - src/main.js
   - src/preload.js
   - src/shared/**/*
-  - static/**/*
+  - static/favicon.ico
+  - static/image-tools.html
   - dist/renderer/**/*
+  - "!node_modules/node-addon-api/**/*"
+  - "!node_modules/node-pty/build/**/*"
+  - "!node_modules/node-pty/deps/**/*"
+  - "!node_modules/node-pty/prebuilds/win32-arm64/**/*"
+  - "!node_modules/node-pty/scripts/**/*"
+  - "!node_modules/node-pty/src/**/*"
+  - "!node_modules/node-pty/third_party/**/*"
 
 asarUnpack:
   - node_modules/node-pty/**/*

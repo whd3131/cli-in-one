@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const { fileURLToPath } = require('url');
 const TOML = require('@iarna/toml');
+const JSON5 = require('json5');
 const cliProviders = require('./shared/cli-providers.json');
 
 let pty = null;
@@ -50,6 +51,7 @@ const IMAGE_API_HISTORY_FILE_NAME = 'image-generation-history.json';
 const IMAGE_API_HISTORY_MAX_ITEMS = 80;
 const USAGE_TRACKING_FILE_NAME = 'usage-tracking.json';
 const USAGE_TRACKING_MAX_RECORDS = 2000;
+const TERMINAL_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024;
 const APP_ZOOM_DEFAULT_FACTOR = 1;
 const APP_ZOOM_MIN_FACTOR = 0.75;
 const APP_ZOOM_MAX_FACTOR = 1.75;
@@ -849,11 +851,13 @@ function normalizeGithubReleaseSummary(release) {
   };
 }
 
-async function readLatestReleaseStatus(version) {
+async function readLatestReleaseStatus(version, options = {}) {
   const currentVersion = normalizeReleaseVersion(version || app.getVersion());
   const now = Date.now();
+  const force = options && typeof options === 'object' && options.force === true;
 
   if (
+    !force &&
     latestReleaseStatusCache &&
     latestReleaseStatusCache.currentVersion === currentVersion &&
     now - latestReleaseStatusCache.checkedAt < GITHUB_LATEST_RELEASE_STATUS_CACHE_TTL_MS
@@ -1072,10 +1076,9 @@ async function readCursorCliConfig() {
 async function readClaudeSettingsConfig() {
   try {
     const content = await fs.promises.readFile(getClaudeSettingsPath(), 'utf8');
-    const parsed = JSON.parse(content);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    return parseClaudeSettings(content);
   } catch (error) {
-    if (error && (error.code === 'ENOENT' || error instanceof SyntaxError)) {
+    if (error && (error.code === 'ENOENT' || error.isJsonParseError)) {
       return null;
     }
 
@@ -1110,11 +1113,33 @@ function getDefaultShell() {
     return process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
   }
 
-  if (process.platform === 'darwin') {
-    return process.env.SHELL || '/bin/zsh';
+  const envShell = typeof process.env.SHELL === 'string'
+    ? process.env.SHELL.trim()
+    : '';
+
+  if (envShell && path.isAbsolute(envShell)) {
+    try {
+      fs.accessSync(envShell, fs.constants.X_OK);
+      return envShell;
+    } catch {
+      // Fall through to a known-good shell when SHELL points at a missing binary.
+    }
   }
 
-  return process.env.SHELL || '/bin/bash';
+  const shellCandidates = process.platform === 'darwin'
+    ? ['/bin/zsh', '/bin/bash', '/bin/sh']
+    : ['/bin/bash', '/bin/sh'];
+
+  for (const candidate of shellCandidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return '/bin/sh';
 }
 
 function getDefaultShellArgs() {
@@ -2028,8 +2053,65 @@ function appendTerminalTranscript(session, data) {
     return;
   }
 
+  const chunkBytes = Buffer.byteLength(data, 'utf8');
   session.transcriptChunks.push(data);
-  session.transcriptBytes += Buffer.byteLength(data, 'utf8');
+  session.transcriptBytes += chunkBytes;
+  session.transcriptBufferedBytes += chunkBytes;
+  trimTerminalTranscriptBuffer(session);
+}
+
+function sliceUtf8TailByBytes(value, maxBytes) {
+  if (typeof value !== 'string' || maxBytes <= 0) {
+    return '';
+  }
+
+  const buffer = Buffer.from(value, 'utf8');
+  if (buffer.length <= maxBytes) {
+    return value;
+  }
+
+  let start = Math.max(0, buffer.length - maxBytes);
+  while (start < buffer.length && (buffer[start] & 0xC0) === 0x80) {
+    start += 1;
+  }
+
+  return buffer.subarray(start).toString('utf8');
+}
+
+function trimTerminalTranscriptBuffer(session) {
+  if (!session || !Array.isArray(session.transcriptChunks)) {
+    return;
+  }
+
+  let bufferedBytes = Number.isFinite(session.transcriptBufferedBytes)
+    ? Math.max(0, session.transcriptBufferedBytes)
+    : 0;
+
+  while (bufferedBytes > TERMINAL_TRANSCRIPT_MAX_BYTES && session.transcriptChunks.length > 0) {
+    const firstChunk = session.transcriptChunks[0];
+    const firstChunkBytes = Buffer.byteLength(firstChunk, 'utf8');
+    const overflowBytes = bufferedBytes - TERMINAL_TRANSCRIPT_MAX_BYTES;
+
+    session.transcriptTruncated = true;
+
+    if (firstChunkBytes <= overflowBytes) {
+      session.transcriptChunks.shift();
+      bufferedBytes -= firstChunkBytes;
+      continue;
+    }
+
+    const trimmedChunk = sliceUtf8TailByBytes(firstChunk, firstChunkBytes - overflowBytes);
+    const trimmedChunkBytes = Buffer.byteLength(trimmedChunk, 'utf8');
+    session.transcriptChunks[0] = trimmedChunk;
+    bufferedBytes -= Math.max(0, firstChunkBytes - trimmedChunkBytes);
+    break;
+  }
+
+  session.transcriptBufferedBytes = bufferedBytes;
+}
+
+function getBufferedTerminalTranscriptText(session) {
+  return normalizeTranscriptText((session?.transcriptChunks || []).join(''));
 }
 
 function stripTerminalControlSequences(value) {
@@ -2101,8 +2183,8 @@ function buildTerminalTranscriptText(session) {
   const status = session.exited
     ? `exit${Number.isFinite(session.exitCode) ? ` ${session.exitCode}` : ''}${session.signal ? ` (${session.signal})` : ''}`
     : 'running';
-  const body = normalizeTranscriptText(session.transcriptChunks.join(''));
-  const header = [
+  const body = getBufferedTerminalTranscriptText(session);
+  const headerLines = [
     'CLI in One terminal transcript',
     `Title: ${session.title}`,
     `CWD: ${session.cwd}`,
@@ -2111,11 +2193,17 @@ function buildTerminalTranscriptText(session) {
     `CLI: ${session.cliProviderId || 'shell'}`,
     `Started: ${startedAt.toLocaleString()}`,
     `Exported: ${exportedAt.toLocaleString()}`,
-    `Status: ${status}`,
-    '',
-    '---',
-    ''
-  ].join(os.EOL);
+    `Status: ${status}`
+  ];
+
+  if (session.transcriptTruncated) {
+    headerLines.push(
+      `Note: earlier output was trimmed in memory; only the most recent ${Math.round(TERMINAL_TRANSCRIPT_MAX_BYTES / (1024 * 1024))} MiB are included below.`
+    );
+  }
+
+  headerLines.push('', '---', '');
+  const header = headerLines.join(os.EOL);
 
   return `${header}${body}${body.endsWith(os.EOL) || body.length === 0 ? '' : os.EOL}`;
 }
@@ -2259,7 +2347,7 @@ function buildUsageRecordFromSession(session, endedAt = Date.now()) {
     return null;
   }
 
-  const body = normalizeTranscriptText((session.transcriptChunks || []).join(''));
+  const body = getBufferedTerminalTranscriptText(session);
   const createdAt = Number.isFinite(session.createdAt) ? session.createdAt : endedAt;
   const exitCode = Number.isFinite(session.exitCode) ? session.exitCode : null;
   const signal = asString(session.signal).trim() || null;
@@ -3719,46 +3807,58 @@ async function createTerminalSession(webContents, options = {}) {
     ? options.title.trim()
     : `${getCliProviderTitleBase(cliProvider)} ${sessions.size + 1}`;
   const cliMeta = await resolveSessionCliMeta(requestedCliProviderId, initialCommand);
+  let backend = pty ? 'conpty' : 'pipe';
+  let ptyStartError = null;
+  let ptyProcess = null;
+
+  if (pty) {
+    try {
+      ptyProcess = pty.spawn(shell, args, {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        cwd,
+        env: buildSessionEnv({
+          COLORTERM: 'truecolor',
+          TERM: 'xterm-256color'
+        })
+      });
+    } catch (error) {
+      backend = 'pipe';
+      ptyStartError = error;
+    }
+  }
 
   const meta = {
     id,
     title,
     cwd,
     shell,
-    backend: pty ? 'conpty' : 'pipe',
+    backend,
     initialCommand,
     createdAt: Date.now(),
     transcriptBytes: 0,
     transcriptChunks: [],
+    transcriptBufferedBytes: 0,
+    transcriptTruncated: false,
     exited: false,
     exitCode: null,
     signal: null,
     ...cliMeta
   };
 
-  if (pty) {
-    const proc = pty.spawn(shell, args, {
-      name: 'xterm-256color',
-      cols,
-      rows,
-      cwd,
-      env: buildSessionEnv({
-        COLORTERM: 'truecolor',
-        TERM: 'xterm-256color'
-      })
-    });
-
+  if (ptyProcess) {
     const session = {
       ...meta,
-      process: proc
+      process: ptyProcess
     };
 
-    proc.onData((data) => {
+    ptyProcess.onData((data) => {
       appendTerminalTranscript(session, data);
       sendToRenderer(webContents, 'terminal:data', { id, data });
     });
 
-    proc.onExit(({ exitCode, signal }) => {
+    ptyProcess.onExit(({ exitCode, signal }) => {
       const current = sessions.get(id);
       if (current) {
         const endedAt = Date.now();
@@ -3836,6 +3936,15 @@ async function createTerminalSession(webContents, options = {}) {
     });
 
     sessions.set(id, session);
+
+    if (ptyStartError) {
+      const data = `\r\n[cli-in-one] node-pty failed to start ${shell}: ${ptyStartError.message}\r\n[cli-in-one] fell back to pipe mode.\r\n`;
+      appendTerminalTranscript(session, data);
+      sendToRenderer(webContents, 'terminal:data', {
+        id,
+        data
+      });
+    }
   }
 
   if (initialCommand) {
@@ -3847,7 +3956,7 @@ async function createTerminalSession(webContents, options = {}) {
     }, process.platform === 'win32' ? 450 : 300);
   }
 
-  const { transcriptChunks, ...publicMeta } = meta;
+  const { transcriptChunks, transcriptBufferedBytes, transcriptTruncated, ...publicMeta } = meta;
   return publicMeta;
 }
 
@@ -3947,7 +4056,38 @@ function validateTomlText(content) {
   }
 }
 
-function validateJsonText(content, fileLabel = 'auth.json') {
+function stripJsonBom(content) {
+  return typeof content === 'string' && content.charCodeAt(0) === 0xFEFF
+    ? content.slice(1)
+    : content;
+}
+
+function createJsonParseError(message) {
+  const error = new Error(message);
+  error.isJsonParseError = true;
+  return error;
+}
+
+function parseJsonObjectText(content, fileLabel = 'auth.json', { allowJson5 = false } = {}) {
+  const parse = allowJson5 ? JSON5.parse : JSON.parse;
+  const syntaxLabel = allowJson5 ? 'JSON / JSONC / JSON5' : 'JSON';
+
+  try {
+    const parsed = parse(stripJsonBom(content));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw createJsonParseError(`${fileLabel} 根节点必须是 JSON 对象。`);
+    }
+    return parsed;
+  } catch (error) {
+    if (error?.isJsonParseError) {
+      throw error;
+    }
+
+    throw createJsonParseError(`${fileLabel} ${syntaxLabel} 格式错误：${error.message}`);
+  }
+}
+
+function validateJsonText(content, fileLabel = 'auth.json', options = {}) {
   if (typeof content !== 'string') {
     throw new Error(`${fileLabel} 内容必须是文本。`);
   }
@@ -3956,17 +4096,7 @@ function validateJsonText(content, fileLabel = 'auth.json') {
     throw new Error(`${fileLabel} 不能为空；如果要清空配置，请写 {}。`);
   }
 
-  try {
-    const parsed = JSON.parse(content);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('根节点必须是 JSON 对象。');
-    }
-  } catch (error) {
-    if (error.message === '根节点必须是 JSON 对象。') {
-      throw error;
-    }
-    throw new Error(`JSON 格式错误：${error.message}`);
-  }
+  parseJsonObjectText(content, fileLabel, options);
 }
 
 function parseCodexToml(content) {
@@ -3982,7 +4112,7 @@ function parseCodexAuth(content) {
     return {};
   }
 
-  const parsed = JSON.parse(content);
+  const parsed = JSON.parse(stripJsonBom(content));
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('auth.json 根节点必须是 JSON 对象。');
   }
@@ -3994,11 +4124,7 @@ function parseClaudeSettings(content) {
     return {};
   }
 
-  const parsed = JSON.parse(content);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('settings.json 根节点必须是 JSON 对象。');
-  }
-  return parsed;
+  return parseJsonObjectText(content, 'settings.json', { allowJson5: true });
 }
 
 function asString(value, fallback = '') {
@@ -4490,7 +4616,7 @@ function applyClaudeProfileToSettings(content, profile) {
   }
 
   const nextContent = `${JSON.stringify(nextSettings, null, 2)}\n`;
-  validateJsonText(nextContent, 'settings.json');
+  validateJsonText(nextContent, 'settings.json', { allowJson5: true });
   return nextContent;
 }
 
@@ -5267,7 +5393,7 @@ function getClaudeEditableFile(kind) {
     return {
       name: 'settings.json',
       path: getClaudeSettingsPath(),
-      validate: (content) => validateJsonText(content, 'settings.json')
+      validate: (content) => validateJsonText(content, 'settings.json', { allowJson5: true })
     };
   }
 
@@ -5713,8 +5839,8 @@ app.whenReady().then(async () => {
     return readReleaseChangelog(version || app.getVersion());
   });
 
-  ipcMain.handle('app:latest-release-status', (_event, version) => {
-    return readLatestReleaseStatus(version || app.getVersion());
+  ipcMain.handle('app:latest-release-status', (_event, version, options = {}) => {
+    return readLatestReleaseStatus(version || app.getVersion(), options || {});
   });
 
   ipcMain.handle('app:system-stats', () => getSystemStats());

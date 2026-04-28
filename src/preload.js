@@ -9,7 +9,7 @@ function subscribe(channel, callback) {
 contextBridge.exposeInMainWorld('cliBridge', {
   getAppInfo: () => ipcRenderer.invoke('app:info'),
   getReleaseChangelog: (version) => ipcRenderer.invoke('app:release-changelog', version),
-  getLatestReleaseStatus: (version) => ipcRenderer.invoke('app:latest-release-status', version),
+  getLatestReleaseStatus: (version, options) => ipcRenderer.invoke('app:latest-release-status', version, options),
   getSystemStats: () => ipcRenderer.invoke('app:system-stats'),
   getAppZoomFactor: () => ipcRenderer.invoke('app:get-zoom-factor'),
   setAppZoomFactor: (zoomFactor) => ipcRenderer.invoke('app:set-zoom-factor', zoomFactor),
