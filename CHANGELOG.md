@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.1](https://github.com/whd3131/cli-in-one/compare/v1.2.0...v1.2.1) (2026-04-28)
+
+This patch release tightens project-scoped workspace behavior. It keeps saved project focus, per-project canvas defaults, and terminal launch context aligned so project sessions no longer drift back into shared or directory-only state after reloads or new launches.
+
+
+### Improvements
+
+* move the canvas mode toggle into the Codex preferences dialog so the workspace behavior setting lives with the rest of the persistent app controls instead of occupying sidebar space
+* keep workspace command-line launches aligned with the active project root when the requested working directory is still inside that project, so project-aware launch commands continue to use the correct target type and working directory
+
+
+### Bug Fixes
+
+* restore per-project canvas mode as the default for newly created workspaces, while only preserving shared-canvas behavior for workspaces that explicitly switched to it before saving
+* preserve the saved `activeProjectId` when workspace state is reloaded, which keeps project-specific canvas state and project-scoped launches from silently falling back to the no-project view
+* stop free-session and workspace command launches from drifting into plain directory mode when their effective working directory should remain attached to the active project
+
+
 ## [1.2.0](https://github.com/whd3131/cli-in-one/compare/v1.1.0...v1.2.0) (2026-04-28)
 
 

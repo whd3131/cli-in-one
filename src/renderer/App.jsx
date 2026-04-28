@@ -4370,12 +4370,65 @@ function deriveNameFromPath(value) {
   return parts.at(-1) || value;
 }
 
+function normalizeComparablePath(value) {
+  const normalized = String(value || '').trim().replace(/\\/g, '/');
+  if (!normalized) {
+    return '';
+  }
+
+  if (normalized === '/') {
+    return '/';
+  }
+
+  return normalized.replace(/\/+$/, '').toLowerCase();
+}
+
+function isPathWithinRoot(candidatePath, rootPath) {
+  const normalizedCandidate = normalizeComparablePath(candidatePath);
+  const normalizedRoot = normalizeComparablePath(rootPath);
+  if (!normalizedCandidate || !normalizedRoot) {
+    return false;
+  }
+
+  if (normalizedRoot === '/') {
+    return normalizedCandidate.startsWith('/');
+  }
+
+  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}/`);
+}
+
+function resolveWorkspaceLaunchContext(activeProject, requestedCwd, fallbackCwd = '') {
+  const normalizedRequestedCwd = String(requestedCwd || '').trim();
+  const normalizedFallbackCwd = String(fallbackCwd || '').trim();
+  const projectId = String(activeProject?.id || '').trim();
+  const projectPath = String(activeProject?.path || '').trim();
+
+  if (projectId && projectPath) {
+    const projectCwd = normalizedRequestedCwd
+      || (isPathWithinRoot(normalizedFallbackCwd, projectPath) ? normalizedFallbackCwd : projectPath);
+    if (isPathWithinRoot(projectCwd, projectPath)) {
+      return {
+        projectId,
+        cwd: projectCwd,
+        targetType: 'project'
+      };
+    }
+  }
+
+  return {
+    projectId: null,
+    cwd: normalizedRequestedCwd || normalizedFallbackCwd,
+    targetType: 'directory'
+  };
+}
+
 function createEmptyWorkspace() {
   return {
     sidebarCollapsed: false,
     skillsCollapsed: false,
     activeProjectId: null,
-    canvasMode: 'shared',
+    canvasMode: 'project',
+    canvasModeCustomized: false,
     sharedView: createDefaultView(),
     canvasFrames: {},
     canvasTodos: {},
@@ -4473,13 +4526,21 @@ function normalizeWorkspace(raw) {
   const canvasFrames = normalizeCanvasFrameMap(raw.canvasFrames);
   const canvasTodos = normalizeCanvasTodoMap(raw.canvasTodos);
   const canvasConnections = normalizeCanvasConnectionMap(raw.canvasConnections);
+  const canvasModeCustomized = Boolean(raw.canvasModeCustomized);
+  const canvasMode = raw.canvasMode === 'shared'
+    ? (canvasModeCustomized ? 'shared' : fallback.canvasMode)
+    : (canvasModes.has(raw.canvasMode) ? raw.canvasMode : fallback.canvasMode);
+  const activeProjectId = typeof raw.activeProjectId === 'string' && raw.activeProjectId
+    ? raw.activeProjectId
+    : null;
 
   return {
     ...fallback,
     sidebarCollapsed: Boolean(raw.sidebarCollapsed),
     skillsCollapsed: Boolean(raw.skillsCollapsed),
-    activeProjectId: null,
-    canvasMode: 'shared',
+    activeProjectId,
+    canvasMode,
+    canvasModeCustomized,
     sharedView: normalizeCanvasView(raw.sharedView),
     canvasFrames,
     canvasTodos,
@@ -6519,10 +6580,12 @@ function UsageTrackingPanel({
 
 function CodexConfigDialog({
   appZoomFactor,
+  canvasMode,
   commandDockShortcuts,
   initialSettingsTab = 'preferences',
   language,
   onAppZoomFactorChange,
+  onCanvasModeChange,
   onCommandDockShortcutChange,
   onLanguageChange,
   onOpenChange,
@@ -7504,6 +7567,36 @@ function CodexConfigDialog({
                   <Button type="button" variant={language === 'en' ? 'primary' : 'outline'} onClick={() => onLanguageChange('en')}>
                     {t('english')}
                   </Button>
+                </div>
+              </div>
+              <div className="grid gap-2 border-t border-border/70 pt-3">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <LayoutGrid className="h-4 w-4" />
+                  {t('canvasMode')}
+                </Label>
+                <div className="grid gap-2 md:grid-cols-2">
+                  <button
+                    type="button"
+                    className={cn(
+                      'grid gap-1 rounded-md border border-border bg-background/70 px-3 py-2 text-left transition-colors',
+                      canvasMode === 'project' && 'border-primary bg-primary/5'
+                    )}
+                    onClick={() => onCanvasModeChange?.('project')}
+                  >
+                    <span className="text-sm font-medium">{t('canvasModeProject')}</span>
+                    <span className="text-xs leading-5 text-muted-foreground">{t('canvasModeProjectTooltip')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={cn(
+                      'grid gap-1 rounded-md border border-border bg-background/70 px-3 py-2 text-left transition-colors',
+                      canvasMode === 'shared' && 'border-primary bg-primary/5'
+                    )}
+                    onClick={() => onCanvasModeChange?.('shared')}
+                  >
+                    <span className="text-sm font-medium">{t('canvasModeShared')}</span>
+                    <span className="text-xs leading-5 text-muted-foreground">{t('canvasModeSharedTooltip')}</span>
+                  </button>
                 </div>
               </div>
               <div className="grid gap-2 border-t border-border/70 pt-3">
@@ -9974,7 +10067,6 @@ function WorkspaceSidebar({
   historyProject,
   language,
   onAddProject,
-  onCanvasModeChange,
   onFocusSession,
   onAddCommandLine,
   onAddSession,
@@ -10139,58 +10231,6 @@ function WorkspaceSidebar({
       </div>
 
       <SidebarContent>
-        <SidebarSection>
-          <div className="sidebar-section-title">
-            <span>{t('canvasMode')}</span>
-          </div>
-          <fieldset className="sidebar-radio-group" aria-label={t('canvasMode')}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <label
-                  className={cn('sidebar-radio-option', workspace.canvasMode === 'project' && 'is-selected')}
-                  htmlFor="canvasModeProjectRadio"
-                >
-                  <input
-                    id="canvasModeProjectRadio"
-                    className="sidebar-radio-input"
-                    type="radio"
-                    name="sidebarCanvasMode"
-                    value="project"
-                    checked={workspace.canvasMode === 'project'}
-                    onChange={() => onCanvasModeChange('project')}
-                  />
-                  <span>{t('canvasModeProject')}</span>
-                </label>
-              </TooltipTrigger>
-              <TooltipContent className="max-w-[240px] whitespace-normal leading-5">
-                {t('canvasModeProjectTooltip')}
-              </TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <label
-                  className={cn('sidebar-radio-option', workspace.canvasMode === 'shared' && 'is-selected')}
-                  htmlFor="canvasModeSharedRadio"
-                >
-                  <input
-                    id="canvasModeSharedRadio"
-                    className="sidebar-radio-input"
-                    type="radio"
-                    name="sidebarCanvasMode"
-                    value="shared"
-                    checked={workspace.canvasMode === 'shared'}
-                    onChange={() => onCanvasModeChange('shared')}
-                  />
-                  <span>{t('canvasModeShared')}</span>
-                </label>
-              </TooltipTrigger>
-              <TooltipContent className="max-w-[240px] whitespace-normal leading-5">
-                {t('canvasModeSharedTooltip')}
-              </TooltipContent>
-            </Tooltip>
-          </fieldset>
-        </SidebarSection>
-
         <SidebarSection>
           <div className="sidebar-section-title">
             <span>{t('projects')}</span>
@@ -10525,8 +10565,16 @@ export default function App() {
     [activeProject?.path, cwd]
   );
   const sessionLaunchPath = useMemo(
-    () => String(currentWorkspacePath || defaultCwd || '').trim(),
-    [currentWorkspacePath, defaultCwd]
+    () => {
+      const normalizedCwd = String(cwd || '').trim();
+      const projectPath = String(activeProject?.path || '').trim();
+      if (projectPath && isPathWithinRoot(normalizedCwd, projectPath)) {
+        return normalizedCwd;
+      }
+
+      return String(projectPath || normalizedCwd || defaultCwd || '').trim();
+    },
+    [activeProject?.path, cwd, defaultCwd]
   );
   const skillsRootPath = currentWorkspacePath;
   const shouldPromoteWorkspacePath = useCallback((nextPath, projectId = null) => {
@@ -13058,7 +13106,9 @@ export default function App() {
     const hasExplicitInitialCommand = Object.prototype.hasOwnProperty.call(slot, 'initialCommand');
     const cliProvider = resolveCliProvider(slot.cliProviderId, slot.initialCommand);
     const cliProviderId = cliProvider?.id || defaultCliProviderId;
-    const targetType = 'directory';
+    const targetType = slot.targetType === 'project'
+      ? 'project'
+      : (projectId ? 'project' : 'directory');
     const launchCommand = getCliLaunchCommand(cliProvider, targetType);
     const presetInitialCommand = !hasExplicitInitialCommand && slot.useCommandPreset === true && cliProviderId === 'shell'
       ? normalizeCommandPresetCommandInput(activeCommandPresetRef.current?.command)
@@ -13114,17 +13164,13 @@ export default function App() {
     return panel;
   }, [focusTerminalInstance, getVisiblePanels, language, viewportCenterOnCanvas]);
 
-  const getCurrentSessionLaunchContext = useCallback(() => {
-    const sessionCwd = String(cwdRef.current || '').trim()
+  const getCurrentSessionLaunchContext = useCallback((requestedCwd = '') => {
+    const fallbackCwd = String(cwdRef.current || '').trim()
       || defaultCwd
       || '';
 
-    return {
-      projectId: null,
-      cwd: sessionCwd,
-      targetType: 'directory'
-    };
-  }, [defaultCwd]);
+    return resolveWorkspaceLaunchContext(activeProject, requestedCwd, fallbackCwd);
+  }, [activeProject, defaultCwd]);
 
   const runAgentTask = useCallback((agent, taskDescription) => {
     const normalizedAgent = normalizeAgentRecord(agent);
@@ -13316,8 +13362,9 @@ export default function App() {
 
   const createWorkspaceCommandLineFromConfig = useCallback((config = {}) => {
     const run = async () => {
-      const launchContext = getCurrentSessionLaunchContext();
-      const nextCwd = String(config.cwd || '').trim() || launchContext.cwd;
+      const requestedCwd = String(config.cwd || '').trim();
+      const launchContext = getCurrentSessionLaunchContext(requestedCwd);
+      const nextCwd = requestedCwd || launchContext.cwd;
       const cliProvider = resolveCliProvider(config.cliProviderId || launchCliProviderId);
       const cliProviderId = cliProvider?.id || defaultCliProviderId;
       const hasExplicitInitialCommand = Object.prototype.hasOwnProperty.call(config, 'initialCommand');
@@ -13327,7 +13374,7 @@ export default function App() {
           : launchContext.projectId,
         cwd: nextCwd,
         cliProviderId,
-        targetType: 'directory',
+        targetType: launchContext.targetType,
         useCommandPreset: true
       };
 
@@ -14396,7 +14443,11 @@ export default function App() {
     }
 
     setImageGenerationOpen(false);
-    commitWorkspace((currentWorkspace) => ({ ...currentWorkspace, canvasMode: mode }));
+    commitWorkspace((currentWorkspace) => ({
+      ...currentWorkspace,
+      canvasMode: mode,
+      canvasModeCustomized: true
+    }));
     showToast(t(mode === 'shared' ? 'switchedCanvasModeShared' : 'switchedCanvasModeProject'));
   }, [commitWorkspace, showToast, t]);
 
@@ -14771,7 +14822,6 @@ export default function App() {
           historyProject={historyProject}
           language={language}
           onAddProject={openProjectDialog}
-          onCanvasModeChange={changeCanvasMode}
           onFocusSession={focusSessionFromReview}
           theme={theme}
           onAddCommandLine={openCommandLineDialog}
@@ -15258,10 +15308,12 @@ export default function App() {
 
       <CodexConfigDialog
         appZoomFactor={appZoomFactor}
+        canvasMode={workspace.canvasMode}
         commandDockShortcuts={commandDockShortcuts}
         initialSettingsTab={codexInitialTab}
         language={language}
         onAppZoomFactorChange={(factor) => setAppZoomFactor(normalizeAppZoomFactor(factor))}
+        onCanvasModeChange={changeCanvasMode}
         onCommandDockShortcutChange={changeCommandDockShortcut}
         onLanguageChange={setLanguage}
         onOpenChange={setCodexOpen}
