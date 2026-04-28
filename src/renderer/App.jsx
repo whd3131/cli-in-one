@@ -1173,6 +1173,8 @@ const messages = {
     versionCheckFailedTip: '版本检查失败：{message}',
     versionCheckPendingTip: '等待版本信息…',
     versionCheckUnknownTip: '暂时无法确认最新版本',
+    checkUpdates: '检查更新',
+    checkingUpdates: '检查更新中…',
     latestVersion: '最新版本',
     openLatestRelease: '打开最新 Release',
     changelogTitle: 'GitHub Releases',
@@ -1743,6 +1745,8 @@ const messages = {
     versionCheckFailedTip: 'Version check failed: {message}',
     versionCheckPendingTip: 'Waiting for version info...',
     versionCheckUnknownTip: 'Latest version could not be confirmed right now',
+    checkUpdates: 'Check for updates',
+    checkingUpdates: 'Checking for updates...',
     latestVersion: 'Latest version',
     openLatestRelease: 'Open latest release',
     changelogTitle: 'GitHub Releases',
@@ -9405,6 +9409,7 @@ function ReleaseInfoCard({
   versionState,
   t,
   detail = false,
+  onCheckLatestRelease,
   onOpenLatestRelease,
   onOpenRelease,
   onClose
@@ -9422,6 +9427,7 @@ function ReleaseInfoCard({
   const versionStatusMessage = formatVersionStatusMessage(versionState || { status: 'idle', data: null }, appVersion, t);
   const versionStatus = versionState?.data;
   const versionStatusKind = getVersionStatusKind(versionState || { status: 'idle', data: null });
+  const checkingVersion = versionState?.status === 'loading';
   const latestVersionLabel = formatVersionLabel(versionStatus?.latestVersion);
   const canOpenLatestRelease = Boolean(versionStatus?.found && versionStatus.latestUrl);
 
@@ -9470,6 +9476,15 @@ function ReleaseInfoCard({
             {versionStatus.latestDate ? ` · ${versionStatus.latestDate}` : ''}
           </div>
         )}
+        <button
+          type="button"
+          className="sidebar-release-link"
+          disabled={checkingVersion}
+          onClick={() => onCheckLatestRelease?.()}
+        >
+          <RefreshCw className={cn('h-3.5 w-3.5 shrink-0', checkingVersion && 'animate-spin')} />
+          <span className="truncate">{checkingVersion ? t('checkingUpdates') : t('checkUpdates')}</span>
+        </button>
         {canOpenLatestRelease && (
           <button
             type="button"
@@ -9778,6 +9793,7 @@ function ReleaseInfo({
             versionState={versionState}
             t={t}
             detail
+            onCheckLatestRelease={() => loadVersionStatus({ force: true })}
             onOpenLatestRelease={openReleaseUrl}
             onOpenRelease={openReleaseUrl}
             onClose={() => setOpen(false)}

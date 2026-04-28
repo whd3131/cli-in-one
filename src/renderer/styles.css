@@ -813,6 +813,11 @@
   color: hsl(var(--primary));
 }
 
+.sidebar-release-link:disabled {
+  color: hsl(var(--muted-foreground));
+  cursor: default;
+}
+
 .sidebar-release-date {
   color: hsl(var(--muted-foreground));
   font-size: 11px;
