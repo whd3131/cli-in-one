@@ -56,11 +56,17 @@ const APP_ZOOM_MAX_FACTOR = 1.75;
 const IMAGE_API_DEFAULT_MODEL = 'gpt-image-2';
 const IMAGE_API_DEFAULT_SIZE = '1024x1024';
 const IMAGE_API_DEFAULT_COUNT = 1;
+const IMAGE_API_DEFAULT_UPSCALE = '';
 const IMAGE_API_DISPATCH_TIMEOUT_MS = 60 * 1000;
 const IMAGE_API_IMAGE_DOWNLOAD_TIMEOUT_MS = 90 * 1000;
 const IMAGE_API_POLL_TIMEOUT_MS = 8 * 60 * 1000;
 const IMAGE_API_POLL_INITIAL_DELAY_MS = 2000;
 const IMAGE_API_POLL_MAX_DELAY_MS = 10000;
+const IMAGE_API_TASK_PAYLOAD_MAX_DEPTH = 6;
+const IMAGE_API_TASK_PAYLOAD_MAX_ARRAY_LENGTH = 16;
+const IMAGE_API_TASK_PAYLOAD_MAX_OBJECT_KEYS = 40;
+const IMAGE_API_TASK_PAYLOAD_MAX_STRING_LENGTH = 4000;
+const IMAGE_API_TASK_POLL_HISTORY_MAX_ITEMS = 24;
 const IMAGE_API_REFERENCE_IMAGE_MAX_COUNT = 6;
 const IMAGE_API_REFERENCE_IMAGE_MAX_BYTES = 25 * 1024 * 1024;
 const IMAGE_API_TASK_ID_PATTERN = /^[a-zA-Z0-9_.:-]{1,160}$/;
@@ -69,6 +75,7 @@ const RELEASE_REPOSITORY_NAME = 'cli-in-one';
 const GITHUB_RELEASES_URL = `https://github.com/${RELEASE_REPOSITORY_OWNER}/${RELEASE_REPOSITORY_NAME}/releases`;
 const GITHUB_RELEASES_API_URL = `https://api.github.com/repos/${RELEASE_REPOSITORY_OWNER}/${RELEASE_REPOSITORY_NAME}/releases`;
 const GITHUB_RELEASE_FETCH_TIMEOUT_MS = 12000;
+const GITHUB_LATEST_RELEASE_STATUS_CACHE_TTL_MS = 10 * 60 * 1000;
 const AGENT_AVATAR_MAX_BYTES = 8 * 1024 * 1024;
 const IMAGE_API_SUCCESS_STATUSES = new Set([
   'complete',
@@ -95,6 +102,7 @@ const cliProviderMap = new Map(
 const defaultCliProviderId = cliProviderMap.has('codex')
   ? 'codex'
   : (cliProviderList[0]?.id || 'shell');
+let latestReleaseStatusCache = null;
 const imageExtensionByMimeType = new Map([
   ['image/apng', '.apng'],
   ['image/avif', '.avif'],
@@ -360,6 +368,112 @@ function applyAppZoomFactor(value, webContents = mainWindow?.webContents) {
 
 function normalizeReleaseVersion(value) {
   return asString(value).trim().replace(/^v/i, '');
+}
+
+function parseComparableReleaseVersion(value) {
+  const normalizedVersion = normalizeReleaseVersion(value);
+  const withoutBuild = normalizedVersion.split('+')[0] || '';
+  const [coreVersion, ...prereleaseParts] = withoutBuild.split('-');
+  const numbers = coreVersion.split('.').map((part) => {
+    if (!/^\d+$/.test(part)) {
+      return Number.NaN;
+    }
+
+    return Number.parseInt(part, 10);
+  });
+
+  if (numbers.length === 0 || numbers.some((part) => !Number.isFinite(part))) {
+    return null;
+  }
+
+  const prerelease = prereleaseParts.join('-').split('.').filter(Boolean).map((part) => {
+    if (/^\d+$/.test(part)) {
+      return Number.parseInt(part, 10);
+    }
+
+    return part.toLowerCase();
+  });
+
+  return {
+    normalizedVersion,
+    numbers,
+    prerelease
+  };
+}
+
+function comparePrereleaseIdentifiers(left, right) {
+  if (left === right) {
+    return 0;
+  }
+
+  const leftIsNumber = typeof left === 'number';
+  const rightIsNumber = typeof right === 'number';
+
+  if (leftIsNumber && rightIsNumber) {
+    return left < right ? -1 : 1;
+  }
+
+  if (leftIsNumber) {
+    return -1;
+  }
+
+  if (rightIsNumber) {
+    return 1;
+  }
+
+  return String(left).localeCompare(String(right));
+}
+
+function compareReleaseVersions(left, right) {
+  const leftVersion = parseComparableReleaseVersion(left);
+  const rightVersion = parseComparableReleaseVersion(right);
+
+  if (!leftVersion || !rightVersion) {
+    return 0;
+  }
+
+  const segmentCount = Math.max(leftVersion.numbers.length, rightVersion.numbers.length, 3);
+  for (let index = 0; index < segmentCount; index += 1) {
+    const leftSegment = leftVersion.numbers[index] || 0;
+    const rightSegment = rightVersion.numbers[index] || 0;
+
+    if (leftSegment !== rightSegment) {
+      return leftSegment < rightSegment ? -1 : 1;
+    }
+  }
+
+  if (leftVersion.prerelease.length === 0 && rightVersion.prerelease.length === 0) {
+    return 0;
+  }
+
+  if (leftVersion.prerelease.length === 0) {
+    return 1;
+  }
+
+  if (rightVersion.prerelease.length === 0) {
+    return -1;
+  }
+
+  const prereleaseCount = Math.max(leftVersion.prerelease.length, rightVersion.prerelease.length);
+  for (let index = 0; index < prereleaseCount; index += 1) {
+    if (index >= leftVersion.prerelease.length) {
+      return -1;
+    }
+
+    if (index >= rightVersion.prerelease.length) {
+      return 1;
+    }
+
+    const compared = comparePrereleaseIdentifiers(
+      leftVersion.prerelease[index],
+      rightVersion.prerelease[index]
+    );
+    if (compared !== 0) {
+      return compared;
+    }
+  }
+
+  return 0;
 }
 
 function stripInlineMarkdown(value) {
@@ -715,6 +829,93 @@ async function readGithubReleaseChangelog(version) {
   }
 
   return normalizeGithubReleaseChangelog(release, normalizedVersion);
+}
+
+function normalizeGithubReleaseSummary(release) {
+  const tagName = asString(release?.tag_name).trim();
+  const version = normalizeReleaseVersion(tagName || release?.name);
+  const releaseDate = asString(release?.published_at || release?.created_at).slice(0, 10);
+  const releaseUrl = asString(release?.html_url).trim()
+    || (tagName ? `${GITHUB_RELEASES_URL}/tag/${encodeURIComponent(tagName)}` : GITHUB_RELEASES_URL);
+
+  return {
+    date: releaseDate,
+    draft: Boolean(release?.draft),
+    prerelease: Boolean(release?.prerelease),
+    tagName,
+    title: stripInlineMarkdown(release?.name) || tagName || formatReleaseVersionLabel(version),
+    url: releaseUrl,
+    version
+  };
+}
+
+async function readLatestReleaseStatus(version) {
+  const currentVersion = normalizeReleaseVersion(version || app.getVersion());
+  const now = Date.now();
+
+  if (
+    latestReleaseStatusCache &&
+    latestReleaseStatusCache.currentVersion === currentVersion &&
+    now - latestReleaseStatusCache.checkedAt < GITHUB_LATEST_RELEASE_STATUS_CACHE_TTL_MS
+  ) {
+    return latestReleaseStatusCache.payload;
+  }
+
+  try {
+    const release = await fetchGithubJson(`${GITHUB_RELEASES_API_URL}/latest`, { allowNotFound: true });
+    if (!release) {
+      return {
+        checkedAt: now,
+        comparison: 0,
+        currentVersion,
+        found: false,
+        isOutdated: false,
+        latestUrl: GITHUB_RELEASES_URL,
+        latestVersion: '',
+        source: 'github'
+      };
+    }
+
+    const latest = normalizeGithubReleaseSummary(release);
+    const comparison = currentVersion && latest.version
+      ? compareReleaseVersions(currentVersion, latest.version)
+      : 0;
+    const payload = {
+      checkedAt: now,
+      comparison,
+      currentVersion,
+      found: Boolean(latest.version),
+      isOutdated: Boolean(currentVersion && latest.version && comparison < 0),
+      latestDate: latest.date,
+      latestDraft: latest.draft,
+      latestPrerelease: latest.prerelease,
+      latestTagName: latest.tagName,
+      latestTitle: latest.title,
+      latestUrl: latest.url,
+      latestVersion: latest.version,
+      source: 'github'
+    };
+
+    latestReleaseStatusCache = {
+      checkedAt: now,
+      currentVersion,
+      payload
+    };
+
+    return payload;
+  } catch (error) {
+    return {
+      checkedAt: now,
+      comparison: 0,
+      currentVersion,
+      error: error?.message || String(error),
+      found: false,
+      isOutdated: false,
+      latestUrl: GITHUB_RELEASES_URL,
+      latestVersion: '',
+      source: 'github'
+    };
+  }
 }
 
 async function readReleaseChangelog(version) {
@@ -2430,7 +2631,8 @@ function createDefaultImageApiConfig() {
     apiKey: '',
     model: IMAGE_API_DEFAULT_MODEL,
     n: IMAGE_API_DEFAULT_COUNT,
-    size: IMAGE_API_DEFAULT_SIZE
+    size: IMAGE_API_DEFAULT_SIZE,
+    upscale: IMAGE_API_DEFAULT_UPSCALE
   };
 }
 
@@ -2474,6 +2676,27 @@ function normalizeImageApiSize(value) {
   throw new Error('图像尺寸必须类似 1024x1024，或使用 auto。');
 }
 
+function normalizeImageApiUpscale(value) {
+  const normalized = asString(value, IMAGE_API_DEFAULT_UPSCALE).trim().toLowerCase();
+  if (!normalized) {
+    return IMAGE_API_DEFAULT_UPSCALE;
+  }
+
+  if (normalized === '2k' || normalized === '4k') {
+    return normalized;
+  }
+
+  throw new Error('图像清晰度只支持 2k、4k，或留空。');
+}
+
+function normalizeImageApiUpscaleLoose(value) {
+  try {
+    return normalizeImageApiUpscale(value);
+  } catch {
+    return IMAGE_API_DEFAULT_UPSCALE;
+  }
+}
+
 function normalizeImageApiConfig(raw = {}, previousConfig = createDefaultImageApiConfig()) {
   const previous = {
     ...createDefaultImageApiConfig(),
@@ -2490,7 +2713,8 @@ function normalizeImageApiConfig(raw = {}, previousConfig = createDefaultImageAp
     apiKey: nextApiKey,
     model: asString(raw?.model, previous.model).trim() || IMAGE_API_DEFAULT_MODEL,
     n: normalizeImageApiCount(raw?.n ?? previous.n),
-    size: normalizeImageApiSize(raw?.size ?? previous.size)
+    size: normalizeImageApiSize(raw?.size ?? previous.size),
+    upscale: normalizeImageApiUpscale(raw?.upscale ?? previous.upscale)
   };
 }
 
@@ -2507,7 +2731,8 @@ function redactImageApiConfig(config) {
     apiKeySet: Boolean(normalized.apiKey),
     model: normalized.model || IMAGE_API_DEFAULT_MODEL,
     n: normalizeImageApiCount(normalized.n),
-    size: normalized.size || IMAGE_API_DEFAULT_SIZE
+    size: normalized.size || IMAGE_API_DEFAULT_SIZE,
+    upscale: normalizeImageApiUpscale(normalized.upscale)
   };
 }
 
@@ -2603,6 +2828,7 @@ function normalizeImageApiHistoryItem(record, index = 0) {
     model: asString(record.model).trim(),
     n: Number.isFinite(count) ? Math.min(4, Math.max(1, count)) : null,
     size: asString(record.size).trim(),
+    upscale: normalizeImageApiUpscaleLoose(record.upscale),
     referenceImageCount: Number.isFinite(referenceImageCount) ? Math.max(0, referenceImageCount) : 0,
     name: asString(record.name).trim(),
     normalizedPath,
@@ -2778,6 +3004,106 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   }
 }
 
+function truncateImageApiPayloadString(value) {
+  const text = asString(value);
+  if (text.length <= IMAGE_API_TASK_PAYLOAD_MAX_STRING_LENGTH) {
+    return text;
+  }
+
+  const headLength = Math.max(
+    1200,
+    Math.min(3200, IMAGE_API_TASK_PAYLOAD_MAX_STRING_LENGTH - 180)
+  );
+  const tailLength = Math.min(140, IMAGE_API_TASK_PAYLOAD_MAX_STRING_LENGTH - 80);
+  const omitted = Math.max(0, text.length - headLength - tailLength);
+  return omitted > 0
+    ? `${text.slice(0, headLength)}\n...[${omitted} chars omitted]...\n${text.slice(-tailLength)}`
+    : text.slice(0, IMAGE_API_TASK_PAYLOAD_MAX_STRING_LENGTH);
+}
+
+function sanitizeImageApiPayload(value, depth = 0, seen = new WeakSet()) {
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    return truncateImageApiPayloadString(value);
+  }
+
+  if (typeof value === 'bigint') {
+    return value.toString();
+  }
+
+  if (typeof value === 'undefined') {
+    return null;
+  }
+
+  if (Buffer.isBuffer(value)) {
+    return `[Buffer ${value.length} bytes]`;
+  }
+
+  if (Array.isArray(value)) {
+    if (depth >= IMAGE_API_TASK_PAYLOAD_MAX_DEPTH) {
+      return [`[Array(${value.length})]`];
+    }
+
+    const items = value
+      .slice(0, IMAGE_API_TASK_PAYLOAD_MAX_ARRAY_LENGTH)
+      .map((item) => sanitizeImageApiPayload(item, depth + 1, seen));
+    if (value.length > IMAGE_API_TASK_PAYLOAD_MAX_ARRAY_LENGTH) {
+      items.push(`[+${value.length - IMAGE_API_TASK_PAYLOAD_MAX_ARRAY_LENGTH} more item(s)]`);
+    }
+    return items;
+  }
+
+  if (value && typeof value === 'object') {
+    if (seen.has(value)) {
+      return '[Circular]';
+    }
+
+    if (depth >= IMAGE_API_TASK_PAYLOAD_MAX_DEPTH) {
+      return `[Object ${Object.keys(value).length} keys]`;
+    }
+
+    seen.add(value);
+    const output = {};
+    const entries = Object.entries(value);
+    for (const [key, entryValue] of entries.slice(0, IMAGE_API_TASK_PAYLOAD_MAX_OBJECT_KEYS)) {
+      output[key] = sanitizeImageApiPayload(entryValue, depth + 1, seen);
+    }
+    if (entries.length > IMAGE_API_TASK_PAYLOAD_MAX_OBJECT_KEYS) {
+      output.__truncatedKeys = `[+${entries.length - IMAGE_API_TASK_PAYLOAD_MAX_OBJECT_KEYS} more key(s)]`;
+    }
+    seen.delete(value);
+    return output;
+  }
+
+  return truncateImageApiPayloadString(String(value));
+}
+
+function createImageApiError(message, payload) {
+  const error = new Error(message);
+  if (typeof payload !== 'undefined') {
+    error.imageApiPayload = payload;
+  }
+  return error;
+}
+
+function serializeImageApiPollEvent(event, index = 0) {
+  const eventIndex = Number.isFinite(Number(event?.index))
+    ? Number(event.index)
+    : index + 1;
+  const receivedAt = Number(event?.receivedAt);
+
+  return {
+    index: eventIndex > 0 ? eventIndex : index + 1,
+    receivedAt: Number.isFinite(receivedAt) && receivedAt > 0 ? receivedAt : Date.now(),
+    status: asString(event?.status || 'running') || 'running',
+    finishedAt: event?.finishedAt || null,
+    payload: sanitizeImageApiPayload(event?.payload)
+  };
+}
+
 function getImageApiErrorMessage(body) {
   if (!body || typeof body !== 'object') {
     return '';
@@ -2814,7 +3140,7 @@ async function fetchImageApiJson(url, options = {}, timeoutMs = IMAGE_API_DISPAT
 
   if (!response.ok) {
     const message = getImageApiErrorMessage(body) || response.statusText || '请求失败';
-    throw new Error(`图像 API 请求失败 (${response.status})：${message}`);
+    throw createImageApiError(`图像 API 请求失败 (${response.status})：${message}`, body);
   }
 
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -2914,11 +3240,21 @@ function serializeImageApiTask(task) {
     model: asString(task?.model),
     n: Number.isFinite(Number.parseInt(task?.n, 10)) ? Number.parseInt(task?.n, 10) : null,
     size: asString(task?.size),
+    upscale: normalizeImageApiUpscaleLoose(task?.upscale),
     referenceImageCount: Number.isFinite(Number.parseInt(task?.referenceImageCount, 10))
       ? Number.parseInt(task?.referenceImageCount, 10)
       : 0,
     images: Array.isArray(task?.images) ? task.images : [],
     imageUrls: Array.isArray(task?.imageUrls) ? task.imageUrls : [],
+    pollEvents: Array.isArray(task?.pollEvents)
+      ? task.pollEvents.map((event, index) => serializeImageApiPollEvent(event, index))
+      : [],
+    successPayload: typeof task?.successPayload === 'undefined'
+      ? null
+      : sanitizeImageApiPayload(task.successPayload),
+    failurePayload: typeof task?.failurePayload === 'undefined'
+      ? null
+      : sanitizeImageApiPayload(task.failurePayload),
     creditCost: task?.creditCost ?? null,
     error: asString(task?.error)
   };
@@ -2977,11 +3313,11 @@ async function pollImageApiTask(config, taskId, options = {}) {
     }
 
     if (isImageApiTaskFailed(result)) {
-      throw new Error(getImageApiErrorMessage(result) || result.error || '图像任务失败。');
+      throw createImageApiError(getImageApiErrorMessage(result) || result.error || '图像任务失败。', result);
     }
 
     if (result?.finished_at && getImageApiResultUrlEntries(result, config).length === 0) {
-      throw new Error(getImageApiErrorMessage(result) || '图像任务已结束，但没有返回图片。');
+      throw createImageApiError(getImageApiErrorMessage(result) || '图像任务已结束，但没有返回图片。', result);
     }
 
     delayMs = Math.min(IMAGE_API_POLL_MAX_DELAY_MS, Math.round(delayMs * 1.6));
@@ -3084,7 +3420,7 @@ async function finishImageApiTask(webContents, task, config, dispatched) {
 
     if (!isImageApiTaskSuccessful(dispatched, config)) {
       if (isImageApiTaskFailed(dispatched)) {
-        throw new Error(getImageApiErrorMessage(dispatched) || dispatched.error || '图像任务失败。');
+        throw createImageApiError(getImageApiErrorMessage(dispatched) || dispatched.error || '图像任务失败。', dispatched);
       }
 
       const remoteTaskId = asString(dispatched.task_id || dispatched.taskId).trim();
@@ -3100,21 +3436,34 @@ async function finishImageApiTask(webContents, task, config, dispatched) {
 
       result = await pollImageApiTask(config, remoteTaskId, {
         onResult: (pollResult) => {
-          if (isImageApiTaskSuccessful(pollResult, config) || isImageApiTaskFailed(pollResult)) {
-            return;
+          const status = asString(pollResult?.status).trim();
+          const existingPollEvents = Array.isArray(task.pollEvents) ? task.pollEvents : [];
+          const nextPollEvents = [
+            ...existingPollEvents,
+            serializeImageApiPollEvent({
+              index: existingPollEvents.length + 1,
+              receivedAt: Date.now(),
+              status: status || 'running',
+              finishedAt: pollResult?.finished_at || null,
+              payload: pollResult
+            }, existingPollEvents.length)
+          ].slice(-IMAGE_API_TASK_POLL_HISTORY_MAX_ITEMS);
+          const pollUpdate = {
+            pollEvents: nextPollEvents
+          };
+
+          if (!isImageApiTaskSuccessful(pollResult, config) && !isImageApiTaskFailed(pollResult)) {
+            pollUpdate.status = status || 'running';
+            pollUpdate.finishedAt = pollResult?.finished_at || null;
           }
 
-          const status = asString(pollResult?.status).trim();
-          updateImageApiTask(webContents, task, {
-            status: status || 'running',
-            finishedAt: pollResult?.finished_at || null
-          });
+          updateImageApiTask(webContents, task, pollUpdate);
         }
       });
     }
 
     if (isImageApiTaskFailed(result)) {
-      throw new Error(getImageApiErrorMessage(result) || result.error || '图像任务失败。');
+      throw createImageApiError(getImageApiErrorMessage(result) || result.error || '图像任务失败。', result);
     }
 
     updateImageApiTask(webContents, task, {
@@ -3122,7 +3471,9 @@ async function finishImageApiTask(webContents, task, config, dispatched) {
       status: 'saving',
       created: result.created || task.created || null,
       finishedAt: result.finished_at || task.finishedAt || null,
-      creditCost: result.credit_cost ?? task.creditCost ?? null
+      creditCost: result.credit_cost ?? task.creditCost ?? null,
+      successPayload: sanitizeImageApiPayload(result),
+      failurePayload: null
     });
 
     const images = await saveImageApiResultAssets(result, config);
@@ -3135,11 +3486,16 @@ async function finishImageApiTask(webContents, task, config, dispatched) {
       images,
       imageUrls: images.map((image) => image.path),
       creditCost: result.credit_cost ?? null,
+      successPayload: sanitizeImageApiPayload(result),
+      failurePayload: null,
       error: ''
     });
   } catch (error) {
     updateImageApiTask(webContents, task, {
       status: 'failed',
+      failurePayload: typeof error?.imageApiPayload === 'undefined'
+        ? null
+        : sanitizeImageApiPayload(error.imageApiPayload),
       error: error?.message || '图像任务失败。'
     });
   }
@@ -3156,7 +3512,8 @@ async function generateImageWithApi(options = {}, context = {}) {
     ...savedConfig,
     model: asString(options.model, savedConfig.model).trim() || IMAGE_API_DEFAULT_MODEL,
     n: normalizeImageApiCount(options.n ?? savedConfig.n),
-    size: normalizeImageApiSize(options.size ?? savedConfig.size)
+    size: normalizeImageApiSize(options.size ?? savedConfig.size),
+    upscale: normalizeImageApiUpscale(options.upscale ?? savedConfig.upscale)
   };
   const { generationUrl } = buildImageApiUrls(config.baseUrl);
   const requestUrl = new URL(generationUrl);
@@ -3168,37 +3525,65 @@ async function generateImageWithApi(options = {}, context = {}) {
     n: normalizeImageApiCount(config.n),
     size: config.size || IMAGE_API_DEFAULT_SIZE
   };
+  if (config.upscale) {
+    body.upscale = config.upscale;
+  }
   const referenceImages = await normalizeImageApiReferenceImages(options.referenceImageUrls);
   if (referenceImages.length > 0) {
     body.reference_images = referenceImages;
   }
 
-  const dispatched = await fetchImageApiJson(requestUrl.toString(), {
-    method: 'POST',
-    headers: getImageApiRequestHeaders(config),
-    body: JSON.stringify(body)
-  }, IMAGE_API_DISPATCH_TIMEOUT_MS);
-
   const task = {
     id: normalizeImageApiClientTaskId(options.clientTaskId || options.id),
-    taskId: asString(dispatched.task_id || dispatched.taskId),
+    taskId: '',
     model: body.model,
     n: body.n,
     size: body.size,
+    upscale: config.upscale,
     referenceImageCount: referenceImages.length,
+    status: 'submitting',
+    prompt,
+    created: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    finishedAt: null,
+    images: [],
+    imageUrls: [],
+    pollEvents: [],
+    successPayload: null,
+    failurePayload: null,
+    creditCost: null,
+    error: ''
+  };
+
+  let dispatched;
+  try {
+    dispatched = await fetchImageApiJson(requestUrl.toString(), {
+      method: 'POST',
+      headers: getImageApiRequestHeaders(config),
+      body: JSON.stringify(body)
+    }, IMAGE_API_DISPATCH_TIMEOUT_MS);
+  } catch (error) {
+    updateImageApiTask(context.webContents, task, {
+      status: 'failed',
+      finishedAt: Date.now(),
+      failurePayload: typeof error?.imageApiPayload === 'undefined'
+        ? null
+        : sanitizeImageApiPayload(error.imageApiPayload),
+      error: error?.message || '图像任务失败。'
+    });
+    throw error;
+  }
+
+  Object.assign(task, {
+    taskId: asString(dispatched.task_id || dispatched.taskId),
     status: isImageApiTaskSuccessful(dispatched, config)
       ? 'saving'
       : (asString(dispatched.status || 'queued') || 'queued'),
-    prompt,
     created: dispatched.created || null,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
     finishedAt: dispatched.finished_at || null,
-    images: [],
-    imageUrls: [],
-    creditCost: dispatched.credit_cost ?? null,
-    error: ''
-  };
+    creditCost: dispatched.credit_cost ?? null
+  });
 
   setImmediate(() => {
     void finishImageApiTask(context.webContents, task, config, dispatched);
@@ -5326,6 +5711,10 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('app:release-changelog', (_event, version) => {
     return readReleaseChangelog(version || app.getVersion());
+  });
+
+  ipcMain.handle('app:latest-release-status', (_event, version) => {
+    return readLatestReleaseStatus(version || app.getVersion());
   });
 
   ipcMain.handle('app:system-stats', () => getSystemStats());

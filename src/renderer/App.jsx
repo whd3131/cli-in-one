@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -56,6 +56,7 @@ import { SessionReviewModal } from '@/components/SessionReviewModal';
 import { WorkspaceTreeSidebar } from '@/components/WorkspaceTreeSidebar';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarSection } from '@/components/ui/sidebar';
 import { Textarea } from '@/components/ui/textarea';
@@ -126,6 +127,7 @@ const canvasConnectionTones = [
   { color: '#e11d48', glow: 'rgba(225, 29, 72, 0.2)' },
   { color: '#ea580c', glow: 'rgba(234, 88, 12, 0.2)' }
 ];
+const connectionPortDragThreshold = 6;
 const terminalContextMenuWidth = 280;
 const terminalContextMenuEstimatedHeight = 360;
 const zoomPresetScales = [0.5, 1, 1.5, 2];
@@ -171,7 +173,13 @@ const sessionHeaderDefaultVisibility = {
 };
 const canvasArrangeDurationMs = 760;
 const canvasArrangeMaxStaggerMs = 180;
-const formSelectClassName = 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50';
+
+function toSelectOptions(values, getLabel = (value) => value) {
+  return (Array.isArray(values) ? values : []).map((value) => ({
+    label: getLabel(value),
+    value
+  }));
+}
 
 function normalizeAppZoomFactor(value) {
   const parsed = Number.parseFloat(value);
@@ -662,7 +670,8 @@ const imageApiConfigDefaults = {
   model: 'gpt-image-2',
   n: 1,
   path: '',
-  size: '1024x1024'
+  size: '1024x1024',
+  upscale: ''
 };
 
 const approvalPolicyOptions = ['', 'untrusted', 'on-request', 'never'];
@@ -719,12 +728,15 @@ const messages = {
     canvasModeProjectTooltip: '每个项目保留独立画布，只显示当前项目关联的会话和说明框。',
     canvasModeSharedTooltip: '所有项目共用同一个画布，方便跨项目同时查看和整理会话。',
     sharedWorkspace: '共享工作区',
+    freeSessionWorkspace: '自由会话',
     settings: '设置',
     closeAll: '全部关闭',
     closeAllConfirm: '确认关闭全部会话？所有当前运行状态会被中断。',
     workspace: '工作区',
     noProject: '不绑定项目',
     addSession: '新增会话',
+    sessionList: '当前会话',
+    sessionListEmpty: '当前视图还没有会话，点击上方新增会话。',
     agents: 'Agents',
     agentsDialogTitle: 'Agents',
     agentsDialogDescription: '保存可复用的 agent instructions，并把任务分配给指定 CLI 自动启动。',
@@ -794,7 +806,7 @@ const messages = {
     gridSessionCreate: '创建会话',
     gridSessionInvalid: '请输入 1 到 {max} 之间的整数。',
     newSessionSource: '选择会话目录',
-    newSessionSourceDescription: '先选择要启动的 CLI，再选择项目或默认目录。',
+    newSessionSourceDescription: '先选择要启动的 CLI，再选择项目或当前目录。',
     cliProvider: 'CLI',
     cliTarget: '启动目标',
     launchCommand: '启动命令',
@@ -941,6 +953,9 @@ const messages = {
     imageGenerationAspectSummary: '比例 {ratio}',
     imageGenerationCurrentSize: '尺寸 {size}',
     imageGenerationCustomAspect: '当前自定义比例：{ratio}',
+    imageGenerationUpscale: '输出清晰度',
+    imageGenerationUpscaleDefault: '默认',
+    imageGenerationUpscaleSummary: '清晰度 {value}',
     imageGenerationCountLabel: '生成张数',
     imageGenerationRequestedCount: '请求 {count} 张',
     imageGenerationReferenceImages: '参考图',
@@ -964,6 +979,19 @@ const messages = {
     imageGenerationCount: '{count} 张生成结果',
     imageGenerationEmpty: '暂无生成结果。',
     imageGenerationClear: '清空结果',
+    imageGenerationHistoryTitle: '本地历史',
+    imageGenerationHistoryEmpty: '暂无本地生图历史。',
+    imageGenerationHistoryUntitled: '未命名任务',
+    imageGenerationHistoryLatest: '最新',
+    imageGenerationHistoryImageCount: '{count} 张',
+    imageGenerationHistoryTaskCount: '{count} 条任务',
+    imageGenerationTaskIdLabel: 'Task ID',
+    imageGenerationFailureReason: '失败原因',
+    imageGenerationPollHistory: '轮询记录',
+    imageGenerationPollResult: '轮询 #{index}',
+    imageGenerationSuccessPayload: '成功 Payload',
+    imageGenerationFailurePayload: '失败 Payload',
+    imageGenerationNoPayload: '暂无 payload',
     imageGenerationCopyReference: '复制图片引用',
     imageGenerationOpenFile: '打开图片',
     imageGenerationCopied: '图片引用已复制。',
@@ -1072,6 +1100,7 @@ const messages = {
     imageApiUrl: 'API URL',
     imageApiModel: '图像模型',
     imageApiSize: '尺寸',
+    imageApiUpscale: '清晰度',
     imageApiCount: '数量',
     imageApiKeySavedPlaceholder: '已保存，留空保持不变',
     clearApiKey: '清除密钥',
@@ -1127,6 +1156,22 @@ const messages = {
     floatingComposerSkillInserted: '已插入 Skill：{path}',
     floatingComposerSkillNoMatch: '没有匹配的 skill。',
     currentVersion: '当前版本',
+    versionCheckTitle: '版本检查',
+    versionCheckChecking: '正在检查最新版本…',
+    versionCheckCurrent: '已是最新版本：{version}',
+    versionCheckOutdated: '发现新版本：{latest}（当前 {current}）',
+    versionCheckAhead: '当前版本 {current} 高于 GitHub 最新版本 {latest}。',
+    versionCheckUnavailable: '暂时无法确认最新版本。',
+    versionCheckFailed: '检查最新版本失败：{message}',
+    versionCheckCheckingTip: '正在检查 GitHub 最新版本…',
+    versionCheckCurrentTip: '已是最新版本：{version}',
+    versionCheckOutdatedTip: '有新版本 {latest} 可用，当前 {current}',
+    versionCheckAheadTip: '当前 {current} 高于 GitHub 最新版本 {latest}',
+    versionCheckFailedTip: '版本检查失败：{message}',
+    versionCheckPendingTip: '等待版本信息…',
+    versionCheckUnknownTip: '暂时无法确认最新版本',
+    latestVersion: '最新版本',
+    openLatestRelease: '打开最新 Release',
     changelogTitle: 'GitHub Releases',
     changelogLoading: '正在从 GitHub Releases 读取本版本更新…',
     changelogMissing: 'GitHub Releases 中没有找到当前版本的 changelog。',
@@ -1138,7 +1183,7 @@ const messages = {
     localData: '本地存储',
     localDataSummary: '应用偏好、项目列表、画布布局和导出记录都保存在当前设备。',
     appNetwork: '应用联网',
-    appNetworkSummary: '点击版本号时会请求 GitHub Releases；使用图像 API 时会连接你配置的服务；应用不做云同步。',
+    appNetworkSummary: '启动后会请求 GitHub Releases 检查最新版本；点击版本号时会读取本版本 changelog；使用图像 API 时会连接你配置的服务；应用不做云同步。',
     cliNetworkNotice: 'CLI 说明',
     cliNetworkNoticeSummary: '终端里运行的 Codex、Claude Code、Cursor 或其他命令是否联网，取决于这些工具自身的行为和配置。',
     modelUnset: '未设置模型',
@@ -1252,12 +1297,15 @@ const messages = {
     canvasModeProjectTooltip: 'Each project keeps its own canvas and only shows sessions and frames linked to the active project.',
     canvasModeSharedTooltip: 'All projects share one canvas, useful for viewing and arranging sessions across projects.',
     sharedWorkspace: 'Shared workspace',
+    freeSessionWorkspace: 'Free sessions',
     settings: 'Settings',
     closeAll: 'Close all',
     closeAllConfirm: 'Close all sessions? Their current running state will be interrupted.',
     workspace: 'Workspace',
     noProject: 'No project',
     addSession: 'New session',
+    sessionList: 'Current sessions',
+    sessionListEmpty: 'No sessions in this view yet. Create one above.',
     agents: 'Agents',
     agentsDialogTitle: 'Agents',
     agentsDialogDescription: 'Save reusable agent instructions, then assign a task to launch the selected CLI automatically.',
@@ -1327,7 +1375,7 @@ const messages = {
     gridSessionCreate: 'Create sessions',
     gridSessionInvalid: 'Enter an integer between 1 and {max}.',
     newSessionSource: 'Choose session directory',
-    newSessionSourceDescription: 'Choose a CLI first, then pick a project or the default directory.',
+    newSessionSourceDescription: 'Choose a CLI first, then pick a project or the current directory.',
     cliProvider: 'CLI',
     cliTarget: 'Launch target',
     launchCommand: 'Launch command',
@@ -1474,6 +1522,9 @@ const messages = {
     imageGenerationAspectSummary: 'Ratio {ratio}',
     imageGenerationCurrentSize: 'Size {size}',
     imageGenerationCustomAspect: 'Current custom ratio: {ratio}',
+    imageGenerationUpscale: 'Output quality',
+    imageGenerationUpscaleDefault: 'Default',
+    imageGenerationUpscaleSummary: 'Upscale {value}',
     imageGenerationCountLabel: 'Image count',
     imageGenerationRequestedCount: 'Requested {count}',
     imageGenerationReferenceImages: 'Reference images',
@@ -1497,6 +1548,19 @@ const messages = {
     imageGenerationCount: '{count} generated image(s)',
     imageGenerationEmpty: 'No generated images yet.',
     imageGenerationClear: 'Clear results',
+    imageGenerationHistoryTitle: 'Local history',
+    imageGenerationHistoryEmpty: 'No local image history yet.',
+    imageGenerationHistoryUntitled: 'Untitled task',
+    imageGenerationHistoryLatest: 'Latest',
+    imageGenerationHistoryImageCount: '{count} image(s)',
+    imageGenerationHistoryTaskCount: '{count} task(s)',
+    imageGenerationTaskIdLabel: 'Task ID',
+    imageGenerationFailureReason: 'Failure reason',
+    imageGenerationPollHistory: 'Poll history',
+    imageGenerationPollResult: 'Poll #{index}',
+    imageGenerationSuccessPayload: 'Success payload',
+    imageGenerationFailurePayload: 'Failure payload',
+    imageGenerationNoPayload: 'No payload',
     imageGenerationCopyReference: 'Copy image reference',
     imageGenerationOpenFile: 'Open image',
     imageGenerationCopied: 'Image reference copied.',
@@ -1605,6 +1669,7 @@ const messages = {
     imageApiUrl: 'API URL',
     imageApiModel: 'Image model',
     imageApiSize: 'Size',
+    imageApiUpscale: 'Upscale',
     imageApiCount: 'Count',
     imageApiKeySavedPlaceholder: 'Saved; leave blank to keep it',
     clearApiKey: 'Clear key',
@@ -1660,6 +1725,22 @@ const messages = {
     floatingComposerSkillInserted: 'Inserted Skill: {path}',
     floatingComposerSkillNoMatch: 'No matching skill.',
     currentVersion: 'Current version',
+    versionCheckTitle: 'Version check',
+    versionCheckChecking: 'Checking latest version...',
+    versionCheckCurrent: 'You are on the latest version: {version}',
+    versionCheckOutdated: 'New version available: {latest} (current {current})',
+    versionCheckAhead: 'Current version {current} is ahead of the latest GitHub release {latest}.',
+    versionCheckUnavailable: 'Latest version could not be confirmed right now.',
+    versionCheckFailed: 'Version check failed: {message}',
+    versionCheckCheckingTip: 'Checking the latest GitHub release...',
+    versionCheckCurrentTip: 'You are on the latest version: {version}',
+    versionCheckOutdatedTip: 'New version {latest} is available; current {current}',
+    versionCheckAheadTip: 'Current {current} is ahead of latest GitHub release {latest}',
+    versionCheckFailedTip: 'Version check failed: {message}',
+    versionCheckPendingTip: 'Waiting for version info...',
+    versionCheckUnknownTip: 'Latest version could not be confirmed right now',
+    latestVersion: 'Latest version',
+    openLatestRelease: 'Open latest release',
     changelogTitle: 'GitHub Releases',
     changelogLoading: 'Loading this version from GitHub Releases...',
     changelogMissing: 'No changelog entry was found for the current version in GitHub Releases.',
@@ -1671,7 +1752,7 @@ const messages = {
     localData: 'Local storage',
     localDataSummary: 'App preferences, project lists, canvas layouts, and exported records stay on this device.',
     appNetwork: 'App network',
-    appNetworkSummary: 'Clicking the version requests GitHub Releases; using Image API connects to your configured service; the app does not sync data to any cloud service.',
+    appNetworkSummary: 'On startup, the app requests GitHub Releases to check the latest version; clicking the version loads this version changelog; using Image API connects to your configured service; the app does not sync data to any cloud service.',
     cliNetworkNotice: 'CLI notice',
     cliNetworkNoticeSummary: 'Whether Codex, Claude Code, Cursor, or any other command inside the terminal connects to a network depends on that tool itself.',
     modelUnset: 'Model not set',
@@ -1821,6 +1902,11 @@ function createEmptyImageApiConfig() {
   return { ...imageApiConfigDefaults };
 }
 
+function normalizeImageApiUpscale(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === '2k' || normalized === '4k' ? normalized : '';
+}
+
 function normalizeImageApiConfig(raw) {
   const count = Number.parseInt(raw?.n, 10);
   return {
@@ -1832,7 +1918,8 @@ function normalizeImageApiConfig(raw) {
     configured: Boolean(raw?.configured),
     n: Number.isFinite(count) ? Math.min(4, Math.max(1, count)) : imageApiConfigDefaults.n,
     model: String(raw?.model || imageApiConfigDefaults.model).trim() || imageApiConfigDefaults.model,
-    size: String(raw?.size || imageApiConfigDefaults.size).trim() || imageApiConfigDefaults.size
+    size: String(raw?.size || imageApiConfigDefaults.size).trim() || imageApiConfigDefaults.size,
+    upscale: normalizeImageApiUpscale(raw?.upscale)
   };
 }
 
@@ -1934,7 +2021,7 @@ function bindPointerSession(onPointerMove, onPointerEnd) {
     onPointerMove(event);
   };
 
-  const finish = () => {
+  const finish = (event) => {
     if (!active) {
       return;
     }
@@ -1944,7 +2031,7 @@ function bindPointerSession(onPointerMove, onPointerEnd) {
     document.removeEventListener('pointerup', finish);
     document.removeEventListener('pointercancel', finish);
     window.removeEventListener('blur', finish);
-    onPointerEnd?.();
+    onPointerEnd?.(event);
   };
 
   document.addEventListener('pointermove', handlePointerMove);
@@ -2665,6 +2752,11 @@ function closestElement(target, selector) {
   return target instanceof Element ? target.closest(selector) : null;
 }
 
+function getPanelIdFromEventTarget(target) {
+  const panelElement = closestElement(target, '[data-terminal-id]');
+  return String(panelElement?.getAttribute('data-terminal-id') || '').trim();
+}
+
 function readClipboardText() {
   try {
     return bridge.readClipboardText?.() || '';
@@ -3012,6 +3104,88 @@ function syncTerminalImeAnchor(term) {
   textarea.style.zIndex = '-5';
 }
 
+function normalizeTerminalCanvasScale(scale) {
+  return Number.isFinite(scale) && scale > 0 ? scale : 1;
+}
+
+function normalizeTerminalMouseEventForScale(event, element, scale) {
+  const normalizedScale = normalizeTerminalCanvasScale(scale);
+  if (!event || !(element instanceof HTMLElement) || Math.abs(normalizedScale - 1) < 0.001) {
+    return event;
+  }
+
+  const rect = element.getBoundingClientRect();
+  return {
+    clientX: rect.left + ((event.clientX ?? rect.left) - rect.left) / normalizedScale,
+    clientY: rect.top + ((event.clientY ?? rect.top) - rect.top) / normalizedScale
+  };
+}
+
+function patchTerminalMouseInteractionsForScale(term, getScale) {
+  const core = term?._core;
+  const mouseService = core?._mouseService;
+  const selectionService = core?._selectionService;
+
+  if (!mouseService) {
+    return () => {};
+  }
+
+  const originalGetCoords = typeof mouseService.getCoords === 'function'
+    ? mouseService.getCoords.bind(mouseService)
+    : null;
+  const originalGetMouseReportCoords = typeof mouseService.getMouseReportCoords === 'function'
+    ? mouseService.getMouseReportCoords.bind(mouseService)
+    : null;
+  const originalGetMouseEventScrollAmount = typeof selectionService?._getMouseEventScrollAmount === 'function'
+    ? selectionService._getMouseEventScrollAmount.bind(selectionService)
+    : null;
+
+  if (originalGetCoords) {
+    mouseService.getCoords = (event, element, colCount, rowCount, isSelection) => (
+      originalGetCoords(
+        normalizeTerminalMouseEventForScale(event, element, getScale?.()),
+        element,
+        colCount,
+        rowCount,
+        isSelection
+      )
+    );
+  }
+
+  if (originalGetMouseReportCoords) {
+    mouseService.getMouseReportCoords = (event, element) => (
+      originalGetMouseReportCoords(
+        normalizeTerminalMouseEventForScale(event, element, getScale?.()),
+        element
+      )
+    );
+  }
+
+  if (originalGetMouseEventScrollAmount) {
+    selectionService._getMouseEventScrollAmount = (event) => (
+      originalGetMouseEventScrollAmount(
+        normalizeTerminalMouseEventForScale(
+          event,
+          selectionService?._screenElement || term?.element?.querySelector?.('.xterm-screen'),
+          getScale?.()
+        )
+      )
+    );
+  }
+
+  return () => {
+    if (originalGetCoords) {
+      mouseService.getCoords = originalGetCoords;
+    }
+    if (originalGetMouseReportCoords) {
+      mouseService.getMouseReportCoords = originalGetMouseReportCoords;
+    }
+    if (originalGetMouseEventScrollAmount && selectionService) {
+      selectionService._getMouseEventScrollAmount = originalGetMouseEventScrollAmount;
+    }
+  };
+}
+
 function focusTerminalForTextInput(term) {
   if (!term) {
     return;
@@ -3028,6 +3202,103 @@ function normalizeVersionText(value) {
 function formatVersionLabel(value) {
   const normalized = normalizeVersionText(value);
   return normalized ? `v${normalized}` : '--';
+}
+
+function normalizeVersionStatus(raw, currentVersion) {
+  const fallbackVersion = normalizeVersionText(currentVersion);
+  const latestVersion = normalizeVersionText(raw?.latestVersion);
+
+  return {
+    checkedAt: Number.isFinite(raw?.checkedAt) ? raw.checkedAt : 0,
+    comparison: Number.isFinite(raw?.comparison) ? raw.comparison : 0,
+    currentVersion: normalizeVersionText(raw?.currentVersion) || fallbackVersion,
+    error: String(raw?.error || '').trim(),
+    found: Boolean(raw?.found && latestVersion),
+    isOutdated: Boolean(raw?.isOutdated),
+    latestDate: String(raw?.latestDate || '').trim(),
+    latestTagName: String(raw?.latestTagName || '').trim(),
+    latestTitle: String(raw?.latestTitle || '').trim(),
+    latestUrl: String(raw?.latestUrl || releasePageUrl).trim() || releasePageUrl,
+    latestVersion,
+    source: raw?.source || 'github'
+  };
+}
+
+function getVersionStatusKind(versionState) {
+  if (versionState.status === 'loading') {
+    return 'checking';
+  }
+
+  const status = versionState.data;
+  if (versionState.status === 'error' || status?.error) {
+    return 'error';
+  }
+
+  if (versionState.status === 'ready' && status?.found) {
+    if (status.isOutdated) {
+      return 'outdated';
+    }
+
+    return 'current';
+  }
+
+  return 'unknown';
+}
+
+function getVersionStatusTip(versionState, versionLabel, t) {
+  const status = versionState.data;
+  const currentVersion = formatVersionLabel(status?.currentVersion || versionLabel);
+  const latestVersion = formatVersionLabel(status?.latestVersion);
+
+  if (versionState.status === 'loading') {
+    return t('versionCheckCheckingTip');
+  }
+
+  if (versionState.status === 'error' || status?.error) {
+    return t('versionCheckFailedTip', { message: status?.error || t('versionCheckUnknownTip') });
+  }
+
+  if (versionState.status === 'ready' && status?.found) {
+    if (status.isOutdated) {
+      return t('versionCheckOutdatedTip', { current: currentVersion, latest: latestVersion });
+    }
+
+    if (status.comparison > 0) {
+      return t('versionCheckAheadTip', { current: currentVersion, latest: latestVersion });
+    }
+
+    return t('versionCheckCurrentTip', { version: currentVersion });
+  }
+
+  return versionState.status === 'idle' ? t('versionCheckPendingTip') : t('versionCheckUnknownTip');
+}
+
+function formatVersionStatusMessage(versionState, appVersion, t) {
+  const status = versionState.data;
+  const currentVersion = formatVersionLabel(status?.currentVersion || appVersion);
+  const latestVersion = formatVersionLabel(status?.latestVersion);
+
+  if (versionState.status === 'loading') {
+    return t('versionCheckChecking');
+  }
+
+  if (versionState.status === 'error' || status?.error) {
+    return t('versionCheckFailed', { message: status?.error || t('versionCheckUnknownTip') });
+  }
+
+  if (versionState.status === 'ready' && status?.found) {
+    if (status.isOutdated) {
+      return t('versionCheckOutdated', { current: currentVersion, latest: latestVersion });
+    }
+
+    if (status.comparison > 0) {
+      return t('versionCheckAhead', { current: currentVersion, latest: latestVersion });
+    }
+
+    return t('versionCheckCurrent', { version: currentVersion });
+  }
+
+  return t('versionCheckUnavailable');
 }
 
 function isPanelLive(panel) {
@@ -3487,8 +3758,7 @@ function SessionTagControl({
     ? [normalizedTag, ...customTags]
     : customTags;
 
-  const handleChange = (event) => {
-    const nextValue = event.target.value;
+  const handleChange = (nextValue) => {
     if (nextValue === sessionTagNoneValue) {
       onChange?.('');
       return;
@@ -3514,26 +3784,30 @@ function SessionTagControl({
   };
 
   return (
-    <select
+    <Select
+      ariaLabel={t('sessionTag')}
       className={cn('session-tag-select', `is-${getSessionTagTone(normalizedTag)}`, className)}
-      value={normalizedTag || sessionTagNoneValue}
+      onClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onValueChange={handleChange}
+      options={[
+        { value: sessionTagNoneValue, label: t('sessionTagNone') },
+        ...sessionTagPresets.map((tag) => ({
+          value: tag.id,
+          label: t(tag.labelKey)
+        })),
+        ...customOptions.map((tag) => ({
+          value: tag,
+          label: tag
+        })),
+        { value: sessionTagCustomValue, label: t('sessionTagCustom') }
+      ]}
+      popupClassName="min-w-[11rem]"
       title={normalizedTag
         ? `${t('sessionTag')} ${getSessionTagLabel(normalizedTag, t)}`
         : t('sessionTagNone')}
-      aria-label={t('sessionTag')}
-      onPointerDown={(event) => event.stopPropagation()}
-      onClick={(event) => event.stopPropagation()}
-      onChange={handleChange}
-    >
-      <option value={sessionTagNoneValue}>{t('sessionTagNone')}</option>
-      {sessionTagPresets.map((tag) => (
-        <option key={tag.id} value={tag.id}>{t(tag.labelKey)}</option>
-      ))}
-      {customOptions.map((tag) => (
-        <option key={tag} value={tag}>{tag}</option>
-      ))}
-      <option value={sessionTagCustomValue}>{t('sessionTagCustom')}</option>
-    </select>
+      value={normalizedTag || sessionTagNoneValue}
+    />
   );
 }
 
@@ -3695,6 +3969,55 @@ function normalizeImageGenerationTimestamp(value, fallback = Date.now()) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function normalizeImageGenerationPayload(value, depth = 0) {
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'undefined') {
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    if (depth >= 6) {
+      return [`[Array(${value.length})]`];
+    }
+
+    return value.map((entry) => normalizeImageGenerationPayload(entry, depth + 1));
+  }
+
+  if (value && typeof value === 'object') {
+    if (depth >= 6) {
+      return `[Object ${Object.keys(value).length} keys]`;
+    }
+
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entryValue]) => [key, normalizeImageGenerationPayload(entryValue, depth + 1)])
+    );
+  }
+
+  return String(value);
+}
+
+function normalizeImageGenerationPollEvents(events) {
+  return (Array.isArray(events) ? events : [])
+    .map((event, index) => {
+      if (!event || typeof event !== 'object') {
+        return null;
+      }
+
+      const parsedIndex = Number.parseInt(event.index, 10);
+      return {
+        index: Number.isFinite(parsedIndex) && parsedIndex > 0 ? parsedIndex : index + 1,
+        receivedAt: normalizeImageGenerationTimestamp(event.receivedAt),
+        status: normalizeImageGenerationStatus(event.status, 'running'),
+        finishedAt: event.finishedAt || null,
+        payload: normalizeImageGenerationPayload(event.payload)
+      };
+    })
+    .filter(Boolean);
+}
+
 function createImageGenerationTaskItem(source = {}, prompt = '') {
   const id = String(source.id || '').trim() || createLocalId('image-task');
   const createdAt = Number(source.createdAt) || Date.now();
@@ -3709,6 +4032,7 @@ function createImageGenerationTaskItem(source = {}, prompt = '') {
     model: String(source.model || '').trim(),
     n: Number.isFinite(Number.parseInt(source.n, 10)) ? Number.parseInt(source.n, 10) : null,
     size: String(source.size || '').trim(),
+    upscale: normalizeImageApiUpscale(source.upscale),
     referenceImageCount: Number.isFinite(Number.parseInt(source.referenceImageCount, 10))
       ? Number.parseInt(source.referenceImageCount, 10)
       : 0,
@@ -3717,7 +4041,10 @@ function createImageGenerationTaskItem(source = {}, prompt = '') {
     path: '',
     prompt: String(source.prompt || prompt || ''),
     url: '',
-    error: String(source.error || '').trim()
+    error: String(source.error || '').trim(),
+    pollEvents: normalizeImageGenerationPollEvents(source.pollEvents),
+    successPayload: normalizeImageGenerationPayload(source.successPayload),
+    failurePayload: normalizeImageGenerationPayload(source.failurePayload)
   };
 }
 
@@ -3733,7 +4060,7 @@ function normalizeImageGenerationHistoryItem(source = {}, index = 0) {
   const status = normalizeImageGenerationStatus(source.status, kind === 'task' ? 'failed' : 'success');
 
   if (kind === 'task') {
-    if (!imageGenerationFailedStatuses.has(status)) {
+    if (status !== 'success' && !imageGenerationFailedStatuses.has(status)) {
       return null;
     }
 
@@ -3775,6 +4102,7 @@ function normalizeImageGenerationHistoryItem(source = {}, index = 0) {
     model: String(source.model || '').trim(),
     n: Number.isFinite(count) ? Math.min(4, Math.max(1, count)) : null,
     size: String(source.size || '').trim(),
+    upscale: normalizeImageApiUpscale(source.upscale),
     referenceImageCount: Number.isFinite(referenceImageCount) ? Math.max(0, referenceImageCount) : 0,
     name,
     normalizedPath,
@@ -3808,7 +4136,7 @@ function normalizeImageGenerationHistoryItems(items) {
 function isImageGenerationHistoryPersistable(item) {
   const status = normalizeImageGenerationStatus(item?.status, item?.kind === 'image' ? 'success' : 'queued');
   if (item?.kind === 'task') {
-    return imageGenerationFailedStatuses.has(status);
+    return status === 'success' || imageGenerationFailedStatuses.has(status);
   }
 
   return Boolean(item?.path || item?.normalizedPath);
@@ -3830,6 +4158,7 @@ function serializeImageGenerationHistoryItem(item) {
     model: String(item.model || '').trim(),
     n: Number.isFinite(Number.parseInt(item.n, 10)) ? Number.parseInt(item.n, 10) : null,
     size: String(item.size || '').trim(),
+    upscale: normalizeImageApiUpscale(item.upscale),
     referenceImageCount: Number.isFinite(Number.parseInt(item.referenceImageCount, 10))
       ? Number.parseInt(item.referenceImageCount, 10)
       : 0,
@@ -3837,7 +4166,10 @@ function serializeImageGenerationHistoryItem(item) {
     normalizedPath: normalizePromptFilePath(item.normalizedPath || item.path),
     path: String(item.path || item.normalizedPath || '').trim(),
     prompt: String(item.prompt || ''),
-    error: String(item.error || '').trim()
+    error: String(item.error || '').trim(),
+    pollEvents: normalizeImageGenerationPollEvents(item.pollEvents),
+    successPayload: normalizeImageGenerationPayload(item.successPayload),
+    failurePayload: normalizeImageGenerationPayload(item.failurePayload)
   };
 }
 
@@ -3870,6 +4202,7 @@ function createImageGenerationImageItems(images, prompt, source = {}) {
         model: String(source.model || '').trim(),
         n: Number.isFinite(Number.parseInt(source.n, 10)) ? Number.parseInt(source.n, 10) : null,
         size: String(source.size || '').trim(),
+        upscale: normalizeImageApiUpscale(source.upscale),
         referenceImageCount: Number.isFinite(Number.parseInt(source.referenceImageCount, 10))
           ? Number.parseInt(source.referenceImageCount, 10)
           : 0,
@@ -4008,7 +4341,7 @@ function createEmptyWorkspace() {
     sidebarCollapsed: false,
     skillsCollapsed: false,
     activeProjectId: null,
-    canvasMode: 'project',
+    canvasMode: 'shared',
     sharedView: createDefaultView(),
     canvasFrames: {},
     canvasTodos: {},
@@ -4100,9 +4433,6 @@ function normalizeWorkspace(raw) {
       updatedAt: Number.isFinite(project.updatedAt) ? project.updatedAt : Date.now()
     })))
     : [];
-  const activeProjectId = raw.activeProjectId === historyProjectId || projects.some((project) => project.id === raw.activeProjectId)
-    ? raw.activeProjectId
-    : null;
   const projectViews = raw.projectViews && typeof raw.projectViews === 'object'
     ? Object.fromEntries(Object.entries(raw.projectViews).map(([key, value]) => [key, normalizeCanvasView(value)]))
     : {};
@@ -4114,8 +4444,8 @@ function normalizeWorkspace(raw) {
     ...fallback,
     sidebarCollapsed: Boolean(raw.sidebarCollapsed),
     skillsCollapsed: Boolean(raw.skillsCollapsed),
-    activeProjectId,
-    canvasMode: canvasModes.has(raw.canvasMode) ? raw.canvasMode : fallback.canvasMode,
+    activeProjectId: null,
+    canvasMode: 'shared',
     sharedView: normalizeCanvasView(raw.sharedView),
     canvasFrames,
     canvasTodos,
@@ -4742,6 +5072,7 @@ function SessionConnectionPort({
   panelId,
   side,
   t,
+  onPointerDown,
   onClick
 }) {
   return (
@@ -4753,6 +5084,7 @@ function SessionConnectionPort({
       onPointerDown={(event) => {
         event.preventDefault();
         event.stopPropagation();
+        onPointerDown?.(event, panelId);
       }}
       onClick={(event) => {
         event.preventDefault();
@@ -4768,11 +5100,12 @@ function SessionConnectionPort({
 function CanvasConnectionLayer({
   activeConnectionId,
   connections,
+  previewConnection,
   t,
   onDeleteConnection,
   onSelectConnection
 }) {
-  if (connections.length === 0) {
+  if (connections.length === 0 && !previewConnection) {
     return <svg className="canvas-connection-layer" aria-hidden="true" />;
   }
 
@@ -4838,6 +5171,19 @@ function CanvasConnectionLayer({
           </g>
         );
       })}
+      {previewConnection && (
+        <g
+          className="canvas-connection is-preview"
+          style={{
+            '--connection-color': previewConnection.tone?.color || canvasConnectionTones[0].color,
+            '--connection-glow': previewConnection.tone?.glow || canvasConnectionTones[0].glow
+          }}
+        >
+          <path className="canvas-connection-path" d={previewConnection.path} />
+          <circle className="canvas-connection-terminal" cx={previewConnection.from.x} cy={previewConnection.from.y} r="4.5" />
+          <circle className="canvas-connection-terminal" cx={previewConnection.to.x} cy={previewConnection.to.y} r="4.5" />
+        </g>
+      )}
     </svg>
   );
 }
@@ -4855,6 +5201,7 @@ function EndpointGroup({
   t,
   onActivate,
   onConnectionPortClick,
+  onConnectionPortPointerDown,
   onExpandPanel,
   onMove,
   onPanelTitleChange,
@@ -4977,6 +5324,7 @@ function EndpointGroup({
                 pendingConnectionSourceId === panel.id && 'is-connection-source',
                 dispatchSparkleKey && 'is-dispatch-sparkling'
               )}
+              data-terminal-id={panel.id}
               role="button"
               tabIndex={0}
               onClick={(event) => handleRowClick(event, panel.id)}
@@ -4993,6 +5341,7 @@ function EndpointGroup({
                 panelId={panel.id}
                 side="left"
                 t={t}
+                onPointerDown={onConnectionPortPointerDown}
                 onClick={onConnectionPortClick}
               />
               <SessionConnectionPort
@@ -5001,6 +5350,7 @@ function EndpointGroup({
                 panelId={panel.id}
                 side="right"
                 t={t}
+                onPointerDown={onConnectionPortPointerDown}
                 onClick={onConnectionPortClick}
               />
               {dispatchSparkleKey && (
@@ -5067,6 +5417,7 @@ function TerminalPanel({
   onActivate,
   onClose,
   onConnectionPortClick,
+  onConnectionPortPointerDown,
   onExpand,
   onMinimize,
   onMove,
@@ -5084,6 +5435,7 @@ function TerminalPanel({
   const termRef = useRef(null);
   const fitAddonRef = useRef(null);
   const scrollbarTrackRef = useRef(null);
+  const terminalScaleRef = useRef(normalizeTerminalCanvasScale(scale));
   const [scrollbarTrackHeight, setScrollbarTrackHeight] = useState(0);
   const [scrollbarState, setScrollbarState] = useState({ baseY: 0, rows: 0, viewportY: 0 });
   const [contextMenu, setContextMenu] = useState(null);
@@ -5115,6 +5467,15 @@ function TerminalPanel({
     }
   }, []);
 
+  const updateScrollbarTrackHeight = useCallback(() => {
+    const trackNode = scrollbarTrackRef.current;
+    if (!trackNode) {
+      return;
+    }
+
+    setScrollbarTrackHeight(trackNode.getBoundingClientRect().height);
+  }, []);
+
   const syncScrollbarState = useCallback(() => {
     const term = termRef.current;
     if (!term) {
@@ -5132,6 +5493,10 @@ function TerminalPanel({
       current.viewportY === nextState.viewportY
     ) ? current : nextState);
   }, []);
+
+  useEffect(() => {
+    terminalScaleRef.current = normalizeTerminalCanvasScale(scale);
+  }, [scale]);
 
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
@@ -5205,23 +5570,29 @@ function TerminalPanel({
   useEffect(() => {
     const trackNode = scrollbarTrackRef.current;
     if (!trackNode) {
-      return;
+      return undefined;
     }
 
-    const updateTrackHeight = () => {
-      setScrollbarTrackHeight(trackNode.getBoundingClientRect().height);
-    };
-
-    updateTrackHeight();
+    updateScrollbarTrackHeight();
 
     if (typeof ResizeObserver !== 'function') {
       return undefined;
     }
 
-    const observer = new ResizeObserver(() => updateTrackHeight());
+    const observer = new ResizeObserver(() => updateScrollbarTrackHeight());
     observer.observe(trackNode);
     return () => observer.disconnect();
-  }, [panel.minimized, scrollbarState.baseY, visible]);
+  }, [panel.minimized, scrollbarState.baseY, updateScrollbarTrackHeight, visible]);
+
+  useLayoutEffect(() => {
+    if (!visible || panel.minimized) {
+      return;
+    }
+
+    updateScrollbarTrackHeight();
+    const frameId = window.requestAnimationFrame(() => updateScrollbarTrackHeight());
+    return () => window.cancelAnimationFrame(frameId);
+  }, [panel.minimized, scale, updateScrollbarTrackHeight, visible]);
 
   useEffect(() => {
     const term = new Terminal({
@@ -5243,6 +5614,10 @@ function TerminalPanel({
     term.open(hostRef.current);
     termRef.current = term;
     fitAddonRef.current = fitAddon;
+    const unpatchTerminalMouseInteractions = patchTerminalMouseInteractionsForScale(
+      term,
+      () => terminalScaleRef.current
+    );
 
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown' || event.altKey) {
@@ -5318,6 +5693,7 @@ function TerminalPanel({
     });
 
     return () => {
+      unpatchTerminalMouseInteractions();
       terminalElement?.removeEventListener('copy', handleCopy);
       terminalElement?.removeEventListener('paste', handlePaste);
       terminalTextarea?.removeEventListener('focus', handleTextAreaFocus);
@@ -5356,11 +5732,11 @@ function TerminalPanel({
       return;
     }
 
-    fitTerminal();
+    updateScrollbarTrackHeight();
     termRef.current.refresh(0, termRef.current.rows - 1);
     syncScrollbarState();
     syncInputAnchor();
-  }, [fitTerminal, panel.minimized, syncInputAnchor, syncScrollbarState, visible]);
+  }, [panel.minimized, scale, syncInputAnchor, syncScrollbarState, updateScrollbarTrackHeight, visible]);
 
   const scrollbarMetrics = useMemo(() => {
     const maxViewportY = Math.max(scrollbarState.baseY, 0);
@@ -5673,6 +6049,7 @@ function TerminalPanel({
             panelId={panel.id}
             side="left"
             t={t}
+            onPointerDown={onConnectionPortPointerDown}
             onClick={onConnectionPortClick}
           />
           <SessionConnectionPort
@@ -5680,6 +6057,7 @@ function TerminalPanel({
             panelId={panel.id}
             side="right"
             t={t}
+            onPointerDown={onConnectionPortPointerDown}
             onClick={onConnectionPortClick}
           />
         </>
@@ -5887,8 +6265,16 @@ function getConfigFileMeta(fileId) {
   return codexFileMeta[fileId] || codexFileMeta.config;
 }
 
+function isCodexConfigFile(fileId) {
+  return getConfigFileMeta(fileId).owner === 'codex';
+}
+
 function isClaudeConfigFile(fileId) {
   return getConfigFileMeta(fileId).owner === 'claude';
+}
+
+function getConfigFileGroup(fileId) {
+  return isClaudeConfigFile(fileId) ? 'claudeSettings' : 'codex';
 }
 
 function getConfigFileKind(fileId) {
@@ -6115,6 +6501,7 @@ function CodexConfigDialog({
 }) {
   const [activeSettingsTab, setActiveSettingsTab] = useState(initialSettingsTab || 'preferences');
   const [activeFile, setActiveFile] = useState('config');
+  const [lastCodexFile, setLastCodexFile] = useState('config');
   const [pathText, setPathText] = useState('');
   const [value, setValue] = useState('');
   const [lastSavedValue, setLastSavedValue] = useState('');
@@ -6195,12 +6582,22 @@ function CodexConfigDialog({
     () => claudeQuickProfiles.find((record) => record.id === selectedClaudeQuickProfileId) || null,
     [claudeQuickProfiles, selectedClaudeQuickProfileId]
   );
+  const activeFileGroup = getConfigFileGroup(activeFile);
+  const activeCodexFile = isCodexConfigFile(activeFile)
+    ? activeFile
+    : (lastCodexFile === 'auth' ? 'auth' : 'config');
 
   useEffect(() => {
     if (open && initialSettingsTab) {
       setActiveSettingsTab(initialSettingsTab);
     }
   }, [initialSettingsTab, open]);
+
+  useEffect(() => {
+    if (activeFile === 'auth' || activeFile === 'config') {
+      setLastCodexFile(activeFile);
+    }
+  }, [activeFile]);
 
   const loadFile = useCallback(async (kind) => {
     setStatusMessage(t('loading'));
@@ -6792,7 +7189,23 @@ function CodexConfigDialog({
       return;
     }
 
+    if (nextFile === 'auth' || nextFile === 'config') {
+      setLastCodexFile(nextFile);
+    }
     setActiveFile(nextFile);
+  };
+
+  const switchFileGroup = (nextGroup) => {
+    if (nextGroup === activeFileGroup) {
+      return;
+    }
+
+    if (nextGroup === 'claudeSettings') {
+      switchFile('claudeSettings');
+      return;
+    }
+
+    switchFile(lastCodexFile === 'auth' ? 'auth' : 'config');
   };
 
   const reload = () => {
@@ -7015,7 +7428,6 @@ function CodexConfigDialog({
     });
   };
 
-  const selectClassName = 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50';
   const normalizedCommandDockShortcuts = normalizeCommandDockShortcutSettings(commandDockShortcuts);
   const normalizedSessionHeaderVisibility = normalizeSessionHeaderVisibility(sessionHeaderVisibility);
 
@@ -7146,35 +7558,29 @@ function CodexConfigDialog({
                     <Label htmlFor="commandDockSendShortcut" className="text-xs text-muted-foreground">
                       {t('commandDockSendShortcut')}
                     </Label>
-                    <select
+                    <Select
                       id="commandDockSendShortcut"
-                      className={selectClassName}
+                      onValueChange={(nextValue) => onCommandDockShortcutChange?.('send', nextValue)}
+                      options={commandDockShortcutOptions.map((option) => ({
+                        value: option.id,
+                        label: option.label
+                      }))}
                       value={normalizedCommandDockShortcuts.sendShortcut}
-                      onChange={(event) => onCommandDockShortcutChange?.('send', event.target.value)}
-                    >
-                      {commandDockShortcutOptions.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </div>
                   <div className="grid gap-1.5">
                     <Label htmlFor="commandDockDispatchShortcut" className="text-xs text-muted-foreground">
                       {t('commandDockDispatchShortcut')}
                     </Label>
-                    <select
+                    <Select
                       id="commandDockDispatchShortcut"
-                      className={selectClassName}
+                      onValueChange={(nextValue) => onCommandDockShortcutChange?.('dispatch', nextValue)}
+                      options={commandDockShortcutOptions.map((option) => ({
+                        value: option.id,
+                        label: option.label
+                      }))}
                       value={normalizedCommandDockShortcuts.dispatchShortcut}
-                      onChange={(event) => onCommandDockShortcutChange?.('dispatch', event.target.value)}
-                    >
-                      {commandDockShortcutOptions.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </div>
                 </div>
                 <div className="text-xs leading-5 text-muted-foreground">
@@ -7253,6 +7659,20 @@ function CodexConfigDialog({
                 />
               </div>
               <div className="grid min-w-0 gap-1.5 md:col-span-1">
+                <Label className="text-xs font-medium text-muted-foreground">{t('imageApiUpscale')}</Label>
+                <Input
+                  value={imageApiConfig.upscale}
+                  list="imageApiUpscaleOptions"
+                  placeholder="2k / 4k"
+                  spellCheck={false}
+                  onChange={(event) => handleImageApiConfigChange('upscale', event.target.value)}
+                />
+                <datalist id="imageApiUpscaleOptions">
+                  <option value="2k" />
+                  <option value="4k" />
+                </datalist>
+              </div>
+              <div className="grid min-w-0 gap-1.5 md:col-span-1">
                 <Label className="text-xs font-medium text-muted-foreground">{t('imageApiCount')}</Label>
                 <Input
                   type="number"
@@ -7262,7 +7682,7 @@ function CodexConfigDialog({
                   onChange={(event) => handleImageApiConfigChange('n', event.target.value)}
                 />
               </div>
-              <div className="flex min-w-0 items-end gap-2 md:col-span-3">
+              <div className="flex min-w-0 items-end gap-2 md:col-span-2">
                 <Button
                   type="button"
                   variant="outline"
@@ -7324,19 +7744,20 @@ function CodexConfigDialog({
                 <Label htmlFor="quickProfileSelect" className="text-xs font-medium text-muted-foreground">
                   {t('quickProfile')}
                 </Label>
-                <select
+                <Select
                   id="quickProfileSelect"
-                  className={selectClassName}
-                  value={selectedQuickProfileId}
-                  title={quickProfilesPath}
-                  onChange={(event) => handleQuickProfileSelect(event.target.value)}
                   disabled={quickProfilesLoading || profileSaving || restoring}
-                >
-                  <option value="">{t('currentCodexProfile')}</option>
-                  {quickProfiles.map((record) => (
-                    <option key={record.id} value={record.id}>{formatQuickProfileLabel(record)}</option>
-                  ))}
-                </select>
+                  onValueChange={handleQuickProfileSelect}
+                  options={[
+                    { value: '', label: t('currentCodexProfile') },
+                    ...quickProfiles.map((record) => ({
+                      value: record.id,
+                      label: formatQuickProfileLabel(record)
+                    }))
+                  ]}
+                  title={quickProfilesPath}
+                  value={selectedQuickProfileId}
+                />
               </div>
               <Button
                 type="button"
@@ -7384,27 +7805,19 @@ function CodexConfigDialog({
               </div>
               <div className="grid min-w-0 gap-1.5">
                 <Label className="text-xs font-medium text-muted-foreground">{t('wireApi')}</Label>
-                <select
-                  className={selectClassName}
+                <Select
+                  onValueChange={(nextValue) => handleProfileChange('wireApi', nextValue)}
+                  options={toSelectOptions(wireApiOptions)}
                   value={profile.wireApi}
-                  onChange={(event) => handleProfileChange('wireApi', event.target.value)}
-                >
-                  {wireApiOptions.map((option) => (
-                    <option key={option} value={option}>{option}</option>
-                  ))}
-                </select>
+                />
               </div>
               <div className="grid min-w-0 gap-1.5">
                 <Label className="text-xs font-medium text-muted-foreground">{t('reasoningEffort')}</Label>
-                <select
-                  className={selectClassName}
+                <Select
+                  onValueChange={(nextValue) => handleProfileChange('modelReasoningEffort', nextValue)}
+                  options={toSelectOptions(reasoningEffortOptions, (option) => option || t('defaultValue'))}
                   value={profile.modelReasoningEffort}
-                  onChange={(event) => handleProfileChange('modelReasoningEffort', event.target.value)}
-                >
-                  {reasoningEffortOptions.map((option) => (
-                    <option key={option || 'default'} value={option}>{option || t('defaultValue')}</option>
-                  ))}
-                </select>
+                />
               </div>
               <div className="grid min-w-0 gap-1.5 md:col-span-2">
                 <Label className="text-xs font-medium text-muted-foreground">{t('apiKey')}</Label>
@@ -7436,27 +7849,19 @@ function CodexConfigDialog({
               </div>
               <div className="grid min-w-0 gap-1.5 md:col-span-2">
                 <Label className="text-xs font-medium text-muted-foreground">{t('approvalPolicy')}</Label>
-                <select
-                  className={selectClassName}
+                <Select
+                  onValueChange={(nextValue) => handleProfileChange('approvalPolicy', nextValue)}
+                  options={toSelectOptions(approvalPolicyOptions, (option) => option || t('defaultValue'))}
                   value={profile.approvalPolicy}
-                  onChange={(event) => handleProfileChange('approvalPolicy', event.target.value)}
-                >
-                  {approvalPolicyOptions.map((option) => (
-                    <option key={option || 'default'} value={option}>{option || t('defaultValue')}</option>
-                  ))}
-                </select>
+                />
               </div>
               <div className="grid min-w-0 gap-1.5 md:col-span-2">
                 <Label className="text-xs font-medium text-muted-foreground">{t('sandboxMode')}</Label>
-                <select
-                  className={selectClassName}
+                <Select
+                  onValueChange={(nextValue) => handleProfileChange('sandboxMode', nextValue)}
+                  options={toSelectOptions(sandboxModeOptions, (option) => option || t('defaultValue'))}
                   value={profile.sandboxMode}
-                  onChange={(event) => handleProfileChange('sandboxMode', event.target.value)}
-                >
-                  {sandboxModeOptions.map((option) => (
-                    <option key={option || 'default'} value={option}>{option || t('defaultValue')}</option>
-                  ))}
-                </select>
+                />
               </div>
               <div className="grid min-w-0 gap-1.5 md:col-span-6">
                 <Label className="text-xs font-medium text-muted-foreground">{t('quickModel')}</Label>
@@ -7530,19 +7935,20 @@ function CodexConfigDialog({
                 <Label htmlFor="claudeQuickProfileSelect" className="text-xs font-medium text-muted-foreground">
                   {t('quickProfile')}
                 </Label>
-                <select
+                <Select
                   id="claudeQuickProfileSelect"
-                  className={selectClassName}
-                  value={selectedClaudeQuickProfileId}
-                  title={claudeQuickProfilesPath}
-                  onChange={(event) => handleClaudeQuickProfileSelect(event.target.value)}
                   disabled={claudeQuickProfilesLoading || claudeProfileSaving || restoring}
-                >
-                  <option value="">{t('currentClaudeProfile')}</option>
-                  {claudeQuickProfiles.map((record) => (
-                    <option key={record.id} value={record.id}>{formatClaudeQuickProfileLabel(record)}</option>
-                  ))}
-                </select>
+                  onValueChange={handleClaudeQuickProfileSelect}
+                  options={[
+                    { value: '', label: t('currentClaudeProfile') },
+                    ...claudeQuickProfiles.map((record) => ({
+                      value: record.id,
+                      label: formatClaudeQuickProfileLabel(record)
+                    }))
+                  ]}
+                  title={claudeQuickProfilesPath}
+                  value={selectedClaudeQuickProfileId}
+                />
               </div>
               <Button
                 type="button"
@@ -7583,27 +7989,19 @@ function CodexConfigDialog({
               </div>
               <div className="grid min-w-0 gap-1.5 md:col-span-2">
                 <Label className="text-xs font-medium text-muted-foreground">{t('claudeEffortLevel')}</Label>
-                <select
-                  className={selectClassName}
+                <Select
+                  onValueChange={(nextValue) => handleClaudeProfileChange('effortLevel', nextValue)}
+                  options={toSelectOptions(claudeEffortLevelOptions, (option) => option || t('defaultValue'))}
                   value={claudeProfile.effortLevel}
-                  onChange={(event) => handleClaudeProfileChange('effortLevel', event.target.value)}
-                >
-                  {claudeEffortLevelOptions.map((option) => (
-                    <option key={option || 'default'} value={option}>{option || t('defaultValue')}</option>
-                  ))}
-                </select>
+                />
               </div>
               <div className="grid min-w-0 gap-1.5 md:col-span-2">
                 <Label className="text-xs font-medium text-muted-foreground">{t('claudePermissionMode')}</Label>
-                <select
-                  className={selectClassName}
+                <Select
+                  onValueChange={(nextValue) => handleClaudeProfileChange('permissionMode', nextValue)}
+                  options={toSelectOptions(claudePermissionModeOptions, (option) => option || t('defaultValue'))}
                   value={claudeProfile.permissionMode}
-                  onChange={(event) => handleClaudeProfileChange('permissionMode', event.target.value)}
-                >
-                  {claudePermissionModeOptions.map((option) => (
-                    <option key={option || 'default'} value={option}>{option || t('defaultValue')}</option>
-                  ))}
-                </select>
+                />
               </div>
               <div className="grid min-w-0 gap-1.5 md:col-span-3">
                 <Label className="text-xs font-medium text-muted-foreground">{t('claudeApiKey')}</Label>
@@ -7657,47 +8055,79 @@ function CodexConfigDialog({
             </div>
           </div>
 
-          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-            <Tabs value={activeFile} onValueChange={switchFile}>
+          <div className="grid gap-2">
+            <Tabs value={activeFileGroup} onValueChange={switchFileGroup}>
               <TabsList>
-                <TabsTrigger className={cn(activeFile === 'auth' && 'active')} data-codex-file="auth" value="auth" onClick={() => switchFile('auth')}>
-                  auth.json
+                <TabsTrigger
+                  className={cn(activeFileGroup === 'codex' && 'active')}
+                  data-config-group="codex"
+                  value="codex"
+                  onClick={() => switchFileGroup('codex')}
+                >
+                  {t('codexConfig')}
                 </TabsTrigger>
-                <TabsTrigger className={cn(activeFile === 'config' && 'active')} data-codex-file="config" value="config" onClick={() => switchFile('config')}>
-                  config.toml
-                </TabsTrigger>
-                <TabsTrigger className={cn(activeFile === 'claudeSettings' && 'active')} data-config-file="claudeSettings" value="claudeSettings" onClick={() => switchFile('claudeSettings')}>
+                <TabsTrigger
+                  className={cn(activeFile === 'claudeSettings' && 'active')}
+                  data-config-file="claudeSettings"
+                  value="claudeSettings"
+                  onClick={() => switchFileGroup('claudeSettings')}
+                >
                   Claude settings.json
                 </TabsTrigger>
               </TabsList>
             </Tabs>
 
-            <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
-              <Label htmlFor="codexBackupSelect" className="text-xs font-medium text-muted-foreground">
-                {t('backupHistory')}
-              </Label>
-              <select
-                id="codexBackupSelect"
-                className={cn(selectClassName, 'min-w-[220px] flex-1 md:w-[360px] md:flex-none')}
-                value={selectedBackup}
-                onChange={(event) => setSelectedBackup(event.target.value)}
-                disabled={backupsLoading || restoring || backups.length === 0}
-              >
-                {backups.length === 0 ? (
-                  <option value="">{backupsLoading ? t('loading') : t('noBackups')}</option>
-                ) : backups.map((backup) => (
-                  <option key={backup.name} value={backup.name}>{formatBackupLabel(backup)}</option>
-                ))}
-              </select>
-              <Button
-                id="restoreCodexBackup"
-                type="button"
-                onClick={restoreBackup}
-                disabled={!selectedBackup || backupsLoading || restoring || saving}
-              >
-                <RotateCcw className="h-4 w-4" />
-                {t('restoreBackup')}
-              </Button>
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+              {activeFileGroup === 'codex' ? (
+                <Tabs value={activeCodexFile} onValueChange={switchFile}>
+                  <TabsList>
+                    <TabsTrigger
+                      className={cn(activeCodexFile === 'config' && 'active')}
+                      data-codex-file="config"
+                      value="config"
+                      onClick={() => switchFile('config')}
+                    >
+                      config.toml
+                    </TabsTrigger>
+                    <TabsTrigger
+                      className={cn(activeCodexFile === 'auth' && 'active')}
+                      data-codex-file="auth"
+                      value="auth"
+                      onClick={() => switchFile('auth')}
+                    >
+                      auth.json
+                    </TabsTrigger>
+                  </TabsList>
+                </Tabs>
+              ) : <div />}
+
+              <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+                <Label htmlFor="codexBackupSelect" className="text-xs font-medium text-muted-foreground">
+                  {t('backupHistory')}
+                </Label>
+                <Select
+                  id="codexBackupSelect"
+                  className="min-w-[220px] flex-1 md:w-[360px] md:flex-none"
+                  disabled={backupsLoading || restoring || backups.length === 0}
+                  onValueChange={setSelectedBackup}
+                  options={backups.length === 0
+                    ? [{ value: '', label: backupsLoading ? t('loading') : t('noBackups') }]
+                    : backups.map((backup) => ({
+                      value: backup.name,
+                      label: formatBackupLabel(backup)
+                    }))}
+                  value={selectedBackup}
+                />
+                <Button
+                  id="restoreCodexBackup"
+                  type="button"
+                  onClick={restoreBackup}
+                  disabled={!selectedBackup || backupsLoading || restoring || saving}
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  {t('restoreBackup')}
+                </Button>
+              </div>
             </div>
           </div>
 
@@ -7785,13 +8215,10 @@ function CliProviderSelectField({
           {label}
         </Label>
       )}
-      <select
+      <Select
         id={id}
-        className={formSelectClassName}
-        value={selectedCliProvider?.id || ''}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        {providers.map((provider) => {
+        onValueChange={onChange}
+        options={providers.map((provider) => {
           const optionCommand = (
             getCliLaunchCommand(provider, targetType)
             || getCliLaunchCommand(provider, 'project')
@@ -7801,13 +8228,13 @@ function CliProviderSelectField({
             ? `${getCliProviderDisplayName(provider, language)} - ${optionCommand}`
             : getCliProviderDisplayName(provider, language);
 
-          return (
-            <option key={provider.id} value={provider.id}>
-              {optionLabel}
-            </option>
-          );
+          return {
+            value: provider.id,
+            label: optionLabel
+          };
         })}
-      </select>
+        value={selectedCliProvider?.id || ''}
+      />
       {showSummary && selectedCliProvider && (
         <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
           <CliProviderBadge language={language} provider={selectedCliProvider} />
@@ -7833,6 +8260,7 @@ function NewSessionDialog({
   t
 }) {
   const selectableCliProviders = useMemo(() => getSelectableCliProviders(['project', 'directory']), []);
+  const selectableProjects = Array.isArray(projects) ? projects : [];
   const selectedInitialCliProviderId = getInitialCliProviderId(initialCliProviderId, selectableCliProviders);
   const [selectedCliProviderId, setSelectedCliProviderId] = useState(
     () => selectedInitialCliProviderId
@@ -7924,9 +8352,9 @@ function NewSessionDialog({
               </Button>
             )}
 
-            {selectedCliProvider && cliProviderSupportsTarget(selectedCliProvider, 'project') && projects.length > 0 && (
+            {selectedCliProvider && cliProviderSupportsTarget(selectedCliProvider, 'project') && selectableProjects.length > 0 && (
               <div className="grid max-h-[min(360px,calc(100vh-360px))] gap-2 overflow-y-auto pr-1">
-                {projects.map((project) => (
+                {selectableProjects.map((project) => (
                   <Button
                     key={project.id}
                     type="button"
@@ -8738,22 +9166,20 @@ function CommandLineConfigDialog({
             <>
               <div className="grid gap-2">
                 <Label htmlFor="commandPresetSelect">{t('commandPreset')}</Label>
-                <select
+                <Select
                   id="commandPresetSelect"
-                  className={formSelectClassName}
-                  value={selectedCommandPresetId}
                   title={commandPresetsPath}
                   disabled={commandPresetsLoading || commandPresetSaving}
-                  onChange={(event) => selectCommandPreset(event.target.value)}
-                >
-                  <option value="">{t('commandPresetNone')}</option>
-                  {commandPresets.map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.name}
-                      {preset.id === activeCommandPresetId ? ` (${t('commandPresetDefaultBadge')})` : ''}
-                    </option>
-                  ))}
-                </select>
+                  onValueChange={selectCommandPreset}
+                  options={[
+                    { value: '', label: t('commandPresetNone') },
+                    ...commandPresets.map((preset) => ({
+                      value: preset.id,
+                      label: `${preset.name}${preset.id === activeCommandPresetId ? ` (${t('commandPresetDefaultBadge')})` : ''}`
+                    }))
+                  ]}
+                  value={selectedCommandPresetId}
+                />
               </div>
 
               <div className="grid gap-2">
@@ -8921,8 +9347,10 @@ function ReleaseInfoCard({
   appVersion,
   changelog,
   changelogLoading = false,
+  versionState,
   t,
   detail = false,
+  onOpenLatestRelease,
   onOpenRelease,
   onClose
 }) {
@@ -8936,6 +9364,11 @@ function ReleaseInfoCard({
   const sourceLabel = changelogLoading
     ? t('loading')
     : changelog?.source === 'local' ? t('changelogSourceLocal') : t('changelogSourceGithub');
+  const versionStatusMessage = formatVersionStatusMessage(versionState || { status: 'idle', data: null }, appVersion, t);
+  const versionStatus = versionState?.data;
+  const versionStatusKind = getVersionStatusKind(versionState || { status: 'idle', data: null });
+  const latestVersionLabel = formatVersionLabel(versionStatus?.latestVersion);
+  const canOpenLatestRelease = Boolean(versionStatus?.found && versionStatus.latestUrl);
 
   return (
     <div className={cn('sidebar-release-card', detail && 'is-detail')}>
@@ -8963,6 +9396,35 @@ function ReleaseInfoCard({
             </button>
           )}
         </div>
+      </div>
+
+      <div className="sidebar-release-block">
+        <div className="sidebar-release-kicker">{t('versionCheckTitle')}</div>
+        <div
+          className={cn(
+            'sidebar-release-empty',
+            versionStatusKind === 'outdated' && 'is-warning',
+            versionStatusKind === 'error' && 'is-error'
+          )}
+        >
+          {versionStatusMessage}
+        </div>
+        {versionStatus?.found && (
+          <div className="sidebar-release-date">
+            {t('latestVersion')} {latestVersionLabel}
+            {versionStatus.latestDate ? ` · ${versionStatus.latestDate}` : ''}
+          </div>
+        )}
+        {canOpenLatestRelease && (
+          <button
+            type="button"
+            className="sidebar-release-link"
+            onClick={() => onOpenLatestRelease?.(versionStatus.latestUrl)}
+          >
+            <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">{t('openLatestRelease')}</span>
+          </button>
+        )}
       </div>
 
       <div className="sidebar-release-block">
@@ -9038,10 +9500,51 @@ function ReleaseInfo({
 }) {
   const [open, setOpen] = useState(false);
   const [changelogState, setChangelogState] = useState({ status: 'idle', data: null });
+  const [versionState, setVersionState] = useState({ status: 'idle', data: null });
   const panelRef = useRef(null);
   const triggerRef = useRef(null);
   const changelogRequestIdRef = useRef(0);
+  const versionStatusRequestIdRef = useRef(0);
   const versionLabel = formatVersionLabel(appVersion);
+  const versionStatusKind = getVersionStatusKind(versionState);
+  const versionTip = getVersionStatusTip(versionState, versionLabel, t);
+
+  const loadVersionStatus = useCallback(async () => {
+    const version = normalizeVersionText(appVersion);
+    const requestId = versionStatusRequestIdRef.current + 1;
+    versionStatusRequestIdRef.current = requestId;
+
+    if (!version || typeof bridge.getLatestReleaseStatus !== 'function') {
+      setVersionState({ status: 'idle', data: null });
+      return;
+    }
+
+    setVersionState((current) => ({
+      status: 'loading',
+      data: current.data
+    }));
+
+    try {
+      const data = await bridge.getLatestReleaseStatus(version);
+      if (versionStatusRequestIdRef.current === requestId) {
+        setVersionState({
+          status: 'ready',
+          data: normalizeVersionStatus(data, version)
+        });
+      }
+    } catch (error) {
+      if (versionStatusRequestIdRef.current === requestId) {
+        setVersionState({
+          status: 'error',
+          data: normalizeVersionStatus({
+            currentVersion: version,
+            error: error?.message || String(error),
+            latestUrl: releasePageUrl
+          }, version)
+        });
+      }
+    }
+  }, [appVersion]);
 
   const loadChangelog = useCallback(async () => {
     const version = normalizeVersionText(appVersion);
@@ -9112,6 +9615,13 @@ function ReleaseInfo({
   }, [appVersion]);
 
   useEffect(() => {
+    loadVersionStatus();
+    return () => {
+      versionStatusRequestIdRef.current += 1;
+    };
+  }, [loadVersionStatus]);
+
+  useEffect(() => {
     if (open && changelogState.status === 'idle') {
       loadChangelog();
     }
@@ -9155,20 +9665,38 @@ function ReleaseInfo({
 
   return (
     <>
-      <button
-        ref={triggerRef}
-        type="button"
-        className={cn('sidebar-version-button', compact && 'compact')}
-        title={`${t('currentVersion')} ${versionLabel}`}
-        aria-label={`${t('currentVersion')} ${versionLabel}`}
-        aria-controls={open ? 'releaseInfoPanel' : undefined}
-        aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <Badge variant="outline" className={cn('sidebar-version-badge', compact && 'compact')}>
-          {versionLabel}
-        </Badge>
-      </button>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            ref={triggerRef}
+            type="button"
+            className={cn('sidebar-version-button', compact && 'compact')}
+            title={versionTip}
+            aria-label={`${t('currentVersion')} ${versionLabel}. ${versionTip}`}
+            aria-controls={open ? 'releaseInfoPanel' : undefined}
+            aria-expanded={open}
+            onClick={() => setOpen((current) => !current)}
+          >
+            <Badge
+              variant="outline"
+              className={cn(
+                'sidebar-version-badge',
+                `is-${versionStatusKind}`,
+                compact && 'compact'
+              )}
+            >
+              {versionLabel}
+            </Badge>
+            <span
+              className={cn('sidebar-version-status-dot', `is-${versionStatusKind}`)}
+              aria-hidden="true"
+            />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side={compact ? 'right' : 'top'} className="max-w-[260px] whitespace-normal leading-5">
+          {versionTip}
+        </TooltipContent>
+      </Tooltip>
 
       {open && (
         <div
@@ -9182,8 +9710,10 @@ function ReleaseInfo({
             appVersion={appVersion}
             changelog={changelogState.data}
             changelogLoading={changelogState.status === 'loading'}
+            versionState={versionState}
             t={t}
             detail
+            onOpenLatestRelease={openReleaseUrl}
             onOpenRelease={openReleaseUrl}
             onClose={() => setOpen(false)}
           />
@@ -9352,31 +9882,37 @@ function WorkspaceSkillsSection({
 
 function WorkspaceSidebar({
   appVersion,
-  workspace,
   activeProject,
+  activeSessionId,
+  commandTargetId,
   historyProject,
-  theme,
+  language,
   onAddProject,
-  onAddCommandLine,
   onCanvasModeChange,
-  onKillAll,
+  onFocusSession,
+  onAddCommandLine,
   onAddSession,
-  onToggleImageGeneration,
-  onOpenPath,
-  onOpenCodexConfig,
-  onRefreshSkills,
   onDeleteProject,
+  onKillAll,
+  onOpenCodexConfig,
+  onOpenPath,
+  onRefreshSkills,
   onReorderProjects,
   onSelectNoProject,
   onSelectProject,
   onThemeChange,
   onToggleProjectPinned,
+  onToggleCollapsed,
+  onToggleImageGeneration,
   onToggleSkillsCollapsed,
+  runtimeNow,
+  sessions,
   skillsRootPath,
   skillsState,
   t,
-  imageGenerationOpen,
-  onToggleCollapsed
+  workspace,
+  theme,
+  imageGenerationOpen
 }) {
   const collapsed = workspace.sidebarCollapsed;
   const userProjects = workspace.projects;
@@ -9654,6 +10190,52 @@ function WorkspaceSidebar({
           </div>
         </SidebarSection>
 
+        <SidebarSection>
+          <div className="sidebar-section-title">
+            <span>{t('sessionList')}</span>
+          </div>
+
+          {sessions.length === 0 && (
+            <div className="sidebar-empty">{t('sessionListEmpty')}</div>
+          )}
+
+          <div className="sidebar-session-list">
+            {sessions.map((panel) => {
+              const provider = getPanelCliProvider(panel);
+              const state = getPanelExecutionState(panel, runtimeNow);
+              const title = panel.title || getPanelFallbackTitle(panel, language);
+              return (
+                <button
+                  key={panel.id}
+                  type="button"
+                  className={cn(
+                    'sidebar-session',
+                    activeSessionId === panel.id && 'active',
+                    commandTargetId === panel.id && 'is-command-target'
+                  )}
+                  title={panel.cwd || title}
+                  onClick={() => onFocusSession(panel.id)}
+                >
+                  <div className="sidebar-session-title">
+                    <span className={cn('terminal-endpoint-dot', `is-${state}`)} aria-hidden="true" />
+                    <span className="truncate font-medium">{title}</span>
+                  </div>
+                  <div className="sidebar-session-badges">
+                    <CliProviderBadge language={language} provider={provider} variant="outline" />
+                    <SessionStatusTag state={state} t={t} />
+                    {commandTargetId === panel.id && (
+                      <Badge variant="secondary">{t('floatingComposerCurrent')}</Badge>
+                    )}
+                  </div>
+                  <div className="sidebar-session-path" title={panel.cwd || t('defaultDirectory')}>
+                    {panel.cwd || t('defaultDirectory')}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </SidebarSection>
+
         <WorkspaceSkillsSection
           collapsed={Boolean(workspace.skillsCollapsed)}
           onOpenPath={onOpenPath}
@@ -9737,6 +10319,7 @@ export default function App() {
   const [pendingCanvasFrame, setPendingCanvasFrame] = useState(false);
   const [connectionMode, setConnectionMode] = useState(false);
   const [pendingConnectionSourceId, setPendingConnectionSourceId] = useState('');
+  const [canvasConnectionPreview, setCanvasConnectionPreview] = useState(null);
   const [activeCanvasConnectionId, setActiveCanvasConnectionId] = useState(null);
   const [canvasContextMenu, setCanvasContextMenu] = useState(null);
   const [launchCliProviderId, setLaunchCliProviderId] = useState(defaultCliProviderId);
@@ -9822,6 +10405,7 @@ export default function App() {
   const activeCanvasFrameIdRef = useRef(null);
   const activeCanvasTodoIdRef = useRef(null);
   const activeCanvasConnectionIdRef = useRef(null);
+  const connectionPortClickSuppressedRef = useRef(false);
   const cwdRef = useRef(cwd);
   const activeCommandPresetRef = useRef(null);
   const workspaceTreeRequestIdRef = useRef(0);
@@ -9988,6 +10572,32 @@ export default function App() {
       })
       .filter(Boolean);
   }, [endpointGroups, panels, visibleCanvasConnections, visiblePanels, workspace]);
+  const previewConnectionRecord = useMemo(() => {
+    if (!canvasConnectionPreview?.sourceId || !canvasConnectionPreview?.point) {
+      return null;
+    }
+
+    const sourcePanel = visiblePanels.find((panel) => panel.id === canvasConnectionPreview.sourceId);
+    if (!sourcePanel) {
+      return null;
+    }
+
+    const sourceRect = getPanelCanvasRect(sourcePanel, panels, endpointGroups, workspace);
+    if (!sourceRect) {
+      return null;
+    }
+
+    return {
+      connection: { id: `preview-${canvasConnectionPreview.sourceId}` },
+      ...buildCanvasConnectionPath(sourceRect, {
+        x: canvasConnectionPreview.point.x,
+        y: canvasConnectionPreview.point.y,
+        width: 0,
+        height: 0
+      }),
+      tone: getCanvasConnectionTone({ id: `preview-${canvasConnectionPreview.sourceId}` })
+    };
+  }, [canvasConnectionPreview, endpointGroups, panels, visiblePanels, workspace]);
   const groupableEndpointCount = useMemo(() => {
     const visibleEndpoints = visiblePanels.filter((panel) => panel.minimized);
     const selectedVisibleCount = visibleEndpoints.filter((panel) => selectedEndpointIds.has(panel.id)).length;
@@ -10088,6 +10698,18 @@ export default function App() {
   useEffect(() => {
     activeCanvasConnectionIdRef.current = activeCanvasConnectionId;
   }, [activeCanvasConnectionId]);
+
+  useEffect(() => {
+    if (!connectionMode && canvasConnectionPreview) {
+      setCanvasConnectionPreview(null);
+    }
+  }, [canvasConnectionPreview, connectionMode]);
+
+  useEffect(() => {
+    if (!pendingConnectionSourceId && canvasConnectionPreview) {
+      setCanvasConnectionPreview(null);
+    }
+  }, [canvasConnectionPreview, pendingConnectionSourceId]);
 
   useEffect(() => {
     cwdRef.current = cwd;
@@ -11137,6 +11759,7 @@ export default function App() {
 
     const model = String(options.model || '').trim();
     const size = String(options.size || '').trim();
+    const upscale = normalizeImageApiUpscale(options.upscale);
     const count = Number.parseInt(options.n, 10);
     const n = Number.isFinite(count) ? Math.min(4, Math.max(1, count)) : undefined;
     const referenceImageUrls = Array.isArray(options.referenceImageUrls)
@@ -11149,6 +11772,7 @@ export default function App() {
       model,
       n,
       size,
+      upscale,
       referenceImageCount: referenceImageUrls.length,
       status: 'submitting',
       createdAt: Date.now()
@@ -11162,6 +11786,7 @@ export default function App() {
         clientTaskId: taskId,
         ...(model ? { model } : {}),
         ...(size ? { size } : {}),
+        ...(upscale ? { upscale } : {}),
         ...(n ? { n } : {}),
         ...(referenceImageUrls.length > 0 ? { referenceImageUrls } : {})
       });
@@ -11189,7 +11814,9 @@ export default function App() {
             }
           : item
       )));
-      showToast(t('imageGenerationFailed', { message }));
+      if (typeof bridge.onImageGenerationTaskUpdate !== 'function') {
+        showToast(t('imageGenerationFailed', { message }));
+      }
       return false;
     } finally {
       setImageGenerationSubmitting(false);
@@ -11217,11 +11844,25 @@ export default function App() {
 
       if (status === 'success') {
         const images = createImageGenerationImageItems(update?.images, prompt, update);
+        const successTask = createImageGenerationTaskItem({
+          ...update,
+          status: 'success',
+          error: ''
+        }, prompt);
+        const remoteTaskId = String(successTask.taskId || '').trim();
         setImageGenerationResults((current) => {
-          const withoutTask = current.filter((item) => item.id !== id);
-          return images.length > 0
-            ? [...images, ...withoutTask].slice(0, 40)
-            : withoutTask;
+          const nextItems = current.filter((item) => {
+            if (item.id === id) {
+              return false;
+            }
+
+            if (remoteTaskId && item.taskId === remoteTaskId && item.kind === 'image') {
+              return false;
+            }
+
+            return true;
+          });
+          return [successTask, ...images, ...nextItems].slice(0, 40);
         });
 
         if (images.length > 0) {
@@ -12191,12 +12832,17 @@ export default function App() {
   }, [showToast, t, updateCanvasConnectionsForKey]);
 
   const handleSessionConnectionPortClick = useCallback((panelId) => {
+    if (connectionPortClickSuppressedRef.current) {
+      return;
+    }
+
     const normalizedPanelId = String(panelId || '').trim();
     const panel = panelsRef.current.find((item) => item.id === normalizedPanelId);
     if (!panel || !isPanelVisibleInWorkspace(panel, workspaceRef.current)) {
       return;
     }
 
+    setPendingCanvasFrame(false);
     setConnectionMode(true);
     setActiveCanvasConnectionId(null);
     setActiveCanvasFrameId(null);
@@ -12219,6 +12865,67 @@ export default function App() {
     setPendingConnectionSourceId('');
   }, [connectCanvasSessions, pendingConnectionSourceId, showToast, t]);
 
+  const handleSessionConnectionPortPointerDown = useCallback((event, panelId) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    const normalizedPanelId = String(panelId || '').trim();
+    const panel = panelsRef.current.find((item) => item.id === normalizedPanelId);
+    if (!panel || !isPanelVisibleInWorkspace(panel, workspaceRef.current)) {
+      return;
+    }
+
+    const startClientX = event.clientX;
+    const startClientY = event.clientY;
+    let dragging = false;
+
+    bindPointerSession((moveEvent) => {
+      const distance = Math.hypot(moveEvent.clientX - startClientX, moveEvent.clientY - startClientY);
+      if (!dragging && distance >= connectionPortDragThreshold) {
+        dragging = true;
+        connectionPortClickSuppressedRef.current = true;
+        setPendingCanvasFrame(false);
+        setConnectionMode(true);
+        setActiveCanvasConnectionId(null);
+        setActiveCanvasFrameId(null);
+        setActiveCanvasTodoId(null);
+        setActiveId(panel.id);
+        setPendingConnectionSourceId(panel.id);
+        if (pendingConnectionSourceId !== panel.id) {
+          showToast(t('canvasConnectionStart'));
+        }
+      }
+
+      if (!dragging) {
+        return;
+      }
+
+      setCanvasConnectionPreview({
+        sourceId: panel.id,
+        point: clientPointToCanvas(moveEvent.clientX, moveEvent.clientY)
+      });
+    }, (endEvent) => {
+      if (!dragging) {
+        return;
+      }
+
+      setCanvasConnectionPreview(null);
+      window.setTimeout(() => {
+        connectionPortClickSuppressedRef.current = false;
+      }, 0);
+
+      const targetId = getPanelIdFromEventTarget(endEvent?.target);
+      if (targetId && targetId !== panel.id) {
+        connectCanvasSessions(panel.id, targetId);
+        setPendingConnectionSourceId('');
+        return;
+      }
+
+      setPendingConnectionSourceId(panel.id);
+    });
+  }, [clientPointToCanvas, connectCanvasSessions, pendingConnectionSourceId, showToast, t]);
+
   const toggleCanvasConnectionMode = useCallback(() => {
     const nextMode = !connectionMode;
     setConnectionMode(nextMode);
@@ -12228,6 +12935,7 @@ export default function App() {
       return;
     }
 
+    setCanvasConnectionPreview(null);
     setPendingConnectionSourceId('');
   }, [connectionMode, showToast, t]);
 
@@ -12239,14 +12947,14 @@ export default function App() {
     const y = Number.isFinite(slot.y) ? slot.y : center.y - height / 2;
     const projectId = Object.prototype.hasOwnProperty.call(slot, 'projectId')
       ? slot.projectId || null
-      : workspaceRef.current.activeProjectId || null;
+      : null;
     const terminalCwd = Object.prototype.hasOwnProperty.call(slot, 'cwd')
       ? slot.cwd
       : cwdRef.current;
     const hasExplicitInitialCommand = Object.prototype.hasOwnProperty.call(slot, 'initialCommand');
     const cliProvider = resolveCliProvider(slot.cliProviderId, slot.initialCommand);
     const cliProviderId = cliProvider?.id || defaultCliProviderId;
-    const targetType = slot.targetType === 'directory' ? 'directory' : 'project';
+    const targetType = 'directory';
     const launchCommand = getCliLaunchCommand(cliProvider, targetType);
     const presetInitialCommand = !hasExplicitInitialCommand && slot.useCommandPreset === true && cliProviderId === 'shell'
       ? normalizeCommandPresetCommandInput(activeCommandPresetRef.current?.command)
@@ -12303,21 +13011,14 @@ export default function App() {
   }, [focusTerminalInstance, getVisiblePanels, language, viewportCenterOnCanvas]);
 
   const getCurrentSessionLaunchContext = useCallback(() => {
-    const projectId = workspaceRef.current.activeProjectId || null;
-    const project = findProjectById(
-      workspaceRef.current.projects,
-      historyProjectRef.current,
-      projectId
-    );
     const sessionCwd = String(cwdRef.current || '').trim()
-      || project?.path
       || defaultCwd
       || '';
 
     return {
-      projectId,
+      projectId: null,
       cwd: sessionCwd,
-      targetType: projectId ? 'project' : 'directory'
+      targetType: 'directory'
     };
   }, [defaultCwd]);
 
@@ -12573,12 +13274,12 @@ export default function App() {
     await closeTerminal(id);
     await createTerminal({
       title: panel.title,
-      projectId: panel.projectId || null,
+      projectId: null,
       cwd: panel.cwd,
       cliProviderId: panel.cliProviderId,
       initialCommand: Object.prototype.hasOwnProperty.call(panel, 'initialCommand')
         ? panel.initialCommand
-        : getCliLaunchCommand(getPanelCliProvider(panel), panel.projectId ? 'project' : 'directory'),
+        : getCliLaunchCommand(getPanelCliProvider(panel), 'directory'),
       x: panel.x,
       y: panel.y,
       width: panel.width,
@@ -13113,13 +13814,23 @@ export default function App() {
       return;
     }
 
+    if (panel.cwd && panel.cwd !== cwdRef.current) {
+      setCwd(panel.cwd);
+    }
+
     if (panel.minimized) {
       expandPanel(id);
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          centerCanvasOnCommandDockTarget(id);
+        });
+      });
       return;
     }
 
     activatePanel(id);
-  }, [activatePanel, expandPanel]);
+    centerCanvasOnCommandDockTarget(id);
+  }, [activatePanel, centerCanvasOnCommandDockTarget, expandPanel]);
 
   const setCommandTargetFromReview = useCallback((id) => {
     setCommandDockTargetId(id);
@@ -13458,7 +14169,7 @@ export default function App() {
         return;
       }
 
-      const sessionCwd = defaultCwd || '';
+      const sessionCwd = String(cwdRef.current || defaultCwd || '').trim();
       const nextWorkspace = commitWorkspace((currentWorkspace) => ({
         ...currentWorkspace,
         activeProjectId: null
@@ -13917,9 +14628,9 @@ export default function App() {
 
   const minorGrid = 48 * view.scale;
   const majorGrid = minorGrid * 4;
-  const activeTitle = workspace.canvasMode === 'shared'
-    ? t('sharedWorkspace')
-    : activeProject ? `${activeProject.name} ${t('workspace')}` : t('noProject');
+  const activePanel = visiblePanels.find((panel) => panel.id === activeId) || null;
+  const activeTitle = activePanel?.title || activeProject?.name || t('freeSessionWorkspace');
+  const activePath = activePanel?.cwd || activeProject?.path || currentWorkspacePath || t('defaultDirectory');
   const currentZoomPercent = Math.round(view.scale * 100);
   const currentZoomPresetScale = zoomPresetScales.find((scale) => Math.abs(view.scale - scale) < 0.01);
   const zoomSelectValue = currentZoomPresetScale ? String(currentZoomPresetScale) : 'current';
@@ -13929,29 +14640,35 @@ export default function App() {
       <div className={cn('app-shell', workspace.sidebarCollapsed && 'sidebar-is-collapsed')}>
         <WorkspaceSidebar
           appVersion={appInfo.appVersion}
-          workspace={workspace}
           activeProject={activeProject}
+          activeSessionId={activeId}
+          commandTargetId={commandDockTargetId}
           historyProject={historyProject}
-          theme={theme}
+          language={language}
           onAddProject={openProjectDialog}
+          onCanvasModeChange={changeCanvasMode}
+          onFocusSession={focusSessionFromReview}
+          theme={theme}
           onAddCommandLine={openCommandLineDialog}
           onAddSession={openNewSessionPicker}
-          onCanvasModeChange={changeCanvasMode}
+          onDeleteProject={deleteProject}
           onKillAll={killAll}
           onToggleImageGeneration={toggleImageGeneration}
           onOpenPath={openWorkspacePath}
           onOpenCodexConfig={openCodexSettings}
           onRefreshSkills={refreshWorkspaceSkills}
-          onDeleteProject={deleteProject}
           onReorderProjects={reorderProjects}
           onSelectNoProject={selectNoProject}
           onSelectProject={selectProject}
           onThemeChange={setTheme}
           onToggleProjectPinned={toggleProjectPinned}
           onToggleSkillsCollapsed={toggleSkillsCollapsed}
+          runtimeNow={runtimeNow}
+          sessions={commandDockPanels}
           skillsRootPath={skillsRootPath}
           skillsState={workspaceSkillsState}
           t={t}
+          workspace={workspace}
           imageGenerationOpen={imageGenerationOpen}
           onToggleCollapsed={toggleSidebar}
         />
@@ -13961,7 +14678,7 @@ export default function App() {
             <div className="min-w-[160px] max-w-[260px]">
               <div className="truncate text-sm font-semibold">{activeTitle}</div>
               <div className="truncate text-xs text-muted-foreground">
-                {activeProject ? activeProject.path : (cwd || t('noProject'))}
+                {activePath}
               </div>
             </div>
 
@@ -13984,35 +14701,27 @@ export default function App() {
               }}>
                 <Minus className="h-4 w-4" />
               </IconButton>
-              <select
+              <Select
                 id="zoomPreset"
-                className="h-9 w-[88px] shrink-0 rounded-md border border-border bg-background px-2 text-sm font-medium tabular-nums text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                value={zoomSelectValue}
-                title={t('zoomLevel')}
-                aria-label={t('zoomLevel')}
-                onChange={(event) => {
-                  const nextScale = Number(event.target.value);
+                ariaLabel={t('zoomLevel')}
+                className="h-9 w-[96px] shrink-0 px-2 font-medium tabular-nums"
+                onValueChange={(nextValue) => {
+                  const nextScale = Number(nextValue);
                   if (Number.isFinite(nextScale)) {
                     zoomViewportCenter(nextScale);
                   }
                 }}
-              >
-                {!currentZoomPresetScale && (
-                  <option value="current">{currentZoomPercent}%</option>
-                )}
-                {zoomPresetScales.map((scale) => {
-                  const percent = Math.round(scale * 100);
-
-                  return (
-                    <option
-                      key={scale}
-                      value={String(scale)}
-                    >
-                      {percent}%
-                    </option>
-                  );
-                })}
-              </select>
+                options={[
+                  ...(!currentZoomPresetScale ? [{ value: 'current', label: `${currentZoomPercent}%` }] : []),
+                  ...zoomPresetScales.map((scale) => ({
+                    value: String(scale),
+                    label: `${Math.round(scale * 100)}%`
+                  }))
+                ]}
+                title={t('zoomLevel')}
+                value={zoomSelectValue}
+                valueClassName="tabular-nums"
+              />
               <IconButton id="zoomIn" label={t('zoomIn')} onClick={() => {
                 zoomViewportCenter(view.scale * 1.16);
               }}>
@@ -14179,6 +14888,7 @@ export default function App() {
               <CanvasConnectionLayer
                 activeConnectionId={activeCanvasConnectionId}
                 connections={visibleConnectionRecords}
+                previewConnection={previewConnectionRecord}
                 t={t}
                 onDeleteConnection={deleteCanvasConnection}
                 onSelectConnection={selectCanvasConnection}
@@ -14199,6 +14909,7 @@ export default function App() {
                   t={t}
                   onActivate={activateEndpointGroup}
                   onConnectionPortClick={handleSessionConnectionPortClick}
+                  onConnectionPortPointerDown={handleSessionConnectionPortPointerDown}
                   onExpandPanel={expandPanel}
                   onMove={updateEndpointGroup}
                   onPanelTitleChange={(id, title) => updatePanel(id, { title })}
@@ -14230,6 +14941,7 @@ export default function App() {
                   onActivate={activatePanel}
                   onClose={closeTerminal}
                   onConnectionPortClick={handleSessionConnectionPortClick}
+                  onConnectionPortPointerDown={handleSessionConnectionPortPointerDown}
                   onExpand={expandPanel}
                   onMinimize={minimizePanel}
                   onMove={updatePanel}
@@ -14437,7 +15149,7 @@ export default function App() {
       />
 
       <NewSessionDialog
-        defaultCwd={defaultCwd}
+        defaultCwd={currentWorkspacePath || defaultCwd}
         initialCliProviderId={launchCliProviderId}
         language={language}
         onOpenChange={setNewSessionOpen}

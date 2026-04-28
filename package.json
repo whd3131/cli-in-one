@@ -1,6 +1,6 @@
 {
   "name": "cli-in-one",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "An Electron infinite-canvas workspace for watching multiple Windows cmd sessions in one view.",
   "main": "src/main.js",
   "scripts": {
@@ -28,13 +28,8 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@base-ui/react": "^1.4.1",
     "@iarna/toml": "^2.2.5",
-    "@radix-ui/react-dialog": "^1.1.15",
-    "@radix-ui/react-label": "^2.1.8",
-    "@radix-ui/react-separator": "^1.1.8",
-    "@radix-ui/react-slot": "^1.2.4",
-    "@radix-ui/react-tabs": "^1.1.13",
-    "@radix-ui/react-tooltip": "^1.2.8",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",

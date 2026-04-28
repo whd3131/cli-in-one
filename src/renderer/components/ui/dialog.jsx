@@ -1,15 +1,14 @@
 import * as React from 'react';
-import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { Dialog as DialogPrimitive } from '@base-ui/react/dialog';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { resolveBaseUiRenderProp } from '@/components/ui/base-ui-render';
 
 const Dialog = DialogPrimitive.Root;
-const DialogTrigger = DialogPrimitive.Trigger;
 const DialogPortal = DialogPrimitive.Portal;
-const DialogClose = DialogPrimitive.Close;
 
 const DialogOverlay = React.forwardRef(({ className, ...props }, ref) => (
-  <DialogPrimitive.Overlay
+  <DialogPrimitive.Backdrop
     ref={ref}
     className={cn(
       'fixed inset-0 z-[9000] bg-black/45 data-[state=open]:animate-in data-[state=closed]:animate-out',
@@ -18,12 +17,32 @@ const DialogOverlay = React.forwardRef(({ className, ...props }, ref) => (
     {...props}
   />
 ));
-DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
+DialogOverlay.displayName = DialogPrimitive.Backdrop.displayName;
+
+const DialogTrigger = React.forwardRef(({ asChild = false, children: childrenProp, ...props }, ref) => {
+  const { children, render } = resolveBaseUiRenderProp(asChild, childrenProp);
+  return (
+    <DialogPrimitive.Trigger ref={ref} render={render} {...props}>
+      {children}
+    </DialogPrimitive.Trigger>
+  );
+});
+DialogTrigger.displayName = DialogPrimitive.Trigger.displayName;
+
+const DialogClose = React.forwardRef(({ asChild = false, children: childrenProp, ...props }, ref) => {
+  const { children, render } = resolveBaseUiRenderProp(asChild, childrenProp);
+  return (
+    <DialogPrimitive.Close ref={ref} render={render} {...props}>
+      {children}
+    </DialogPrimitive.Close>
+  );
+});
+DialogClose.displayName = DialogPrimitive.Close.displayName;
 
 const DialogContent = React.forwardRef(({ className, children, ...props }, ref) => (
   <DialogPortal>
     <DialogOverlay />
-    <DialogPrimitive.Content
+    <DialogPrimitive.Popup
       ref={ref}
       className={cn(
         'fixed right-4 top-20 z-[9100] grid w-[min(780px,calc(100vw-32px))] max-h-[calc(100vh-96px)] rounded-lg border border-border bg-popover text-popover-foreground shadow-2xl focus-visible:outline-none',
@@ -36,10 +55,10 @@ const DialogContent = React.forwardRef(({ className, children, ...props }, ref) 
         <X className="h-4 w-4" />
         <span className="sr-only">关闭</span>
       </DialogPrimitive.Close>
-    </DialogPrimitive.Content>
+    </DialogPrimitive.Popup>
   </DialogPortal>
 ));
-DialogContent.displayName = DialogPrimitive.Content.displayName;
+DialogContent.displayName = DialogPrimitive.Popup.displayName;
 
 const DialogHeader = ({ className, ...props }) => (
   <div className={cn('flex flex-col gap-1.5 border-b border-border px-4 py-3', className)} {...props} />

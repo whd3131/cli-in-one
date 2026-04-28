@@ -20,6 +20,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
@@ -227,6 +228,8 @@ export function FloatingCommandDock({
   const targetMenuRootRef = React.useRef(null);
   const [dragging, setDragging] = React.useState(false);
   const [historyOpen, setHistoryOpen] = React.useState(false);
+  const [quickPromptSelectResetKey, setQuickPromptSelectResetKey] = React.useState(0);
+  const [selectedQuickPromptValue, setSelectedQuickPromptValue] = React.useState('');
   const [targetMenuOpen, setTargetMenuOpen] = React.useState(false);
   const [targetFilter, setTargetFilter] = React.useState('');
   const [targetMenuLayout, setTargetMenuLayout] = React.useState({
@@ -263,6 +266,20 @@ export function FloatingCommandDock({
   const normalizedQuickPrompts = Array.isArray(quickPrompts)
     ? quickPrompts.filter((record) => String(record?.prompt || '').trim())
     : [];
+  const quickPromptOptions = normalizedQuickPrompts.map((record, index) => {
+    const label = String(record.title || '').trim()
+      || getQuickPromptTitle?.(record)
+      || t('quickPromptDefaultName');
+
+    return {
+      label,
+      record,
+      value: String(record.id || `${label}-${record.createdAt || record.updatedAt || index}`)
+    };
+  });
+  const selectedQuickPromptOption = selectedQuickPromptValue
+    ? quickPromptOptions.find((option) => option.value === selectedQuickPromptValue) || null
+    : null;
   const normalizedCommandHistory = Array.isArray(commandHistory)
     ? commandHistory.map((item) => String(item || '')).filter((item) => item.trim()).slice(0, 10)
     : [];
@@ -576,6 +593,25 @@ export function FloatingCommandDock({
     setTargetMenuOpen(false);
   };
 
+  const handleQuickPromptOptionSelect = (nextValue) => {
+    const option = quickPromptOptions.find((item) => item.value === String(nextValue || ''));
+    if (!option) {
+      return;
+    }
+
+    setSelectedQuickPromptValue(option.value);
+    setQuickPromptSelectResetKey((current) => current + 1);
+    onQuickPromptSelect?.(option.record);
+  };
+
+  const handleQuickPromptDeleteClick = () => {
+    if (!selectedQuickPromptOption) {
+      return;
+    }
+
+    onQuickPromptDelete?.(selectedQuickPromptOption.record);
+  };
+
   return (
     <div
       ref={dockRef}
@@ -594,16 +630,48 @@ export function FloatingCommandDock({
         onDrop={onInputDrop}
       >
         <CardHeader className={cn('px-3', collapsed ? 'gap-1 py-2.5' : 'gap-2 py-3')}>
-          <div className="flex items-center justify-between gap-3">
-            <div
-              className="command-dock-drag-handle min-w-0 flex flex-1 items-center gap-2"
-              title={t('floatingComposerDrag')}
-              onDoubleClick={handleDockPositionReset}
-              onPointerDown={handleDockDragStart}
-            >
-              <GripHorizontal className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <CardTitle className="shrink-0 text-sm">{t('floatingComposerTitle')}</CardTitle>
-              <CardDescription className="truncate text-xs" title={targetPanel?.cwd || undefined}>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex flex-1 flex-col gap-1">
+              <div className="flex min-w-0 items-center gap-2">
+                <div
+                  className="command-dock-drag-handle min-w-0 flex shrink-0 items-center gap-2"
+                  title={t('floatingComposerDrag')}
+                  onDoubleClick={handleDockPositionReset}
+                  onPointerDown={handleDockDragStart}
+                >
+                  <GripHorizontal className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <CardTitle className="shrink-0 text-sm">{t('floatingComposerTitle')}</CardTitle>
+                </div>
+                {!collapsed && quickPromptOptions.length > 0 && (
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                    <Select
+                      key={quickPromptSelectResetKey}
+                      ariaLabel={t('quickPrompts')}
+                      className="h-8 min-w-[112px] max-w-[min(240px,38vw)] flex-1 px-2 text-xs"
+                      onValueChange={handleQuickPromptOptionSelect}
+                      options={quickPromptOptions.map(({ label, value }) => ({
+                        label,
+                        value
+                      }))}
+                      placeholder={t('quickPrompts')}
+                      popupClassName="min-w-[14rem]"
+                      title={quickPromptsPath || t('quickPrompts')}
+                    />
+                    <CommandDockIconButton
+                      label={selectedQuickPromptOption
+                        ? `${t('quickPromptDelete')}: ${selectedQuickPromptOption.label}`
+                        : t('quickPromptDelete')}
+                      variant="ghost"
+                      className="h-8 w-8 shrink-0"
+                      onClick={handleQuickPromptDeleteClick}
+                      disabled={!selectedQuickPromptOption || quickPromptsLoading}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </CommandDockIconButton>
+                  </div>
+                )}
+              </div>
+              <CardDescription className="truncate pl-6 text-xs" title={targetPanel?.cwd || undefined}>
                 {targetSummary}
               </CardDescription>
             </div>
@@ -625,49 +693,6 @@ export function FloatingCommandDock({
         {!collapsed && (
           <>
             <CardContent className="grid gap-2 px-3 pb-3 pt-0">
-              {normalizedQuickPrompts.length > 0 && (
-                <div className="command-dock-prompt-bar" title={quickPromptsPath || undefined}>
-                  <div className="command-dock-prompt-label">
-                    <MessageSquarePlus className="h-3.5 w-3.5" />
-                    <span>{t('quickPrompts')}</span>
-                  </div>
-                  <div
-                    className="command-dock-prompt-list"
-                    role="list"
-                    aria-label={t('quickPrompts')}
-                  >
-                    {normalizedQuickPrompts.map((record) => {
-                      const title = String(record.title || '').trim()
-                        || getQuickPromptTitle?.(record)
-                        || t('quickPromptDefaultName');
-
-                      return (
-                        <div key={record.id || `${title}-${record.createdAt || record.updatedAt || 0}`} className="command-dock-prompt-item" role="listitem">
-                          <button
-                            type="button"
-                            className="command-dock-prompt-chip"
-                            title={`${title}\n${record.prompt}`}
-                            onClick={() => onQuickPromptSelect?.(record)}
-                            disabled={quickPromptsLoading}
-                          >
-                            <MessageSquarePlus className="h-3.5 w-3.5 shrink-0" />
-                            <span className="truncate">{title}</span>
-                          </button>
-                          <CommandDockIconButton
-                            label={t('quickPromptDelete')}
-                            variant="ghost"
-                            className="command-dock-prompt-delete h-7 w-7"
-                            onClick={() => onQuickPromptDelete?.(record)}
-                            disabled={quickPromptsLoading}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </CommandDockIconButton>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
               <div className="relative">
                 <Textarea
                   ref={inputRef}
@@ -775,8 +800,11 @@ export function FloatingCommandDock({
               </div>
             </CardContent>
 
-            <CardFooter className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2">
-              <div className="command-dock-target-root command-dock-toolbar-target" ref={targetMenuRootRef}>
+            <CardFooter className="command-dock-footer border-t px-3 py-2">
+              <div
+                className="command-dock-target-root command-dock-toolbar-target command-dock-footer-toolbar"
+                ref={targetMenuRootRef}
+              >
                 <button
                   type="button"
                   className="command-dock-target-trigger"
@@ -899,7 +927,7 @@ export function FloatingCommandDock({
                   </div>
                 )}
               </div>
-              <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+              <div className="command-dock-footer-actions">
                 <Button
                   type="button"
                   variant="outline"

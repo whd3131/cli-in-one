@@ -1,5 +1,40 @@
 # Changelog
 
+## [1.1.0](https://github.com/whd3131/cli-in-one/compare/v1.0.0...v1.1.0) (2026-04-28)
+
+
+### Features
+
+* add a free-session launch flow that starts new terminals from the current working directory instead of binding them to the active project, and reuse that directory when launching agent tasks or restarting sessions
+* add a current-session list in the sidebar with provider badges, runtime status, command-target highlighting, and one-click focus that restores minimized sessions and recenters the canvas
+* add GitHub latest-version checks in the release panel with semantic version comparison, cached lookups, status badges, and a direct link to the newest published release
+* add image generation output-quality controls for default, 2K, and 4K requests, then persist the selected upscale value through the Electron image API bridge
+* add grouped local image history with prompt titles, timestamps, thumbnails, file actions, and reuse-as-reference shortcuts so recent generations stay accessible outside the canvas
+* add persisted image task diagnostics including task IDs, poll history, sanitized success payloads, and failure payload capture for debugging remote generation jobs
+* add drag-to-connect canvas wiring with a live preview path so users can create panel connections in a single pointer gesture
+
+
+### Improvements
+
+* move saved Quick Send prompts into a compact selector in the dock header, keep prompt deletion nearby, and rebalance the footer toolbar so target switching stays usable in tighter widths
+* update the top bar workspace title and path to reflect the active session or current directory, which makes the free-session workflow clearer even when no project is selected
+* keep image task records in the local history while limiting the canvas to pending and failed task cards, and only auto-arrange result cards that have not been manually repositioned
+* redesign the sidebar session cards, version badges, command dock footer, image history panels, and connection preview styling for denser scanning and better small-screen behavior
+* replace the Radix-based UI primitives with Base UI equivalents for buttons, dialogs, tooltips, tabs, selects, radios, inputs, and separators to simplify custom rendering and styling consistency
+
+
+### Bug Fixes
+
+* restore accurate xterm mouse coordinates, selection, mouse reporting, and scroll behavior when the workspace canvas is zoomed or scaled
+* prevent connection-port clicks from firing after a drag gesture and clear preview state when connection mode is canceled or exits
+* surface image API dispatch failures immediately, preserve failure payloads even before a remote task ID exists, and truncate oversized payload data before saving it to local state
+* keep session focus, command targeting, and current-directory state aligned when opening sessions from the sidebar, restoring minimized sessions, or relaunching an existing panel
+
+
+### Internal
+
+* add shared helpers for Base UI render props and image API payload sanitization, plus release-version comparison utilities for GitHub latest-release checks
+
 ## [1.0.0](https://github.com/whd3131/cli-in-one/compare/v0.9.0...v1.0.0) (2026-04-28)
 
 

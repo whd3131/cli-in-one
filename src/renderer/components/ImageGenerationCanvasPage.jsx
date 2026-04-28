@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ChevronDown,
+  ChevronRight,
   Copy,
   ExternalLink,
   ImagePlus,
@@ -24,6 +26,7 @@ import { cn } from '@/lib/utils';
 
 const modelOptions = ['gpt-image-2', 'gpt-image-1'];
 const countOptions = [1, 2, 3, 4];
+const upscaleOptions = ['', '2k', '4k'];
 const aspectOptions = [
   { id: 'auto', size: 'auto', labelKey: 'imageGenerationAspectAuto', ratio: 1 },
   { id: '1:1', size: '1024x1024', label: '1:1', ratio: 1 },
@@ -155,6 +158,11 @@ function normalizeCount(value) {
   return Number.isFinite(count) ? clamp(count, 1, 4) : 1;
 }
 
+function normalizeUpscale(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === '2k' || normalized === '4k' ? normalized : '';
+}
+
 function normalizeSize(value) {
   return String(value || '1024x1024').trim() || '1024x1024';
 }
@@ -213,6 +221,172 @@ function getItemFlags(item) {
   };
 }
 
+function getItemTimestamp(item) {
+  const candidates = [item?.updatedAt, item?.finishedAt, item?.createdAt];
+  for (const value of candidates) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return 0;
+}
+
+function compareImageGenerationHistoryItems(left, right) {
+  const timeDiff = getItemTimestamp(right) - getItemTimestamp(left);
+  if (timeDiff !== 0) {
+    return timeDiff;
+  }
+
+  const rightPending = getItemFlags(right).pending ? 1 : 0;
+  const leftPending = getItemFlags(left).pending ? 1 : 0;
+  if (rightPending !== leftPending) {
+    return rightPending - leftPending;
+  }
+
+  const rightImage = right?.kind === 'image' ? 1 : 0;
+  const leftImage = left?.kind === 'image' ? 1 : 0;
+  if (rightImage !== leftImage) {
+    return rightImage - leftImage;
+  }
+
+  return String(right?.id || '').localeCompare(String(left?.id || ''));
+}
+
+function getHistoryGroupId(item) {
+  return String(item?.taskId || item?.id || '').trim();
+}
+
+function formatHistoryTimestamp(value) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) {
+    return '';
+  }
+
+  return new Date(timestamp).toLocaleString(undefined, {
+    hour12: false,
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function formatHistoryPayload(payload) {
+  if (payload === null || typeof payload === 'undefined') {
+    return '';
+  }
+
+  if (typeof payload === 'string') {
+    return payload;
+  }
+
+  try {
+    return JSON.stringify(payload, null, 2);
+  } catch {
+    return String(payload);
+  }
+}
+
+function hasTaskDebugDetails(taskItem) {
+  if (!taskItem) {
+    return false;
+  }
+
+  return Boolean(
+    String(taskItem.taskId || '').trim()
+    || String(taskItem.error || '').trim()
+    || (Array.isArray(taskItem.pollEvents) && taskItem.pollEvents.length > 0)
+    || taskItem.successPayload !== null
+    || taskItem.failurePayload !== null
+  );
+}
+
+function buildImageGenerationHistoryGroups(items = []) {
+  const groups = new Map();
+
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    const id = getHistoryGroupId(item);
+    if (!id) {
+      return;
+    }
+
+    const prompt = String(item?.prompt || '').trim();
+    const createdAt = Number(item?.createdAt);
+    const timestamp = getItemTimestamp(item);
+    const existing = groups.get(id) || {
+      id,
+      items: [],
+      prompt: '',
+      latestAt: 0,
+      createdAt: Number.POSITIVE_INFINITY
+    };
+
+    existing.items.push(item);
+    existing.latestAt = Math.max(existing.latestAt, timestamp);
+    if (Number.isFinite(createdAt) && createdAt > 0) {
+      existing.createdAt = Math.min(existing.createdAt, createdAt);
+    }
+    if (!existing.prompt && prompt) {
+      existing.prompt = prompt;
+    }
+
+    groups.set(id, existing);
+  });
+
+  return Array.from(groups.values())
+    .map((group) => {
+      const sortedItems = [...group.items].sort(compareImageGenerationHistoryItems);
+      const imageItems = sortedItems.filter((item) => item?.kind === 'image');
+      const taskItem = sortedItems.find((item) => item?.kind === 'task') || null;
+      const primaryItem = imageItems[0] || taskItem || sortedItems[0] || null;
+      const taskFlags = taskItem ? getItemFlags(taskItem) : { failed: false, pending: false };
+      let status = 'success';
+      if (taskFlags.pending) {
+        status = 'pending';
+      } else if (taskFlags.failed && imageItems.length === 0) {
+        status = 'failed';
+      }
+
+      return {
+        id: group.id,
+        createdAt: Number.isFinite(group.createdAt) ? group.createdAt : group.latestAt,
+        imageCount: imageItems.length,
+        imageItems,
+        items: sortedItems,
+        latestAt: group.latestAt,
+        model: String(primaryItem?.model || '').trim(),
+        prompt: group.prompt,
+        referenceImageCount: Number.isFinite(Number.parseInt(primaryItem?.referenceImageCount, 10))
+          ? Number.parseInt(primaryItem.referenceImageCount, 10)
+          : 0,
+        requestedCount: Number.isFinite(Number.parseInt(primaryItem?.n, 10))
+          ? Number.parseInt(primaryItem.n, 10)
+          : 0,
+        size: String(primaryItem?.size || '').trim(),
+        status,
+        taskItem,
+        title: String(
+          group.prompt
+          || primaryItem?.name
+          || primaryItem?.normalizedPath
+          || primaryItem?.path
+          || ''
+        ).trim(),
+        upscale: String(primaryItem?.upscale || '').trim()
+      };
+    })
+    .sort((left, right) => {
+      const timeDiff = right.latestAt - left.latestAt;
+      if (timeDiff !== 0) {
+        return timeDiff;
+      }
+
+      return String(right.id).localeCompare(String(left.id));
+    });
+}
+
 function getDefaultLayout(slot) {
   const columns = 3;
   const columnWidth = 340;
@@ -220,7 +394,8 @@ function getDefaultLayout(slot) {
   return {
     slot,
     x: (slot % columns) * columnWidth,
-    y: imageGenerationResultStartY + Math.floor(slot / columns) * rowHeight
+    y: imageGenerationResultStartY + Math.floor(slot / columns) * rowHeight,
+    manual: false
   };
 }
 
@@ -269,6 +444,7 @@ function ImageGenerationResultCard({
   const metaItems = [
     item.model,
     ratioLabel ? t('imageGenerationAspectSummary', { ratio: ratioLabel }) : '',
+    item.upscale ? t('imageGenerationUpscaleSummary', { value: String(item.upscale).toUpperCase() }) : '',
     item.referenceImageCount ? t('imageGenerationReferenceSummary', { count: item.referenceImageCount }) : '',
     item.kind === 'task' && item.n ? t('imageGenerationRequestedCount', { count: item.n }) : ''
   ].filter(Boolean);
@@ -639,6 +815,248 @@ function ImageGenerationReferencePanel({
   );
 }
 
+function getHistoryGroupStatusLabel(group, t) {
+  if (group?.status === 'pending') {
+    return t('imageGenerationTaskPending');
+  }
+  if (group?.status === 'failed') {
+    return t('imageGenerationTaskFailedTitle');
+  }
+
+  return t('imageGenerationHistoryImageCount', { count: group?.imageCount || 0 });
+}
+
+function ImageGenerationHistorySection({
+  collapsedGroups,
+  groups,
+  onCopyReference,
+  onOpenFile,
+  onToggleGroup,
+  onUseAsReference,
+  t
+}) {
+  if (groups.length === 0) {
+    return (
+      <div className="image-generation-history">
+        <div className="image-generation-controls-header">
+          <div className="image-generation-controls-title">
+            <Images className="h-4 w-4 text-primary" />
+            <span>{t('imageGenerationHistoryTitle')}</span>
+          </div>
+        </div>
+        <div className="image-generation-history-empty">{t('imageGenerationHistoryEmpty')}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="image-generation-history">
+      <div className="image-generation-controls-header">
+        <div className="image-generation-controls-title">
+          <Images className="h-4 w-4 text-primary" />
+          <span>{t('imageGenerationHistoryTitle')}</span>
+        </div>
+        <div className="image-generation-summary">
+          {t('imageGenerationHistoryTaskCount', { count: groups.length })}
+        </div>
+      </div>
+      <div className="image-generation-history-list">
+        {groups.map((group, index) => {
+          const collapsed = Boolean(collapsedGroups[group.id]);
+          const taskItem = group.taskItem;
+          const showTaskDetails = hasTaskDebugDetails(taskItem);
+          const pollEvents = Array.isArray(taskItem?.pollEvents) ? taskItem.pollEvents : [];
+          const successPayloadText = formatHistoryPayload(taskItem?.successPayload);
+          const failurePayloadText = formatHistoryPayload(taskItem?.failurePayload);
+          const metaItems = [
+            group.model,
+            group.size,
+            group.upscale ? t('imageGenerationUpscaleSummary', { value: String(group.upscale).toUpperCase() }) : '',
+            group.referenceImageCount ? t('imageGenerationReferenceSummary', { count: group.referenceImageCount }) : '',
+            group.imageCount > 0
+              ? t('imageGenerationHistoryImageCount', { count: group.imageCount })
+              : (group.requestedCount ? t('imageGenerationRequestedCount', { count: group.requestedCount }) : '')
+          ].filter(Boolean);
+
+          return (
+            <section
+              key={group.id}
+              className={cn(
+                'image-generation-history-group',
+                group.status === 'pending' && 'is-pending',
+                group.status === 'failed' && 'is-failed'
+              )}
+            >
+              <button
+                type="button"
+                className="image-generation-history-toggle"
+                title={group.title || t('imageGenerationHistoryUntitled')}
+                onClick={() => onToggleGroup?.(group.id)}
+              >
+                <span className="image-generation-history-chevron" aria-hidden="true">
+                  {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                </span>
+                <div className="image-generation-history-copy">
+                  <div className="image-generation-history-headline">
+                    <span className="image-generation-history-prompt">
+                      {group.title || t('imageGenerationHistoryUntitled')}
+                    </span>
+                    {index === 0 ? (
+                      <span className="image-generation-history-badge">{t('imageGenerationHistoryLatest')}</span>
+                    ) : null}
+                  </div>
+                  <div className="image-generation-history-subline">
+                    <span>{formatHistoryTimestamp(group.latestAt)}</span>
+                    <span className={cn('image-generation-history-status', `is-${group.status}`)}>
+                      {getHistoryGroupStatusLabel(group, t)}
+                    </span>
+                  </div>
+                  {metaItems.length > 0 && (
+                    <div className="image-generation-history-meta">
+                      {metaItems.map((meta) => (
+                        <span key={meta}>{meta}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </button>
+
+              {!collapsed && (
+                <div className="image-generation-history-body">
+                  {group.prompt && (
+                    <div className="image-generation-history-prompt-detail">{group.prompt}</div>
+                  )}
+                  {showTaskDetails && (
+                    <div className="image-generation-history-task">
+                      {group.status === 'pending' ? (
+                        <RefreshCw className="h-4 w-4 text-primary animate-spin" />
+                      ) : group.status === 'failed' ? (
+                        <X className="h-4 w-4 text-destructive" />
+                      ) : (
+                        <Images className="h-4 w-4 text-primary" />
+                      )}
+                      <div className="min-w-0">
+                        <div className="image-generation-history-task-title">
+                          {getHistoryGroupStatusLabel(group, t)}
+                        </div>
+                        {taskItem?.taskId && (
+                          <div className="image-generation-history-task-meta">
+                            <span>{t('imageGenerationTaskIdLabel')}</span>
+                            <code>{taskItem.taskId}</code>
+                          </div>
+                        )}
+                        {taskItem?.error && (
+                          <div className="image-generation-history-task-error">
+                            <span>{t('imageGenerationFailureReason')}</span>
+                            <span>{taskItem.error}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {pollEvents.length > 0 && (
+                    <div className="image-generation-history-debug-block">
+                      <div className="image-generation-history-debug-title">
+                        {t('imageGenerationPollHistory')}
+                      </div>
+                      <div className="image-generation-history-poll-list">
+                        {pollEvents.map((event) => (
+                          <div
+                            key={`${group.id}-poll-${event.index}-${event.receivedAt}`}
+                            className="image-generation-history-poll-item"
+                          >
+                            <div className="image-generation-history-poll-head">
+                              <span>{t('imageGenerationPollResult', { index: event.index })}</span>
+                              <span>{formatHistoryTimestamp(event.receivedAt)}</span>
+                              <span className="image-generation-history-poll-status">
+                                {String(event.status || '').trim() || 'running'}
+                              </span>
+                            </div>
+                            <pre className="image-generation-history-payload">
+                              {formatHistoryPayload(event.payload) || t('imageGenerationNoPayload')}
+                            </pre>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {failurePayloadText && (
+                    <div className="image-generation-history-debug-block">
+                      <div className="image-generation-history-debug-title">
+                        {t('imageGenerationFailurePayload')}
+                      </div>
+                      <pre className="image-generation-history-payload">{failurePayloadText}</pre>
+                    </div>
+                  )}
+                  {successPayloadText && (
+                    <div className="image-generation-history-debug-block">
+                      <div className="image-generation-history-debug-title">
+                        {t('imageGenerationSuccessPayload')}
+                      </div>
+                      <pre className="image-generation-history-payload">{successPayloadText}</pre>
+                    </div>
+                  )}
+                  {group.imageItems.length > 0 && (
+                    <div className="image-generation-history-images">
+                      {group.imageItems.map((item) => (
+                        <div key={item.id} className="image-generation-history-image">
+                          <div className="image-generation-history-thumb">
+                            {item.url ? (
+                              <img alt="" draggable="false" src={item.url} />
+                            ) : (
+                              <Images className="h-4 w-4" />
+                            )}
+                          </div>
+                          <div className="image-generation-history-image-copy">
+                            <span>{item.name || t('imageGenerationResult')}</span>
+                            <span>{item.normalizedPath || item.path}</span>
+                          </div>
+                          <div className="image-generation-history-actions">
+                            <ImageGenerationIconButton
+                              type="button"
+                              label={t('imageGenerationUseAsReference')}
+                              variant="ghost"
+                              className="h-7 w-7"
+                              disabled={!item.path}
+                              onClick={() => onUseAsReference?.(item)}
+                            >
+                              <ImagePlus className="h-3.5 w-3.5" />
+                            </ImageGenerationIconButton>
+                            <ImageGenerationIconButton
+                              type="button"
+                              label={t('imageGenerationCopyReference')}
+                              variant="ghost"
+                              className="h-7 w-7"
+                              disabled={!item.normalizedPath}
+                              onClick={() => onCopyReference?.(item)}
+                            >
+                              <Copy className="h-3.5 w-3.5" />
+                            </ImageGenerationIconButton>
+                            <ImageGenerationIconButton
+                              type="button"
+                              label={t('imageGenerationOpenFile')}
+                              variant="ghost"
+                              className="h-7 w-7"
+                              disabled={!item.path}
+                              onClick={() => onOpenFile?.(item)}
+                            >
+                              <ExternalLink className="h-3.5 w-3.5" />
+                            </ImageGenerationIconButton>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function ImageGenerationCanvasPage({
   config,
   configLoading,
@@ -665,18 +1083,31 @@ export function ImageGenerationCanvasPage({
   const [model, setModel] = useState('gpt-image-2');
   const [size, setSize] = useState('1024x1024');
   const [count, setCount] = useState(1);
+  const [upscale, setUpscale] = useState('');
+  const [collapsedHistoryGroups, setCollapsedHistoryGroups] = useState({});
+  const latestHistoryGroupIdRef = useRef('');
 
-  const visibleResults = Array.isArray(results) ? results : [];
+  const visibleResults = useMemo(() => (
+    [...(Array.isArray(results) ? results : [])].sort(compareImageGenerationHistoryItems)
+  ), [results]);
+  const historyGroups = useMemo(() => buildImageGenerationHistoryGroups(visibleResults), [visibleResults]);
+  const canvasResults = useMemo(() => (
+    visibleResults.filter((item) => item?.kind !== 'task' || getItemFlags(item).pending || getItemFlags(item).failed)
+  ), [visibleResults]);
+  const generatedImageCount = useMemo(() => (
+    visibleResults.filter((item) => item?.kind === 'image').length
+  ), [visibleResults]);
   const trimmedPrompt = String(prompt || '').trim();
   const normalizedModel = String(model || '').trim() || 'gpt-image-2';
   const normalizedSize = normalizeSize(size);
   const normalizedCount = normalizeCount(count);
+  const normalizedUpscale = normalizeUpscale(upscale);
   const currentZoomPercent = Math.round(view.scale * 100);
   const activeAspect = getAspectOption(normalizedSize);
   const activeAspectLabel = activeAspect
     ? (activeAspect.labelKey ? t(activeAspect.labelKey) : activeAspect.label)
     : getReducedRatioLabel(normalizedSize);
-  const hasPendingResults = visibleResults.some((item) => getItemFlags(item).pending);
+  const hasPendingResults = canvasResults.some((item) => getItemFlags(item).pending);
   const referenceImagePaths = referenceImages
     .map((image) => image.path || image.normalizedPath)
     .filter(Boolean);
@@ -690,38 +1121,70 @@ export function ImageGenerationCanvasPage({
     setModel(String(config?.model || 'gpt-image-2').trim() || 'gpt-image-2');
     setSize(normalizeSize(config?.size));
     setCount(normalizeCount(config?.n));
-  }, [config?.model, config?.n, config?.size]);
+    setUpscale(normalizeUpscale(config?.upscale));
+  }, [config?.model, config?.n, config?.size, config?.upscale]);
 
   useEffect(() => {
     setItemLayout((current) => {
-      const activeIds = new Set(visibleResults.map((item) => item.id));
       const next = {};
-      let changed = Object.keys(current).some((id) => !activeIds.has(id));
-      let maxSlot = -1;
+      let changed = false;
+      let autoSlot = 0;
 
-      for (const item of visibleResults) {
-        const existing = current[item.id];
-        if (existing) {
-          const slot = Number.isFinite(existing.slot) ? existing.slot : maxSlot + 1;
-          maxSlot = Math.max(maxSlot, slot);
-          next[item.id] = { ...existing, slot };
-        }
+      if (Object.keys(current).some((id) => !canvasResults.some((item) => item.id === id))) {
+        changed = true;
       }
 
-      for (const item of visibleResults) {
-        if (next[item.id]) {
+      for (const item of canvasResults) {
+        const existing = current[item.id];
+        if (existing?.manual) {
+          next[item.id] = existing;
           continue;
         }
 
-        const slot = maxSlot + 1;
-        maxSlot = slot;
-        next[item.id] = getDefaultLayout(slot);
-        changed = true;
+        const layout = getDefaultLayout(autoSlot);
+        autoSlot += 1;
+        next[item.id] = layout;
+        if (
+          !existing ||
+          existing.manual ||
+          existing.slot !== layout.slot ||
+          existing.x !== layout.x ||
+          existing.y !== layout.y
+        ) {
+          changed = true;
+        }
       }
 
       return changed ? next : current;
     });
-  }, [visibleResults]);
+  }, [canvasResults]);
+
+  useEffect(() => {
+    const latestGroupId = historyGroups[0]?.id || '';
+    setCollapsedHistoryGroups((current) => {
+      if (historyGroups.length === 0) {
+        return Object.keys(current).length > 0 ? {} : current;
+      }
+
+      const latestChanged = latestGroupId !== latestHistoryGroupIdRef.current;
+      const next = {};
+      let changed = latestChanged || Object.keys(current).some((id) => !historyGroups.some((group) => group.id === id));
+
+      historyGroups.forEach((group, index) => {
+        const fallbackCollapsed = index > 0;
+        const collapsed = latestChanged
+          ? fallbackCollapsed
+          : (typeof current[group.id] === 'boolean' ? current[group.id] : fallbackCollapsed);
+        next[group.id] = collapsed;
+        if (current[group.id] !== collapsed) {
+          changed = true;
+        }
+      });
+
+      return changed ? next : current;
+    });
+    latestHistoryGroupIdRef.current = latestGroupId;
+  }, [historyGroups]);
 
   const getViewportRect = useCallback(() => {
     return viewportRef.current?.getBoundingClientRect() || {
@@ -816,6 +1279,7 @@ export function ImageGenerationCanvasPage({
         ...current,
         [id]: {
           ...existing,
+          manual: true,
           x: Number.isFinite(patch?.x) ? patch.x : existing.x,
           y: Number.isFinite(patch?.y) ? patch.y : existing.y
         }
@@ -835,15 +1299,15 @@ export function ImageGenerationCanvasPage({
 
   const resetLayout = useCallback(() => {
     setToolLayout(getDefaultToolPanelLayout());
-    setItemLayout((current) => {
+    setItemLayout(() => {
       const next = {};
-      visibleResults.forEach((item, index) => {
+      canvasResults.forEach((item, index) => {
         next[item.id] = getDefaultLayout(index);
       });
       return next;
     });
     setView(createDefaultImageCanvasView());
-  }, [visibleResults]);
+  }, [canvasResults]);
 
   const appendReferenceImages = useCallback((items) => {
     const normalizedItems = (Array.isArray(items) ? items : [])
@@ -901,6 +1365,13 @@ export function ImageGenerationCanvasPage({
     appendReferenceImages([item]);
   }, [appendReferenceImages]);
 
+  const toggleHistoryGroup = useCallback((id) => {
+    setCollapsedHistoryGroups((current) => ({
+      ...current,
+      [id]: !current[id]
+    }));
+  }, []);
+
   const handleControlsPaste = useCallback((event) => {
     if (generating) {
       return;
@@ -927,6 +1398,7 @@ export function ImageGenerationCanvasPage({
       model: normalizedModel,
       n: normalizedCount,
       size: normalizedSize,
+      upscale: normalizedUpscale,
       referenceImageUrls: referenceImagePaths
     });
   };
@@ -985,7 +1457,7 @@ export function ImageGenerationCanvasPage({
             <div className="image-generation-summary">
               {configLoading
                 ? t('imageGenerationConfigLoading')
-                : t('imageGenerationCount', { count: visibleResults.length })}
+                : t('imageGenerationCount', { count: generatedImageCount })}
             </div>
           </div>
 
@@ -1103,6 +1575,25 @@ export function ImageGenerationCanvasPage({
             </div>
           </div>
 
+          <div className="image-generation-field">
+            <Label className="text-xs font-medium text-muted-foreground">
+              {t('imageGenerationUpscale')}
+            </Label>
+            <div className="image-generation-button-grid is-counts">
+              {upscaleOptions.map((option) => (
+                <Button
+                  key={option || 'default'}
+                  type="button"
+                  size="sm"
+                  variant={normalizedUpscale === option ? 'primary' : 'outline'}
+                  onClick={() => setUpscale(option)}
+                >
+                  {option ? option.toUpperCase() : t('imageGenerationUpscaleDefault')}
+                </Button>
+              ))}
+            </div>
+          </div>
+
           <div className="image-generation-form-actions">
             <Button
               type="submit"
@@ -1128,6 +1619,16 @@ export function ImageGenerationCanvasPage({
               {t('imageGenerationClear')}
             </Button>
           </div>
+
+          <ImageGenerationHistorySection
+            collapsedGroups={collapsedHistoryGroups}
+            groups={historyGroups}
+            onCopyReference={onCopyReference}
+            onOpenFile={onOpenFile}
+            onToggleGroup={toggleHistoryGroup}
+            onUseAsReference={useImageAsReference}
+            t={t}
+          />
         </form>
 
         <div className="image-generation-canvas-toolbar">
@@ -1148,7 +1649,7 @@ export function ImageGenerationCanvasPage({
             onMove={moveToolPanel}
             t={t}
           />
-          {visibleResults.map((item) => (
+          {canvasResults.map((item) => (
             <ImageGenerationResultCard
               key={item.id}
               item={item}
