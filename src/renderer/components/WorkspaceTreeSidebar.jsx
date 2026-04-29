@@ -56,9 +56,11 @@ function getWorkspaceTreeNodeLabel(node, t) {
 function WorkspaceTreeNode({
   depth = 0,
   expandedIds,
+  loadingIds,
   node,
   normalizeInsertPath,
   onInsert,
+  onLoadChildren,
   onSelect,
   onToggle,
   selectedNodeId,
@@ -67,7 +69,9 @@ function WorkspaceTreeNode({
   const children = Array.isArray(node?.children) ? node.children : [];
   const directory = node?.type === 'directory';
   const notice = node?.type === 'omitted' || node?.type === 'depth-limit' || node?.type === 'unreadable';
-  const canExpand = directory && children.length > 0;
+  const canLoadChildren = directory && !node?.ignored && !node?.link && node?.childrenLoaded === false;
+  const loading = Boolean(node?.id && loadingIds?.has(node.id));
+  const canExpand = directory && !node?.ignored && !node?.link && (children.length > 0 || canLoadChildren || loading);
   const expanded = canExpand && expandedIds.has(node.id);
   const label = getWorkspaceTreeNodeLabel(node, t);
   const insertPath = getWorkspaceTreeInsertPath(node, normalizeInsertPath);
@@ -87,7 +91,9 @@ function WorkspaceTreeNode({
   const rowChildren = (
     <>
       <span className="workspace-tree-expander" aria-hidden="true">
-        {canExpand ? (
+        {loading ? (
+          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+        ) : canExpand ? (
           expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />
         ) : null}
       </span>
@@ -100,7 +106,7 @@ function WorkspaceTreeNode({
   const interactive = canExpand || selectable;
   const handleClick = () => {
     if (canExpand) {
-      onToggle(node.id);
+      onToggle(node);
       return;
     }
 
@@ -146,9 +152,11 @@ function WorkspaceTreeNode({
               key={child.id || `${node.id}:${child.name}`}
               depth={depth + 1}
               expandedIds={expandedIds}
+              loadingIds={loadingIds}
               node={child}
               normalizeInsertPath={normalizeInsertPath}
               onInsert={onInsert}
+              onLoadChildren={onLoadChildren}
               onSelect={onSelect}
               onToggle={onToggle}
               selectedNodeId={selectedNodeId}
@@ -161,24 +169,67 @@ function WorkspaceTreeNode({
   );
 }
 
-function WorkspaceTreeView({ normalizeInsertPath, onInsert, onSelect, root, selectedNodeId, t }) {
+function WorkspaceTreeView({ normalizeInsertPath, onInsert, onLoadChildren, onSelect, root, selectedNodeId, t }) {
   const [expandedIds, setExpandedIds] = useState(() => new Set());
+  const [loadingIds, setLoadingIds] = useState(() => new Set());
 
   useEffect(() => {
     setExpandedIds(root?.id ? new Set([root.id]) : new Set());
+    setLoadingIds(new Set());
   }, [root?.id]);
 
-  const toggleNode = useCallback((nodeId) => {
+  const toggleNode = useCallback((node) => {
+    const nodeId = node?.id;
+    if (!nodeId) {
+      return;
+    }
+
+    if (expandedIds.has(nodeId)) {
+      setExpandedIds((current) => {
+        const next = new Set(current);
+        next.delete(nodeId);
+        return next;
+      });
+      return;
+    }
+
     setExpandedIds((current) => {
       const next = new Set(current);
-      if (next.has(nodeId)) {
-        next.delete(nodeId);
-      } else {
-        next.add(nodeId);
-      }
+      next.add(nodeId);
       return next;
     });
-  }, []);
+
+    const shouldLoad = node?.childrenLoaded === false && !node?.ignored && !node?.link && Boolean(onLoadChildren);
+    if (!shouldLoad) {
+      return;
+    }
+
+    if (loadingIds.has(nodeId)) {
+      return;
+    }
+
+    setLoadingIds((current) => {
+      const next = new Set(current);
+      next.add(nodeId);
+      return next;
+    });
+
+    Promise.resolve(onLoadChildren(node))
+      .catch(() => {
+        setExpandedIds((current) => {
+          const next = new Set(current);
+          next.delete(nodeId);
+          return next;
+        });
+      })
+      .finally(() => {
+        setLoadingIds((current) => {
+          const next = new Set(current);
+          next.delete(nodeId);
+          return next;
+        });
+      });
+  }, [expandedIds, loadingIds, onLoadChildren]);
 
   if (!root) {
     return null;
@@ -188,9 +239,11 @@ function WorkspaceTreeView({ normalizeInsertPath, onInsert, onSelect, root, sele
     <ul className="workspace-tree-list" role="tree">
       <WorkspaceTreeNode
         expandedIds={expandedIds}
+        loadingIds={loadingIds}
         node={root}
         normalizeInsertPath={normalizeInsertPath}
         onInsert={onInsert}
+        onLoadChildren={onLoadChildren}
         onSelect={onSelect}
         onToggle={toggleNode}
         selectedNodeId={selectedNodeId}
@@ -200,7 +253,7 @@ function WorkspaceTreeView({ normalizeInsertPath, onInsert, onSelect, root, sele
   );
 }
 
-function WorkspaceTreeContent({ normalizeInsertPath, onInsert, onSelect, selectedNodeId, state, t }) {
+function WorkspaceTreeContent({ normalizeInsertPath, onInsert, onLoadChildren, onSelect, selectedNodeId, state, t }) {
   const snapshot = state.snapshot;
   const root = snapshot?.root || null;
 
@@ -233,6 +286,7 @@ function WorkspaceTreeContent({ normalizeInsertPath, onInsert, onSelect, selecte
     <WorkspaceTreeView
       normalizeInsertPath={normalizeInsertPath}
       onInsert={onInsert}
+      onLoadChildren={onLoadChildren}
       onSelect={onSelect}
       root={root}
       selectedNodeId={selectedNodeId}
@@ -249,6 +303,7 @@ export function WorkspaceTreeSidebar({
   onCopy,
   onInsertNode,
   onInsertSelected,
+  onLoadNodeChildren,
   onOpen,
   onRefresh,
   onSelectNode,
@@ -344,6 +399,7 @@ export function WorkspaceTreeSidebar({
             <WorkspaceTreeContent
               normalizeInsertPath={normalizeInsertPath}
               onInsert={canInsertToComposer ? onInsertNode : undefined}
+              onLoadChildren={onLoadNodeChildren}
               onSelect={onSelectNode}
               selectedNodeId={selectedNodeId}
               state={state}

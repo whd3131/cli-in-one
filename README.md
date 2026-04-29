@@ -45,6 +45,7 @@ If you run several terminal-based tools at once (especially [OpenAI Codex CLI](h
 - Compare outputs side by side while debugging, reviewing, or generating code.
 - Keep plain CMD or shell windows next to Codex sessions for build, git, and one-off commands.
 - Save reusable Agents with persistent instructions, avatars, and a default CLI, then assign tasks to them from the app.
+- Delegate work from one live session to another with the built-in `cli-in-one dispatch` bridge command.
 - Organize project-specific canvases so each local repo has its own workspace.
 - Edit `~/.codex/auth.json` and `~/.codex/config.toml` without leaving the app.
 - Export transcripts when you want a saved text record of a session.
@@ -55,6 +56,7 @@ If you run several terminal-based tools at once (especially [OpenAI Codex CLI](h
 - Human-only annotation frames that you can draw, rename, move, and resize directly on the canvas.
 - Project-aware session launcher. `New session` opens a chooser for Codex, Copilot, Droid, Claude Code, Cursor, or CMD, then starts in the selected project or directory.
 - Saved Agents with reusable instructions, per-agent CLI selection, avatar uploads, and one-click task assignment into a new CLI session.
+- Agent-to-agent dispatch from inside any terminal: run `cli-in-one sessions` to list targets, then `cli-in-one dispatch --target <id-or-title> --message "..."` to send a task to a chosen live session.
 - Sidebar project management with pinning and drag reordering.
 - Plain local shell sessions for ad-hoc work.
 - Local CMD startup command presets for commands such as `pnpm dev:console`.
@@ -104,10 +106,10 @@ npm run dev:renderer
 2. Pin or drag-reorder projects in the sidebar so the repos you use most stay at the top.
 3. Click `New session` and choose Codex, Copilot, Droid, Claude Code, Cursor, or CMD, then pick the current directory or a saved project.
 4. Open `Agents` to create a saved Agent, write its instructions, choose its default CLI, optionally upload an avatar, then enter a task and assign it. CLI in One creates the selected CLI session and sends the Agent instructions plus the task automatically.
-5. Click `New CMD` when you want a normal shell immediately, without the session picker.
-6. Arrange the workspace by dragging panel headers to move terminals, dragging the lower-right corner to resize, using the mouse wheel to pan, using `Ctrl + mouse wheel` to zoom, and clicking `Arrange` to place visible sessions into a grid.
-7. Click `Frame`, then drag on empty canvas space to create a workflow note that labels a cluster of terminals or explains what a command group is doing.
-8. Use `Quick Send` for short prompts, saved prompt snippets, or image references, and collapse it when you want more canvas space.
+5. Arrange the workspace by dragging panel headers to move terminals, dragging the lower-right corner to resize, using the mouse wheel to pan, using `Ctrl + mouse wheel` to zoom, and clicking `Arrange` to place visible sessions into a grid.
+6. Click `Frame`, then drag on empty canvas space to create a workflow note that labels a cluster of terminals or explains what a command group is doing.
+7. Use `Quick Send` for short prompts, saved prompt snippets, or image references, and collapse it when you want more canvas space.
+8. From a live session, run `cli-in-one sessions`, then delegate to another session with `cli-in-one dispatch --target <id-or-title> --message "run this task"`.
 9. Open `Settings` to switch language and theme, manage Codex quick presets, and edit `~/.codex/auth.json`, `~/.codex/config.toml`, or `~/.claude/settings.json`.
 10. Use the session actions to restart, close, minimize, or export a transcript.
 
@@ -118,6 +120,7 @@ npm run dev:renderer
 - Saved Agents, including names, instructions, default CLI choices, and avatar references, are stored locally in Electron browser storage.
 - Uploaded Agent avatars are copied into `.cli-in-one/agent-avatars` next to the app. In development that is under the repository directory; in packaged builds it is next to the app executable.
 - Quick Send image assets are saved into `.files` next to the app.
+- The local agent bridge writes helper scripts and transient request files under `.cli-in-one/bin` and `.cli-in-one/agent-bridge`.
 - Commands you launch inside the terminal are still your own local CLI processes. Whether Codex, Claude Code, Cursor, git, or any other command connects to a network depends on that tool itself.
 - Workspace state is persisted in local browser storage inside the Electron app.
 - Terminal output stays in memory until you export it.
@@ -178,6 +181,7 @@ CLI in One 是一个本地 Electron 桌面应用，面向习惯在终端里使�
 - 在调试、审查、生成代码时并排比较不同会话输出。
 - 在 Codex 会话旁边保留普通 CMD 或 shell 窗口，执行构建、Git 和临时命令。
 - 保存可复用的 Agents，为每个 Agent 固定 instructions、头像和默认 CLI，再直接分配任务。
+- 可在一个会话里通过内置 `cli-in-one dispatch` 桥接命令，把任务分配给另一个在线会话。
 - 按项目维护独立画布，让每个本地项目都有自己的工作区布局。
 - 不离开应用，直接编辑 `~/.codex/auth.json` 和 `~/.codex/config.toml`。
 - 在需要落盘保存时，导出终端会话文本记录。
@@ -188,6 +192,7 @@ CLI in One 是一个本地 Electron 桌面应用，面向习惯在终端里使�
 - 支持只给人看的说明框，可直接在画布上拖出来，再修改标题、移动和缩放。
 - 面向项目的会话启动器。点击 `新增会话` 后可选择 Codex、Copilot、Droid、Claude Code、Cursor 或 CMD，再选择项目或目录启动。
 - 支持保存 Agents：可为 Agent 编写长期 instructions、选择默认 CLI、上传头像，并一键把任务分配到新启动的 CLI 会话。
+- 支持 Agent 间调用：任意终端里运行 `cli-in-one sessions` 查看目标，再用 `cli-in-one dispatch --target <id-or-title> --message "..."` 把任务发给指定在线会话。
 - 侧边栏项目支持置顶和拖拽排序。
 - 普通本地 shell 会话，适合临时命令或辅助操作。
 - 本地 CMD 启动命令预置，适合 `pnpm dev:console` 这类常用命令。
@@ -237,10 +242,10 @@ npm run dev:renderer
 2. 常用项目可以在侧边栏置顶，也可以通过拖拽调整顺序。
 3. 点击 `新增会话` 后选择 Codex、Copilot、Droid、Claude Code、Cursor 或 CMD，再选择当前目录或已保存项目。
 4. 打开 `Agents` 新增一个 Agent，填写长期 instructions，选择默认 CLI，也可以上传头像；输入本次任务后点击分配，CLI in One 会自动新建对应 CLI 会话，并把 Agent instructions 和任务一起发送进去。
-5. 点击 `新增 CMD` 可以直接新建普通 shell，而不经过会话选择器。
-6. 在画布上整理终端。拖动面板标题栏可移动终端，拖动右下角可调整大小，鼠标滚轮可平移，`Ctrl + 鼠标滚轮` 可缩放，点击 `整理` 可将当前可见终端自动排成网格。
-7. 点击 `说明框` 后，可在空白画布上拖出一个流程说明框，用来标注一组终端或命令的用途。
-8. 使用 `快捷发送` 给当前会话发短消息、常用 prompt 或图片引用，不需要时可以先收起，留更多画布空间。
+5. 在画布上整理终端。拖动面板标题栏可移动终端，拖动右下角可调整大小，鼠标滚轮可平移，`Ctrl + 鼠标滚轮` 可缩放，点击 `整理` 可将当前可见终端自动排成网格。
+6. 点击 `说明框` 后，可在空白画布上拖出一个流程说明框，用来标注一组终端或命令的用途。
+7. 使用 `快捷发送` 给当前会话发短消息、常用 prompt 或图片引用，不需要时可以先收起，留更多画布空间。
+8. 在某个在线会话里运行 `cli-in-one sessions`，再用 `cli-in-one dispatch --target <id-or-title> --message "执行这个任务"` 分配给另一个会话。
 9. 打开 `设置` 可切换语言和主题，管理 Codex 快捷配置，并直接编辑 `~/.codex/auth.json`、`~/.codex/config.toml` 或 `~/.claude/settings.json`。
 10. 使用会话操作按钮可重启、关闭、最小化或导出会话记录。
 
@@ -251,6 +256,7 @@ npm run dev:renderer
 - 保存的 Agents，包括名称、instructions、默认 CLI 和头像引用，会保存在 Electron 的本地浏览器存储里。
 - Agent 头像会复制到应用旁边的 `.cli-in-one/agent-avatars`。开发环境下位于仓库目录中；打包后位于应用可执行文件旁边。
 - 快捷发送里的图片资源会保存到应用旁边的 `.files`。
+- 本地 agent bridge 会在 `.cli-in-one/bin` 和 `.cli-in-one/agent-bridge` 下写入辅助脚本和临时请求文件。
 - 终端里启动的命令仍然是你自己的本地 CLI 进程。Codex、Claude Code、Cursor、git 或其他命令是否联网，取决于这些工具自身的行为和配置。
 - 工作区状态会保存在 Electron 内部的本地浏览器存储里。
 - 终端输出默认只保留在内存里，只有导出时才会写入文件。

@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Copy,
   ExternalLink,
+  Folder,
   ImagePlus,
   Images,
   Minus,
@@ -47,7 +48,11 @@ const imageGenerationToolFrames = [
 
 const imageGenerationToolPanelHeight = 260;
 const imageGenerationResultStartY = imageGenerationToolPanelHeight + 60;
+const imageGenerationArchiveFolderX = 680;
 const imageGenerationReferenceImageMaxCount = 6;
+const historyPromptTitleMaxLength = 82;
+const historyPromptPreviewMaxLength = 260;
+const historyPayloadPreviewMaxLength = 220;
 
 const failedStatuses = new Set([
   'cancelled',
@@ -163,6 +168,42 @@ function normalizeUpscale(value) {
   return normalized === '2k' || normalized === '4k' ? normalized : '';
 }
 
+function formatRequestJson(value) {
+  return JSON.stringify(value, null, 2);
+}
+
+function buildImageGenerationRequestParams() {
+  return { async: '1' };
+}
+
+function buildImageGenerationRequestBody(options = {}) {
+  const body = {
+    model: String(options.model || 'gpt-image-2').trim() || 'gpt-image-2',
+    prompt: String(options.prompt || ''),
+    n: normalizeCount(options.n),
+    size: normalizeSize(options.size)
+  };
+  const upscale = normalizeUpscale(options.upscale);
+  if (upscale) {
+    body.upscale = upscale;
+  }
+  const referenceImages = Array.isArray(options.referenceImageUrls)
+    ? options.referenceImageUrls.map((url) => String(url || '').trim()).filter(Boolean)
+    : [];
+  if (referenceImages.length > 0) {
+    body.reference_images = referenceImages;
+  }
+  return body;
+}
+
+function parseRequestJsonObject(value) {
+  const parsed = JSON.parse(String(value || '').trim() || '{}');
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('root is not an object');
+  }
+  return parsed;
+}
+
 function normalizeSize(value) {
   return String(value || '1024x1024').trim() || '1024x1024';
 }
@@ -258,6 +299,29 @@ function getHistoryGroupId(item) {
   return String(item?.taskId || item?.id || '').trim();
 }
 
+function getHistoryGroupsImageCount(groups = []) {
+  return (Array.isArray(groups) ? groups : []).reduce((total, group) => (
+    total + (Array.isArray(group?.imageItems) ? group.imageItems.length : 0)
+  ), 0);
+}
+
+function getCanvasActiveGroupIds(groups = []) {
+  const activeIds = new Set();
+  const normalizedGroups = Array.isArray(groups) ? groups : [];
+  const latestGroup = normalizedGroups[0];
+  if (latestGroup?.id) {
+    activeIds.add(latestGroup.id);
+  }
+
+  normalizedGroups.forEach((group) => {
+    if (group?.status === 'pending' && group.id) {
+      activeIds.add(group.id);
+    }
+  });
+
+  return activeIds;
+}
+
 function formatHistoryTimestamp(value) {
   const timestamp = Number(value);
   if (!Number.isFinite(timestamp) || timestamp <= 0) {
@@ -289,6 +353,35 @@ function formatHistoryPayload(payload) {
   }
 }
 
+function normalizeInlineText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || '');
+  if (!text) {
+    return '';
+  }
+
+  if (!Number.isFinite(maxLength) || maxLength < 4 || text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, maxLength - 1).trimEnd()}\u2026`;
+}
+
+function getHistoryPromptTitle(value) {
+  return truncateText(normalizeInlineText(value), historyPromptTitleMaxLength);
+}
+
+function getHistoryPromptPreview(value) {
+  return truncateText(normalizeInlineText(value), historyPromptPreviewMaxLength);
+}
+
+function getHistoryPayloadPreview(payload) {
+  return truncateText(normalizeInlineText(formatHistoryPayload(payload)), historyPayloadPreviewMaxLength);
+}
+
 function hasTaskDebugDetails(taskItem) {
   if (!taskItem) {
     return false;
@@ -300,6 +393,8 @@ function hasTaskDebugDetails(taskItem) {
     || (Array.isArray(taskItem.pollEvents) && taskItem.pollEvents.length > 0)
     || taskItem.successPayload !== null
     || taskItem.failurePayload !== null
+    || taskItem.requestParams !== null
+    || taskItem.requestBody !== null
   );
 }
 
@@ -349,6 +444,14 @@ function buildImageGenerationHistoryGroups(items = []) {
         status = 'failed';
       }
 
+      const rawTitle = String(
+        group.prompt
+        || primaryItem?.name
+        || primaryItem?.normalizedPath
+        || primaryItem?.path
+        || ''
+      ).trim();
+
       return {
         id: group.id,
         createdAt: Number.isFinite(group.createdAt) ? group.createdAt : group.latestAt,
@@ -364,16 +467,11 @@ function buildImageGenerationHistoryGroups(items = []) {
         requestedCount: Number.isFinite(Number.parseInt(primaryItem?.n, 10))
           ? Number.parseInt(primaryItem.n, 10)
           : 0,
+        rawTitle,
         size: String(primaryItem?.size || '').trim(),
         status,
         taskItem,
-        title: String(
-          group.prompt
-          || primaryItem?.name
-          || primaryItem?.normalizedPath
-          || primaryItem?.path
-          || ''
-        ).trim(),
+        title: getHistoryPromptTitle(rawTitle),
         upscale: String(primaryItem?.upscale || '').trim()
       };
     })
@@ -402,6 +500,13 @@ function getDefaultLayout(slot) {
 function getDefaultToolPanelLayout() {
   return {
     x: 0,
+    y: 0
+  };
+}
+
+function getDefaultArchiveFolderLayout() {
+  return {
+    x: imageGenerationArchiveFolderX,
     y: 0
   };
 }
@@ -560,6 +665,164 @@ function ImageGenerationResultCard({
           <ExternalLink className="h-3.5 w-3.5" />
         </ImageGenerationIconButton>
       </div>
+    </article>
+  );
+}
+
+function ImageGenerationArchiveFolder({
+  expanded,
+  groups,
+  position,
+  scale,
+  onCopyReference,
+  onMove,
+  onOpenFile,
+  onToggle,
+  onUseAsReference,
+  t
+}) {
+  const imageCount = getHistoryGroupsImageCount(groups);
+  const title = t('imageGenerationHistoryTitle');
+  const summary = t('imageGenerationHistoryImageCount', { count: imageCount });
+
+  const startDrag = (event) => {
+    if (
+      event.button !== 0 ||
+      closestElement(event.target, 'button, input, textarea, select, a')
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const start = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      x: position?.x || 0,
+      y: position?.y || 0
+    };
+
+    bindPointerSession((moveEvent) => {
+      onMove?.({
+        x: start.x + (moveEvent.clientX - start.clientX) / scale,
+        y: start.y + (moveEvent.clientY - start.clientY) / scale
+      });
+    });
+  };
+
+  if (imageCount <= 0) {
+    return null;
+  }
+
+  return (
+    <article
+      className={cn('image-generation-folder-card', expanded && 'is-open')}
+      style={{
+        '--image-generation-folder-x': `${position?.x || 0}px`,
+        '--image-generation-folder-y': `${position?.y || 0}px`
+      }}
+      title={`${title}\n${summary}`}
+    >
+      <div className="image-generation-folder-header" onPointerDown={startDrag}>
+        <div className="image-generation-folder-title">
+          <Move className="h-3.5 w-3.5" />
+          <span>{title}</span>
+        </div>
+        <ImageGenerationIconButton
+          type="button"
+          label={title}
+          variant="ghost"
+          className="h-7 w-7"
+          aria-expanded={expanded}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={onToggle}
+        >
+          {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        </ImageGenerationIconButton>
+      </div>
+
+      {!expanded ? (
+        <button
+          type="button"
+          className="image-generation-folder-compact"
+          aria-label={`${title} ${summary}`}
+          onClick={onToggle}
+        >
+          <span className="image-generation-folder-icon" aria-hidden="true">
+            <Folder className="h-10 w-10" />
+          </span>
+          <span className="image-generation-folder-copy">
+            <span>{title}</span>
+            <span>{summary}</span>
+          </span>
+        </button>
+      ) : (
+        <div className="image-generation-folder-body">
+          {groups.map((group) => (
+            <section key={group.id} className="image-generation-folder-group">
+              <div className="image-generation-folder-group-head">
+                <div className="image-generation-folder-group-title" title={group.rawTitle || group.title}>
+                  {group.title || t('imageGenerationHistoryUntitled')}
+                </div>
+                <div className="image-generation-folder-group-meta">
+                  <span>{formatHistoryTimestamp(group.latestAt)}</span>
+                  <span>{t('imageGenerationHistoryImageCount', { count: group.imageCount })}</span>
+                </div>
+              </div>
+              <div className="image-generation-folder-images">
+                {group.imageItems.map((item) => (
+                  <div key={item.id} className="image-generation-folder-image">
+                    <div className="image-generation-folder-thumb">
+                      {item.url ? (
+                        <img alt="" draggable="false" src={item.url} />
+                      ) : (
+                        <Images className="h-4 w-4" />
+                      )}
+                    </div>
+                    <div className="image-generation-folder-image-copy">
+                      <span>{item.name || t('imageGenerationResult')}</span>
+                      <span>{item.normalizedPath || item.path}</span>
+                    </div>
+                    <div className="image-generation-folder-actions">
+                      <ImageGenerationIconButton
+                        type="button"
+                        label={t('imageGenerationUseAsReference')}
+                        variant="ghost"
+                        className="h-7 w-7"
+                        disabled={!item.path}
+                        onClick={() => onUseAsReference?.(item)}
+                      >
+                        <ImagePlus className="h-3.5 w-3.5" />
+                      </ImageGenerationIconButton>
+                      <ImageGenerationIconButton
+                        type="button"
+                        label={t('imageGenerationCopyReference')}
+                        variant="ghost"
+                        className="h-7 w-7"
+                        disabled={!item.normalizedPath}
+                        onClick={() => onCopyReference?.(item)}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </ImageGenerationIconButton>
+                      <ImageGenerationIconButton
+                        type="button"
+                        label={t('imageGenerationOpenFile')}
+                        variant="ghost"
+                        className="h-7 w-7"
+                        disabled={!item.path}
+                        onClick={() => onOpenFile?.(item)}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </ImageGenerationIconButton>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
     </article>
   );
 }
@@ -866,8 +1129,13 @@ function ImageGenerationHistorySection({
           const taskItem = group.taskItem;
           const showTaskDetails = hasTaskDebugDetails(taskItem);
           const pollEvents = Array.isArray(taskItem?.pollEvents) ? taskItem.pollEvents : [];
+          const requestParamsText = formatHistoryPayload(taskItem?.requestParams);
+          const requestBodyText = formatHistoryPayload(taskItem?.requestBody);
           const successPayloadText = formatHistoryPayload(taskItem?.successPayload);
           const failurePayloadText = formatHistoryPayload(taskItem?.failurePayload);
+          const normalizedPrompt = normalizeInlineText(group.prompt);
+          const promptPreview = getHistoryPromptPreview(group.prompt);
+          const hasLongPrompt = Boolean(group.prompt) && promptPreview !== normalizedPrompt;
           const metaItems = [
             group.model,
             group.size,
@@ -890,7 +1158,7 @@ function ImageGenerationHistorySection({
               <button
                 type="button"
                 className="image-generation-history-toggle"
-                title={group.title || t('imageGenerationHistoryUntitled')}
+                title={group.rawTitle || group.title || t('imageGenerationHistoryUntitled')}
                 onClick={() => onToggleGroup?.(group.id)}
               >
                 <span className="image-generation-history-chevron" aria-hidden="true">
@@ -924,7 +1192,32 @@ function ImageGenerationHistorySection({
               {!collapsed && (
                 <div className="image-generation-history-body">
                   {group.prompt && (
-                    <div className="image-generation-history-prompt-detail">{group.prompt}</div>
+                    hasLongPrompt ? (
+                      <details className="image-generation-history-detail-block">
+                        <summary className="image-generation-history-detail-summary">
+                          <span className="image-generation-history-detail-label">
+                            {t('imageGenerationPrompt')}
+                          </span>
+                          <span
+                            className="image-generation-history-detail-preview"
+                            title={group.prompt}
+                          >
+                            {promptPreview}
+                          </span>
+                          <span className="image-generation-history-detail-action">
+                            {t('imageGenerationViewFullPrompt')}
+                          </span>
+                        </summary>
+                        <div className="image-generation-history-prompt-detail">{group.prompt}</div>
+                      </details>
+                    ) : (
+                      <div className="image-generation-history-prompt-block">
+                        <div className="image-generation-history-debug-title">
+                          {t('imageGenerationPrompt')}
+                        </div>
+                        <div className="image-generation-history-prompt-detail">{group.prompt}</div>
+                      </div>
+                    )
                   )}
                   {showTaskDetails && (
                     <div className="image-generation-history-task">
@@ -954,47 +1247,126 @@ function ImageGenerationHistorySection({
                       </div>
                     </div>
                   )}
+                  {requestParamsText && (
+                    <details className="image-generation-history-detail-block">
+                      <summary className="image-generation-history-detail-summary">
+                        <span className="image-generation-history-detail-label">
+                          {t('imageGenerationRequestParams')}
+                        </span>
+                        <span
+                          className="image-generation-history-detail-preview"
+                          title={requestParamsText}
+                        >
+                          {getHistoryPayloadPreview(taskItem?.requestParams) || t('imageGenerationNoPayload')}
+                        </span>
+                        <span className="image-generation-history-detail-action">
+                          {t('imageGenerationViewFullPayload')}
+                        </span>
+                      </summary>
+                      <pre className="image-generation-history-payload">{requestParamsText}</pre>
+                    </details>
+                  )}
+                  {requestBodyText && (
+                    <details className="image-generation-history-detail-block">
+                      <summary className="image-generation-history-detail-summary">
+                        <span className="image-generation-history-detail-label">
+                          {t('imageGenerationRequestBody')}
+                        </span>
+                        <span
+                          className="image-generation-history-detail-preview"
+                          title={requestBodyText}
+                        >
+                          {getHistoryPayloadPreview(taskItem?.requestBody) || t('imageGenerationNoPayload')}
+                        </span>
+                        <span className="image-generation-history-detail-action">
+                          {t('imageGenerationViewFullPayload')}
+                        </span>
+                      </summary>
+                      <pre className="image-generation-history-payload">{requestBodyText}</pre>
+                    </details>
+                  )}
                   {pollEvents.length > 0 && (
-                    <div className="image-generation-history-debug-block">
-                      <div className="image-generation-history-debug-title">
-                        {t('imageGenerationPollHistory')}
-                      </div>
+                    <details className="image-generation-history-detail-block">
+                      <summary className="image-generation-history-detail-summary">
+                        <span className="image-generation-history-detail-label">
+                          {t('imageGenerationPollHistory')}
+                        </span>
+                        <span className="image-generation-history-detail-preview">
+                          {t('imageGenerationPollHistoryCount', { count: pollEvents.length })}
+                        </span>
+                      </summary>
                       <div className="image-generation-history-poll-list">
-                        {pollEvents.map((event) => (
-                          <div
-                            key={`${group.id}-poll-${event.index}-${event.receivedAt}`}
-                            className="image-generation-history-poll-item"
-                          >
-                            <div className="image-generation-history-poll-head">
-                              <span>{t('imageGenerationPollResult', { index: event.index })}</span>
-                              <span>{formatHistoryTimestamp(event.receivedAt)}</span>
-                              <span className="image-generation-history-poll-status">
-                                {String(event.status || '').trim() || 'running'}
-                              </span>
+                        {pollEvents.map((event) => {
+                          const payloadText = formatHistoryPayload(event.payload) || t('imageGenerationNoPayload');
+                          const payloadPreview = getHistoryPayloadPreview(event.payload) || t('imageGenerationNoPayload');
+                          const hasLongPayload = payloadPreview !== payloadText;
+
+                          return (
+                            <div
+                              key={`${group.id}-poll-${event.index}-${event.receivedAt}`}
+                              className="image-generation-history-poll-item"
+                            >
+                              <div className="image-generation-history-poll-head">
+                                <span>{t('imageGenerationPollResult', { index: event.index })}</span>
+                                <span>{formatHistoryTimestamp(event.receivedAt)}</span>
+                                <span className="image-generation-history-poll-status">
+                                  {String(event.status || '').trim() || 'running'}
+                                </span>
+                              </div>
+                              <div className="image-generation-history-poll-preview" title={payloadText}>
+                                {payloadPreview}
+                              </div>
+                              {hasLongPayload && (
+                                <details className="image-generation-history-payload-details">
+                                  <summary className="image-generation-history-payload-summary">
+                                    {t('imageGenerationViewFullPayload')}
+                                  </summary>
+                                  <pre className="image-generation-history-payload">{payloadText}</pre>
+                                </details>
+                              )}
                             </div>
-                            <pre className="image-generation-history-payload">
-                              {formatHistoryPayload(event.payload) || t('imageGenerationNoPayload')}
-                            </pre>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
-                    </div>
+                    </details>
                   )}
                   {failurePayloadText && (
-                    <div className="image-generation-history-debug-block">
-                      <div className="image-generation-history-debug-title">
-                        {t('imageGenerationFailurePayload')}
-                      </div>
+                    <details className="image-generation-history-detail-block">
+                      <summary className="image-generation-history-detail-summary">
+                        <span className="image-generation-history-detail-label">
+                          {t('imageGenerationFailurePayload')}
+                        </span>
+                        <span
+                          className="image-generation-history-detail-preview"
+                          title={failurePayloadText}
+                        >
+                          {getHistoryPayloadPreview(taskItem?.failurePayload) || t('imageGenerationNoPayload')}
+                        </span>
+                        <span className="image-generation-history-detail-action">
+                          {t('imageGenerationViewFullPayload')}
+                        </span>
+                      </summary>
                       <pre className="image-generation-history-payload">{failurePayloadText}</pre>
-                    </div>
+                    </details>
                   )}
                   {successPayloadText && (
-                    <div className="image-generation-history-debug-block">
-                      <div className="image-generation-history-debug-title">
-                        {t('imageGenerationSuccessPayload')}
-                      </div>
+                    <details className="image-generation-history-detail-block">
+                      <summary className="image-generation-history-detail-summary">
+                        <span className="image-generation-history-detail-label">
+                          {t('imageGenerationSuccessPayload')}
+                        </span>
+                        <span
+                          className="image-generation-history-detail-preview"
+                          title={successPayloadText}
+                        >
+                          {getHistoryPayloadPreview(taskItem?.successPayload) || t('imageGenerationNoPayload')}
+                        </span>
+                        <span className="image-generation-history-detail-action">
+                          {t('imageGenerationViewFullPayload')}
+                        </span>
+                      </summary>
                       <pre className="image-generation-history-payload">{successPayloadText}</pre>
-                    </div>
+                    </details>
                   )}
                   {group.imageItems.length > 0 && (
                     <div className="image-generation-history-images">
@@ -1079,21 +1451,39 @@ export function ImageGenerationCanvasPage({
   const [panning, setPanning] = useState(false);
   const [itemLayout, setItemLayout] = useState({});
   const [toolLayout, setToolLayout] = useState(getDefaultToolPanelLayout);
+  const [archiveFolderLayout, setArchiveFolderLayout] = useState(getDefaultArchiveFolderLayout);
+  const [archiveFolderOpen, setArchiveFolderOpen] = useState(false);
   const [referenceImages, setReferenceImages] = useState([]);
   const [model, setModel] = useState('gpt-image-2');
   const [size, setSize] = useState('1024x1024');
   const [count, setCount] = useState(1);
   const [upscale, setUpscale] = useState('');
+  const [requestParamsText, setRequestParamsText] = useState(() => formatRequestJson(buildImageGenerationRequestParams()));
+  const [requestBodyText, setRequestBodyText] = useState(() => formatRequestJson(buildImageGenerationRequestBody()));
+  const [requestEditorDirty, setRequestEditorDirty] = useState(false);
+  const [requestEditorSubmitError, setRequestEditorSubmitError] = useState('');
   const [collapsedHistoryGroups, setCollapsedHistoryGroups] = useState({});
   const latestHistoryGroupIdRef = useRef('');
+  const historyGroupStatusRef = useRef({});
 
   const visibleResults = useMemo(() => (
     [...(Array.isArray(results) ? results : [])].sort(compareImageGenerationHistoryItems)
   ), [results]);
   const historyGroups = useMemo(() => buildImageGenerationHistoryGroups(visibleResults), [visibleResults]);
+  const canvasActiveGroupIds = useMemo(() => getCanvasActiveGroupIds(historyGroups), [historyGroups]);
+  const archivedHistoryGroups = useMemo(() => (
+    historyGroups.filter((group) => !canvasActiveGroupIds.has(group.id) && group.imageCount > 0)
+  ), [canvasActiveGroupIds, historyGroups]);
   const canvasResults = useMemo(() => (
-    visibleResults.filter((item) => item?.kind !== 'task' || getItemFlags(item).pending || getItemFlags(item).failed)
-  ), [visibleResults]);
+    visibleResults.filter((item) => {
+      if (!canvasActiveGroupIds.has(getHistoryGroupId(item))) {
+        return false;
+      }
+
+      const flags = getItemFlags(item);
+      return item?.kind !== 'task' || flags.pending || flags.failed;
+    })
+  ), [canvasActiveGroupIds, visibleResults]);
   const generatedImageCount = useMemo(() => (
     visibleResults.filter((item) => item?.kind === 'image').length
   ), [visibleResults]);
@@ -1111,6 +1501,66 @@ export function ImageGenerationCanvasPage({
   const referenceImagePaths = referenceImages
     .map((image) => image.path || image.normalizedPath)
     .filter(Boolean);
+  const requestEditorEnabled = Boolean(config?.requestEditorEnabled);
+  const generatedRequestParamsText = useMemo(() => (
+    formatRequestJson(buildImageGenerationRequestParams())
+  ), []);
+  const generatedRequestBodyText = useMemo(() => (
+    formatRequestJson(buildImageGenerationRequestBody({
+      model: normalizedModel,
+      n: normalizedCount,
+      prompt,
+      referenceImageUrls: referenceImagePaths,
+      size: normalizedSize,
+      upscale: normalizedUpscale
+    }))
+  ), [normalizedCount, normalizedModel, normalizedSize, normalizedUpscale, prompt, referenceImagePaths]);
+  const requestEditorValidation = useMemo(() => {
+    if (!requestEditorEnabled) {
+      return { body: null, error: '', params: null, prompt: '' };
+    }
+
+    let params;
+    try {
+      params = parseRequestJsonObject(requestParamsText);
+    } catch (error) {
+      return {
+        body: null,
+        error: t('imageGenerationRequestJsonInvalid', {
+          name: t('imageGenerationRequestParams'),
+          message: error?.message || String(error)
+        }),
+        params: null,
+        prompt: ''
+      };
+    }
+
+    try {
+      const body = parseRequestJsonObject(requestBodyText);
+      return {
+        body,
+        error: '',
+        params,
+        prompt: String(body.prompt || '').trim()
+      };
+    } catch (error) {
+      return {
+        body: null,
+        error: t('imageGenerationRequestJsonInvalid', {
+          name: t('imageGenerationRequestBody'),
+          message: error?.message || String(error)
+        }),
+        params,
+        prompt: ''
+      };
+    }
+  }, [requestBodyText, requestEditorEnabled, requestParamsText, t]);
+  const requestEditorError = requestEditorEnabled
+    ? (requestEditorSubmitError || requestEditorValidation.error)
+    : '';
+  const effectivePrompt = requestEditorEnabled
+    ? (requestEditorValidation.prompt || trimmedPrompt)
+    : trimmedPrompt;
   const modelChoices = useMemo(() => (
     modelOptions.includes(normalizedModel)
       ? modelOptions
@@ -1123,6 +1573,31 @@ export function ImageGenerationCanvasPage({
     setCount(normalizeCount(config?.n));
     setUpscale(normalizeUpscale(config?.upscale));
   }, [config?.model, config?.n, config?.size, config?.upscale]);
+
+  useEffect(() => {
+    if (!requestEditorEnabled) {
+      setRequestEditorDirty(false);
+      setRequestEditorSubmitError('');
+      return;
+    }
+
+    if (requestEditorDirty) {
+      return;
+    }
+
+    setRequestParamsText((current) => (
+      current === generatedRequestParamsText ? current : generatedRequestParamsText
+    ));
+    setRequestBodyText((current) => (
+      current === generatedRequestBodyText ? current : generatedRequestBodyText
+    ));
+    setRequestEditorSubmitError('');
+  }, [
+    generatedRequestBodyText,
+    generatedRequestParamsText,
+    requestEditorDirty,
+    requestEditorEnabled
+  ]);
 
   useEffect(() => {
     setItemLayout((current) => {
@@ -1161,6 +1636,7 @@ export function ImageGenerationCanvasPage({
 
   useEffect(() => {
     const latestGroupId = historyGroups[0]?.id || '';
+    const previousStatuses = historyGroupStatusRef.current;
     setCollapsedHistoryGroups((current) => {
       if (historyGroups.length === 0) {
         return Object.keys(current).length > 0 ? {} : current;
@@ -1171,10 +1647,13 @@ export function ImageGenerationCanvasPage({
       let changed = latestChanged || Object.keys(current).some((id) => !historyGroups.some((group) => group.id === id));
 
       historyGroups.forEach((group, index) => {
-        const fallbackCollapsed = index > 0;
-        const collapsed = latestChanged
-          ? fallbackCollapsed
-          : (typeof current[group.id] === 'boolean' ? current[group.id] : fallbackCollapsed);
+        const fallbackCollapsed = group.status === 'failed' || index > 0;
+        const becameFailed = previousStatuses[group.id] !== 'failed' && group.status === 'failed';
+        const collapsed = becameFailed
+          ? true
+          : latestChanged
+            ? fallbackCollapsed
+            : (typeof current[group.id] === 'boolean' ? current[group.id] : fallbackCollapsed);
         next[group.id] = collapsed;
         if (current[group.id] !== collapsed) {
           changed = true;
@@ -1183,6 +1662,10 @@ export function ImageGenerationCanvasPage({
 
       return changed ? next : current;
     });
+    historyGroupStatusRef.current = historyGroups.reduce((accumulator, group) => {
+      accumulator[group.id] = group.status;
+      return accumulator;
+    }, {});
     latestHistoryGroupIdRef.current = latestGroupId;
   }, [historyGroups]);
 
@@ -1221,6 +1704,7 @@ export function ImageGenerationCanvasPage({
       event.button !== 0 ||
       closestElement(event.target, '.image-generation-controls') ||
       closestElement(event.target, '.image-generation-card') ||
+      closestElement(event.target, '.image-generation-folder-card') ||
       closestElement(event.target, '.image-generation-tool-card') ||
       closestElement(event.target, '.image-generation-canvas-toolbar')
     ) {
@@ -1250,6 +1734,7 @@ export function ImageGenerationCanvasPage({
     if (
       closestElement(event.target, '.image-generation-controls') ||
       closestElement(event.target, '.image-generation-card') ||
+      closestElement(event.target, '.image-generation-folder-card') ||
       closestElement(event.target, '.image-generation-tool-card')
     ) {
       return;
@@ -1297,8 +1782,20 @@ export function ImageGenerationCanvasPage({
     });
   }, []);
 
+  const moveArchiveFolder = useCallback((patch) => {
+    setArchiveFolderLayout((current) => {
+      return {
+        ...current,
+        x: Number.isFinite(patch?.x) ? patch.x : current.x,
+        y: Number.isFinite(patch?.y) ? patch.y : current.y
+      };
+    });
+  }, []);
+
   const resetLayout = useCallback(() => {
     setToolLayout(getDefaultToolPanelLayout());
+    setArchiveFolderLayout(getDefaultArchiveFolderLayout());
+    setArchiveFolderOpen(false);
     setItemLayout(() => {
       const next = {};
       canvasResults.forEach((item, index) => {
@@ -1387,19 +1884,57 @@ export function ImageGenerationCanvasPage({
     void addReferenceFiles(imageFiles);
   }, [addReferenceFiles, generating]);
 
+  const resetRequestEditor = useCallback(() => {
+    setRequestParamsText(generatedRequestParamsText);
+    setRequestBodyText(generatedRequestBodyText);
+    setRequestEditorDirty(false);
+    setRequestEditorSubmitError('');
+  }, [generatedRequestBodyText, generatedRequestParamsText]);
+
+  const updateRequestParamsText = useCallback((nextValue) => {
+    setRequestParamsText(nextValue);
+    setRequestEditorDirty(true);
+    setRequestEditorSubmitError('');
+  }, []);
+
+  const updateRequestBodyText = useCallback((nextValue) => {
+    setRequestBodyText(nextValue);
+    setRequestEditorDirty(true);
+    setRequestEditorSubmitError('');
+  }, []);
+
   const submitPrompt = (event) => {
     event.preventDefault();
-    if (!trimmedPrompt || generating) {
+    if (!effectivePrompt || generating) {
       return;
     }
 
+    if (requestEditorEnabled && requestEditorValidation.error) {
+      setRequestEditorSubmitError(requestEditorValidation.error);
+      return;
+    }
+
+    if (requestEditorEnabled && !requestEditorValidation.prompt && !trimmedPrompt) {
+      setRequestEditorSubmitError(t('imageGenerationRequestPromptRequired'));
+      return;
+    }
+
+    const requestBody = requestEditorEnabled ? requestEditorValidation.body : null;
+    const requestParams = requestEditorEnabled ? requestEditorValidation.params : null;
+    const submittedReferenceImagePaths = requestEditorEnabled
+      ? (Array.isArray(requestBody?.reference_images)
+        ? requestBody.reference_images.map((url) => String(url || '').trim()).filter(Boolean)
+        : [])
+      : referenceImagePaths;
+
     onGenerate?.({
-      prompt: trimmedPrompt,
-      model: normalizedModel,
-      n: normalizedCount,
-      size: normalizedSize,
-      upscale: normalizedUpscale,
-      referenceImageUrls: referenceImagePaths
+      prompt: effectivePrompt,
+      model: String(requestBody?.model || normalizedModel).trim() || normalizedModel,
+      n: requestBody?.n ?? normalizedCount,
+      size: String(requestBody?.size || normalizedSize).trim() || normalizedSize,
+      upscale: normalizeUpscale(requestBody?.upscale ?? normalizedUpscale),
+      referenceImageUrls: submittedReferenceImagePaths,
+      ...(requestEditorEnabled ? { requestParams, requestBody } : {})
     });
   };
 
@@ -1594,12 +2129,62 @@ export function ImageGenerationCanvasPage({
             </div>
           </div>
 
+          {requestEditorEnabled && (
+            <div className="image-generation-request-editor">
+              <div className="image-generation-request-editor-head">
+                <div className="image-generation-controls-title">
+                  <SlidersHorizontal className="h-4 w-4 text-primary" />
+                  <span>{t('imageGenerationRequestEditor')}</span>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-7 gap-1.5 px-2"
+                  onClick={resetRequestEditor}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  {t('imageGenerationRequestEditorReset')}
+                </Button>
+              </div>
+              <div className="image-generation-field">
+                <Label htmlFor="imageGenerationRequestParams" className="text-xs font-medium text-muted-foreground">
+                  {t('imageGenerationRequestParams')}
+                </Label>
+                <Textarea
+                  id="imageGenerationRequestParams"
+                  rows={4}
+                  spellCheck={false}
+                  value={requestParamsText}
+                  className="image-generation-request-textarea"
+                  onChange={(event) => updateRequestParamsText(event.target.value)}
+                />
+              </div>
+              <div className="image-generation-field">
+                <Label htmlFor="imageGenerationRequestBody" className="text-xs font-medium text-muted-foreground">
+                  {t('imageGenerationRequestBody')}
+                </Label>
+                <Textarea
+                  id="imageGenerationRequestBody"
+                  rows={10}
+                  spellCheck={false}
+                  value={requestBodyText}
+                  className="image-generation-request-textarea"
+                  onChange={(event) => updateRequestBodyText(event.target.value)}
+                />
+              </div>
+              {requestEditorError && (
+                <div className="image-generation-request-error">{requestEditorError}</div>
+              )}
+            </div>
+          )}
+
           <div className="image-generation-form-actions">
             <Button
               type="submit"
               variant="primary"
               className="h-9 flex-1 gap-1.5 px-3"
-              disabled={!trimmedPrompt || generating}
+              disabled={!effectivePrompt || generating || Boolean(requestEditorError)}
             >
               {generating ? (
                 <RefreshCw className="h-4 w-4 animate-spin" />
@@ -1647,6 +2232,18 @@ export function ImageGenerationCanvasPage({
             position={toolLayout}
             scale={view.scale}
             onMove={moveToolPanel}
+            t={t}
+          />
+          <ImageGenerationArchiveFolder
+            expanded={archiveFolderOpen}
+            groups={archivedHistoryGroups}
+            position={archiveFolderLayout}
+            scale={view.scale}
+            onCopyReference={onCopyReference}
+            onMove={moveArchiveFolder}
+            onOpenFile={onOpenFile}
+            onToggle={() => setArchiveFolderOpen((current) => !current)}
+            onUseAsReference={useImageAsReference}
             t={t}
           />
           {canvasResults.map((item) => (

@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.2.2](https://github.com/whd3131/cli-in-one/compare/v1.2.1...v1.2.2) (2026-04-29)
+
+This patch release turns CLI in One into a fuller agent orchestration workspace. It adds live session-to-session dispatch, richer Quick Send context assembly, scheduled agent runbooks, a dedicated diff review handoff flow, and linked canvas todo cards while tightening image-generation history, workspace inspection, and GitHub release lookups.
+
+
+### Features
+
+* add a local `cli-in-one` agent bridge so any live session can list other published sessions and dispatch a task to them by session id or title through a filesystem-backed inbox/response flow
+* add Quick Send context packs that can bundle project files, terminal selections, latest terminal output, clipboard text, dropped images, and fetched URL content into one prompt payload
+* add Autopilot runbooks that assign scheduled daily, weekday, weekly, or cron-based tasks to saved Agents and launch them automatically
+* add a Diff / Review modal that reads staged and unstaged Git diffs, captures batched review comments, and hands that feedback to a selected Agent in a new session
+* add linked canvas Todo panels for agent work, with plan text, follow-panel placement, and output-driven task extraction that can keep task state synced from session output
+
+
+### Improvements
+
+* let Quick Send dispatch one task per line, either reusing idle sessions first or creating fresh sessions for every task, with dedicated shortcuts, visual target flashes, and better saved-prompt management
+* add agent utility actions directly on live agent panels so they can become the Quick Send target, attach images or files, insert the current Git diff, or jump straight into review
+* expand workspace skill discovery to scan project and global skill folders for multiple tools including Agents, Warp, Claude, Codex, Cursor, Gemini, Copilot, Factory, GitHub, and OpenCode while deduplicating overlapping skill definitions
+* upgrade workspace tree browsing with lazy child loading and direct "add to context pack" actions so large repositories stay responsive while files remain easier to reference
+* refine image generation with an archive folder on the canvas, richer prompt and payload drill-down, reusable request editors, and faster reuse of older images as references
+* persist GitHub latest-release status on disk with ETag and Last-Modified validation, stale-cache fallback, and optional token-authenticated requests to reduce rate-limit failures during update checks
+
+
+### Bug Fixes
+
+* parse multi-line Markdown-style task lists in Quick Send dispatch instead of flattening structured task text into broken one-line tasks
+* reject oversized, binary, or out-of-workspace files and oversized URL responses before adding them to agent context, while marking truncated content clearly when a payload has to be clipped
+* keep the image-generation canvas focused on current work by leaving completed historical results in the archive folder and collapsing newly failed history groups by default
+* keep GitHub release checks usable when the API returns rate limits or unchanged responses by reusing validated cached status instead of failing the entire update path
+
+
+### Internal
+
+* add dedicated file, URL, diff, and skills IPC readers plus focused terminal-block parsing tests that back the new dispatch, review, and context-pack flows
+
 ## [1.2.1](https://github.com/whd3131/cli-in-one/compare/v1.2.0...v1.2.1) (2026-04-28)
 
 This patch release tightens project-scoped workspace behavior. It keeps saved project focus, per-project canvas defaults, and terminal launch context aligned so project sessions no longer drift back into shared or directory-only state after reloads or new launches.

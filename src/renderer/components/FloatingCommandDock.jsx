@@ -2,11 +2,14 @@ import React from 'react';
 import {
   Check,
   ChevronDown,
+  Clipboard,
   Download,
   File,
   FolderOpen,
   GripHorizontal,
   History,
+  Image,
+  Link2,
   Maximize2,
   MessageSquarePlus,
   Minimize2,
@@ -14,8 +17,10 @@ import {
   RefreshCw,
   Save,
   Search,
+  Sparkles,
   SquareTerminal,
-  Trash2
+  Trash2,
+  X
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -131,10 +136,12 @@ function CommandDockSkillMentionMenu({
         <div className="command-dock-skill-list">
           {items.map((item, index) => {
             const active = index === activeIndex;
-            const ItemIcon = item.kind === 'directory' ? FolderOpen : File;
+            const ItemIcon = item.kind === 'directory'
+              ? FolderOpen
+              : (item.kind === 'skill' ? Sparkles : File);
             const kindLabel = item.kind === 'directory'
               ? t('floatingComposerSkillDirectory')
-              : t('floatingComposerSkillFile');
+              : (item.kind === 'skill' ? t('floatingComposerSkillCommand') : t('floatingComposerSkillFile'));
 
             return (
               <button
@@ -170,11 +177,55 @@ function formatCommandDockHistoryPreview(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function getCommandDockContextIcon(kind) {
+  switch (kind) {
+    case 'file':
+      return File;
+    case 'image':
+      return Image;
+    case 'url':
+      return Link2;
+    case 'terminal-selection':
+    case 'terminal-output':
+      return SquareTerminal;
+    default:
+      return Clipboard;
+  }
+}
+
+function getCommandDockContextLabel(kind, t) {
+  switch (kind) {
+    case 'file':
+      return t('floatingComposerContextFile');
+    case 'image':
+      return t('floatingComposerContextImage');
+    case 'url':
+      return t('floatingComposerContextUrl');
+    case 'terminal-selection':
+      return t('floatingComposerContextTerminalSelection');
+    case 'terminal-output':
+      return t('floatingComposerContextTerminalOutput');
+    default:
+      return t('floatingComposerContextSelectedText');
+  }
+}
+
+function getCommandDockContextTitle(item, t) {
+  return String(
+    item?.title
+    || item?.path
+    || item?.url
+    || getCommandDockContextLabel(item?.kind, t)
+  ).trim();
+}
+
 export function FloatingCommandDock({
   activeId,
   canPanelReceiveInput,
   collapsed,
   commandHistory = [],
+  contextItems = [],
+  contextLoading = false,
   dispatchMode = 'reuse',
   dispatchingTasks,
   dispatchShortcutLabel = 'Ctrl+Enter',
@@ -190,6 +241,11 @@ export function FloatingCommandDock({
   onExport,
   onExportCustom,
   onHistorySelect,
+  onAddLatestOutputContext,
+  onAddSelectedTextContext,
+  onAddTerminalSelectionContext,
+  onAddUrlContext,
+  onClearContext,
   onInputChange,
   onInputCompositionEnd,
   onInputCompositionStart,
@@ -202,7 +258,9 @@ export function FloatingCommandDock({
   onQuickPromptDelete,
   onQuickPromptSave,
   onQuickPromptSelect,
+  onOpenWorkspaceTree,
   onPositionChange,
+  onRemoveContextItem,
   onSend,
   onSkillMentionSelect,
   onTargetChange,
@@ -238,8 +296,14 @@ export function FloatingCommandDock({
   });
   const targetPanel = panels.find((panel) => panel.id === targetId) || null;
   const targetReady = canPanelReceiveInput?.(targetPanel);
+  const normalizedContextItems = Array.isArray(contextItems)
+    ? contextItems
+      .filter((item) => item && typeof item === 'object')
+      .slice(0, 24)
+    : [];
+  const hasContextItems = normalizedContextItems.length > 0;
   const canExport = Boolean(targetPanel);
-  const canSend = Boolean(targetReady && String(message || '').trim());
+  const canSend = Boolean(targetReady && (String(message || '').trim() || hasContextItems));
   const canDispatchTasks = parseCommandDockDispatchTasks(message).length > 0 && !dispatchingTasks;
   const canSaveQuickPrompt = Boolean(String(message || '').trim() && !quickPromptsLoading);
   const normalizedDispatchMode = dispatchMode === 'new' ? 'new' : 'reuse';
@@ -623,7 +687,10 @@ export function FloatingCommandDock({
       style={dockStyle}
     >
       <Card
-        className="command-dock-card pointer-events-auto overflow-visible shadow-lg"
+        className={cn(
+          'command-dock-card pointer-events-auto overflow-visible shadow-lg',
+          collapsed && 'is-collapsed'
+        )}
         onPointerDown={(event) => event.stopPropagation()}
         onWheel={(event) => event.stopPropagation()}
         onDragOver={onInputDragOver}
@@ -690,8 +757,13 @@ export function FloatingCommandDock({
           </div>
         </CardHeader>
 
-        {!collapsed && (
-          <>
+        <div
+          className="command-dock-panel-shell"
+          data-open={collapsed ? 'false' : 'true'}
+          aria-hidden={collapsed}
+          inert={collapsed ? true : undefined}
+        >
+          <div className="command-dock-panel-slide">
             <CardContent className="grid gap-2 px-3 pb-3 pt-0">
               <div className="relative">
                 <Textarea
@@ -797,6 +869,53 @@ export function FloatingCommandDock({
                 >
                   {t('floatingComposerSend')}
                 </Button>
+              </div>
+              <div className={cn('command-dock-context-pack', !hasContextItems && 'is-empty')}>
+                <div className="command-dock-context-pack-header">
+                  <span>{t('floatingComposerContextPack')}</span>
+                  <Badge variant="outline" className="command-dock-context-count">
+                    {hasContextItems
+                      ? t('floatingComposerContextCount', { count: normalizedContextItems.length })
+                      : t('floatingComposerContextEmpty')}
+                  </Badge>
+                </div>
+                {hasContextItems && (
+                  <div className="command-dock-context-list">
+                    {normalizedContextItems.map((item) => {
+                      const Icon = getCommandDockContextIcon(item.kind);
+                      const label = getCommandDockContextLabel(item.kind, t);
+                      const title = getCommandDockContextTitle(item, t);
+                      const detail = [
+                        label,
+                        item.path,
+                        item.url,
+                        item.panelTitle,
+                        item.truncated ? 'truncated' : ''
+                      ].filter(Boolean).join('\n');
+
+                      return (
+                        <div
+                          key={item.id || `${item.kind}:${title}`}
+                          className="command-dock-context-chip"
+                          title={detail || title}
+                        >
+                          <Icon className="h-3.5 w-3.5" />
+                          <span className="command-dock-context-kind">{label}</span>
+                          <span className="command-dock-context-title">{title}</span>
+                          <button
+                            type="button"
+                            className="command-dock-context-remove"
+                            aria-label={`${t('floatingComposerContextRemove')}: ${title}`}
+                            title={t('floatingComposerContextRemove')}
+                            onClick={() => onRemoveContextItem?.(item.id)}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </CardContent>
 
@@ -928,6 +1047,70 @@ export function FloatingCommandDock({
                 )}
               </div>
               <div className="command-dock-footer-actions">
+                <div
+                  className="command-dock-context-actions"
+                  role="group"
+                  aria-label={t('floatingComposerContextPack')}
+                >
+                  <CommandDockIconButton
+                    label={t('floatingComposerContextAddFile')}
+                    variant="outline"
+                    className="h-7 w-7"
+                    onClick={onOpenWorkspaceTree}
+                    disabled={typeof onOpenWorkspaceTree !== 'function'}
+                  >
+                    <FolderOpen className="h-3.5 w-3.5" />
+                  </CommandDockIconButton>
+                  <CommandDockIconButton
+                    label={t('floatingComposerContextAddTerminalSelection')}
+                    variant="outline"
+                    className="h-7 w-7"
+                    onClick={onAddTerminalSelectionContext}
+                    disabled={typeof onAddTerminalSelectionContext !== 'function'}
+                  >
+                    <SquareTerminal className="h-3.5 w-3.5" />
+                  </CommandDockIconButton>
+                  <CommandDockIconButton
+                    label={t('floatingComposerContextAddLatestOutput')}
+                    variant="outline"
+                    className="h-7 w-7"
+                    onClick={onAddLatestOutputContext}
+                    disabled={typeof onAddLatestOutputContext !== 'function' || !targetPanel}
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  </CommandDockIconButton>
+                  <CommandDockIconButton
+                    label={t('floatingComposerContextAddSelectedText')}
+                    variant="outline"
+                    className="h-7 w-7"
+                    onClick={onAddSelectedTextContext}
+                    disabled={typeof onAddSelectedTextContext !== 'function'}
+                  >
+                    <Clipboard className="h-3.5 w-3.5" />
+                  </CommandDockIconButton>
+                  <CommandDockIconButton
+                    label={t('floatingComposerContextAddUrl')}
+                    variant="outline"
+                    className="h-7 w-7"
+                    onClick={onAddUrlContext}
+                    disabled={typeof onAddUrlContext !== 'function' || contextLoading}
+                  >
+                    {contextLoading ? (
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Link2 className="h-3.5 w-3.5" />
+                    )}
+                  </CommandDockIconButton>
+                  <CommandDockIconButton
+                    label={t('floatingComposerContextClear')}
+                    variant="ghost"
+                    className="h-7 w-7"
+                    onClick={onClearContext}
+                    disabled={!hasContextItems || typeof onClearContext !== 'function'}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </CommandDockIconButton>
+                </div>
                 <Button
                   type="button"
                   variant="outline"
@@ -1025,8 +1208,8 @@ export function FloatingCommandDock({
                 </Button>
               </div>
             </CardFooter>
-          </>
-        )}
+          </div>
+        </div>
       </Card>
     </div>
   );

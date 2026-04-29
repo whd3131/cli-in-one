@@ -20,6 +20,9 @@ try {
 
 const sessions = new Map();
 let mainWindow = null;
+let agentBridgeWatcher = null;
+let agentBridgeInboxScanTimer = null;
+let agentBridgeInboxProcessing = false;
 const cursorModelCatalogCacheTtlMs = 10 * 60 * 1000;
 let cursorModelCatalogCache = null;
 const APP_STORAGE_DIR_NAME = '.cli-in-one';
@@ -41,6 +44,18 @@ const CLAUDE_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto
 const CLAUDE_QUICK_PROFILES_FILE_NAME = 'claude-quick-profiles.json';
 const QUICK_PROMPTS_FILE_NAME = 'quick-prompts.json';
 const COMMAND_PRESETS_FILE_NAME = 'command-presets.json';
+const AGENT_BRIDGE_DIR_NAME = 'agent-bridge';
+const AGENT_BRIDGE_BIN_DIR_NAME = 'bin';
+const AGENT_BRIDGE_INBOX_DIR_NAME = 'inbox';
+const AGENT_BRIDGE_RESPONSES_DIR_NAME = 'responses';
+const AGENT_BRIDGE_SESSIONS_FILE_NAME = 'sessions.json';
+const AGENT_BRIDGE_HELPER_FILE_NAME = 'cli-in-one-agent.js';
+const AGENT_BRIDGE_COMMAND_FILE_NAME = 'cli-in-one.cmd';
+const AGENT_BRIDGE_POWERSHELL_FILE_NAME = 'cli-in-one.ps1';
+const AGENT_BRIDGE_UNIX_COMMAND_FILE_NAME = 'cli-in-one';
+const AGENT_BRIDGE_REQUEST_MAX_BYTES = 1024 * 1024;
+const AGENT_BRIDGE_MESSAGE_MAX_CHARS = 200000;
+const AGENT_BRIDGE_RESPONSE_TTL_MS = 30 * 60 * 1000;
 const IMAGE_TOOLS_HTML_FILE_NAME = 'image-tools.html';
 const QUICK_PROMPTS_MAX_ITEMS = 80;
 const QUICK_PROMPT_MAX_LENGTH = 20000;
@@ -52,6 +67,10 @@ const IMAGE_API_HISTORY_MAX_ITEMS = 80;
 const USAGE_TRACKING_FILE_NAME = 'usage-tracking.json';
 const USAGE_TRACKING_MAX_RECORDS = 2000;
 const TERMINAL_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024;
+const AGENT_CONTEXT_FILE_MAX_BYTES = 256 * 1024;
+const AGENT_CONTEXT_URL_MAX_BYTES = 512 * 1024;
+const AGENT_CONTEXT_FETCH_TIMEOUT_MS = 15000;
+const AGENT_CONTEXT_TEXT_MAX_CHARS = 160000;
 const APP_ZOOM_DEFAULT_FACTOR = 1;
 const APP_ZOOM_MIN_FACTOR = 0.75;
 const APP_ZOOM_MAX_FACTOR = 1.75;
@@ -77,7 +96,10 @@ const RELEASE_REPOSITORY_NAME = 'cli-in-one';
 const GITHUB_RELEASES_URL = `https://github.com/${RELEASE_REPOSITORY_OWNER}/${RELEASE_REPOSITORY_NAME}/releases`;
 const GITHUB_RELEASES_API_URL = `https://api.github.com/repos/${RELEASE_REPOSITORY_OWNER}/${RELEASE_REPOSITORY_NAME}/releases`;
 const GITHUB_RELEASE_FETCH_TIMEOUT_MS = 12000;
-const GITHUB_LATEST_RELEASE_STATUS_CACHE_TTL_MS = 10 * 60 * 1000;
+const GITHUB_RELEASE_STATUS_CACHE_FILE_NAME = 'github-latest-release-status.json';
+const GITHUB_LATEST_RELEASE_STATUS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const GITHUB_LATEST_RELEASE_STATUS_STALE_FALLBACK_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const GITHUB_TOKEN_ENV_NAMES = ['CLI_IN_ONE_GITHUB_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'];
 const AGENT_AVATAR_MAX_BYTES = 8 * 1024 * 1024;
 const IMAGE_API_SUCCESS_STATUSES = new Set([
   'complete',
@@ -105,6 +127,7 @@ const defaultCliProviderId = cliProviderMap.has('codex')
   ? 'codex'
   : (cliProviderList[0]?.id || 'shell');
 let latestReleaseStatusCache = null;
+let latestReleaseStatusCacheLoaded = false;
 const imageExtensionByMimeType = new Map([
   ['image/apng', '.apng'],
   ['image/avif', '.avif'],
@@ -122,12 +145,15 @@ const imageMimeTypeByExtension = new Map(
 const imageExtensions = new Set(imageExtensionByMimeType.values());
 const WORKSPACE_SKILL_MAX_DEPTH = 8;
 const WORKSPACE_SKILL_MAX_FILES_PER_SOURCE = 200;
+const WORKSPACE_SKILL_MAX_CONTENT_BYTES = 256 * 1024;
 const WORKSPACE_TREE_MAX_DEPTH = 8;
 const WORKSPACE_TREE_MAX_ENTRIES = 5000;
 const WORKSPACE_TREE_MAX_CHILDREN_PER_DIRECTORY = 500;
 const WORKSPACE_TREE_ABSOLUTE_MAX_DEPTH = 20;
 const WORKSPACE_TREE_ABSOLUTE_MAX_ENTRIES = 20000;
 const WORKSPACE_TREE_ABSOLUTE_MAX_CHILDREN_PER_DIRECTORY = 2000;
+const WORKSPACE_DIFF_MAX_BYTES = 220 * 1024;
+const WORKSPACE_DIFF_COMMAND_TIMEOUT_MS = 12000;
 const workspaceTreeIgnoredDirectoryNames = new Set([
   '.cache',
   '.cli-in-one',
@@ -173,8 +199,36 @@ const workspaceSkillGithubAllowedFileNames = new Set([
   'instructions.md',
   'instructions.txt'
 ]);
+const workspaceSkillToolDirectories = [
+  { id: 'agents', directoryName: '.agents/skills', label: 'Agents' },
+  { id: 'warp', directoryName: '.warp/skills', label: 'Warp' },
+  { id: 'claude', directoryName: '.claude/skills', label: 'Claude' },
+  { id: 'codex', directoryName: '.codex/skills', label: 'Codex' },
+  { id: 'cursor', directoryName: '.cursor/skills', label: 'Cursor' },
+  { id: 'gemini', directoryName: '.gemini/skills', label: 'Gemini' },
+  { id: 'copilot', directoryName: '.copilot/skills', label: 'Copilot' },
+  { id: 'factory', directoryName: '.factory/skills', label: 'Factory' },
+  { id: 'github', directoryName: '.github/skills', label: 'GitHub' },
+  { id: 'opencode', directoryName: '.opencode/skills', label: 'OpenCode' }
+];
 const workspaceSkillSources = [
-  { id: 'cli-in-one', directoryName: `${APP_STORAGE_DIR_NAME}/skills`, ensureDirectory: true },
+  ...workspaceSkillToolDirectories.map((source) => ({
+    ...source,
+    id: `${source.id}-global`,
+    scope: 'global'
+  })),
+  ...workspaceSkillToolDirectories.map((source) => ({
+    ...source,
+    id: `${source.id}-project`,
+    scope: 'project'
+  })),
+  {
+    id: 'cli-in-one',
+    directoryName: `${APP_STORAGE_DIR_NAME}/skills`,
+    ensureDirectory: true,
+    label: 'Cli in One',
+    scope: 'project'
+  },
   { id: 'cursor', directoryName: '.cursor' },
   { id: 'claude', directoryName: '.claude' },
   { id: 'agent', directoryName: '.agent' },
@@ -296,6 +350,26 @@ function getCommandPresetsPath() {
   return path.join(getProgramStorageDir(), COMMAND_PRESETS_FILE_NAME);
 }
 
+function getAgentBridgeDir() {
+  return path.join(getProgramStorageDir(), AGENT_BRIDGE_DIR_NAME);
+}
+
+function getAgentBridgeBinDir() {
+  return path.join(getProgramStorageDir(), AGENT_BRIDGE_BIN_DIR_NAME);
+}
+
+function getAgentBridgeInboxDir() {
+  return path.join(getAgentBridgeDir(), AGENT_BRIDGE_INBOX_DIR_NAME);
+}
+
+function getAgentBridgeResponsesDir() {
+  return path.join(getAgentBridgeDir(), AGENT_BRIDGE_RESPONSES_DIR_NAME);
+}
+
+function getAgentBridgeSessionsPath() {
+  return path.join(getAgentBridgeDir(), AGENT_BRIDGE_SESSIONS_FILE_NAME);
+}
+
 function getImageApiConfigPath() {
   return path.join(getProgramStorageDir(), IMAGE_API_CONFIG_FILE_NAME);
 }
@@ -324,6 +398,10 @@ async function openImageToolsPage() {
 
 function getUsageTrackingPath() {
   return path.join(getProgramStorageDir(), USAGE_TRACKING_FILE_NAME);
+}
+
+function getLatestReleaseStatusCachePath() {
+  return path.join(getProgramStorageDir(), GITHUB_RELEASE_STATUS_CACHE_FILE_NAME);
 }
 
 function normalizeAppZoomFactor(value) {
@@ -725,46 +803,12 @@ function getReleaseTagCandidates(version) {
 }
 
 async function fetchGithubJson(url, { allowNotFound = false } = {}) {
-  if (typeof fetch !== 'function') {
-    throw new Error('当前运行环境不支持 fetch。');
+  const result = await fetchGithubJsonResponse(url, { allowNotFound });
+  if (result.notFound || result.notModified) {
+    return null;
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), GITHUB_RELEASE_FETCH_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(url, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'CLI-in-One'
-      },
-      signal: controller.signal
-    });
-
-    if (response.status === 404 && allowNotFound) {
-      return null;
-    }
-
-    if (!response.ok) {
-      let detail = '';
-      try {
-        const payload = await response.json();
-        detail = asString(payload?.message).trim();
-      } catch {
-        detail = await response.text().catch(() => '');
-      }
-      throw new Error(`GitHub Releases 返回 ${response.status}${detail ? `：${detail}` : ''}`);
-    }
-
-    return response.json();
-  } catch (error) {
-    if (error?.name === 'AbortError') {
-      throw new Error('GitHub Releases 请求超时。');
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
+  return result.data;
 }
 
 function normalizeGithubReleaseChangelog(release, requestedVersion) {
@@ -790,6 +834,297 @@ function normalizeGithubReleaseChangelog(release, requestedVersion) {
 function formatReleaseVersionLabel(version) {
   const normalizedVersion = normalizeReleaseVersion(version);
   return normalizedVersion ? `v${normalizedVersion}` : '';
+}
+
+function normalizeLatestReleaseSummary(raw = {}) {
+  const version = normalizeReleaseVersion(raw?.version || raw?.tagName || raw?.title);
+  const tagName = asString(raw?.tagName).trim() || (version ? `v${version}` : '');
+  const url = asString(raw?.url).trim()
+    || (tagName ? `${GITHUB_RELEASES_URL}/tag/${encodeURIComponent(tagName)}` : GITHUB_RELEASES_URL);
+
+  return {
+    date: asString(raw?.date).trim().slice(0, 10),
+    draft: Boolean(raw?.draft),
+    prerelease: Boolean(raw?.prerelease),
+    tagName,
+    title: stripInlineMarkdown(raw?.title) || tagName || formatReleaseVersionLabel(version),
+    url,
+    version
+  };
+}
+
+function buildLatestReleaseStatusPayload(currentVersion, latest, checkedAt, source = 'github') {
+  const normalizedCurrentVersion = normalizeReleaseVersion(currentVersion);
+  const normalizedLatest = latest ? normalizeLatestReleaseSummary(latest) : null;
+  const comparison = normalizedCurrentVersion && normalizedLatest?.version
+    ? compareReleaseVersions(normalizedCurrentVersion, normalizedLatest.version)
+    : 0;
+
+  return {
+    checkedAt: Number.isFinite(checkedAt) ? Math.max(0, checkedAt) : Date.now(),
+    comparison,
+    currentVersion: normalizedCurrentVersion,
+    found: Boolean(normalizedLatest?.version),
+    isOutdated: Boolean(normalizedCurrentVersion && normalizedLatest?.version && comparison < 0),
+    latestDate: normalizedLatest?.date || '',
+    latestDraft: Boolean(normalizedLatest?.draft),
+    latestPrerelease: Boolean(normalizedLatest?.prerelease),
+    latestTagName: normalizedLatest?.tagName || '',
+    latestTitle: normalizedLatest?.title || '',
+    latestUrl: normalizedLatest?.url || GITHUB_RELEASES_URL,
+    latestVersion: normalizedLatest?.version || '',
+    source
+  };
+}
+
+function normalizeLatestReleaseStatusCacheEntry(raw = {}) {
+  return {
+    checkedAt: Number.isFinite(raw?.checkedAt) ? Math.max(0, raw.checkedAt) : 0,
+    etag: asString(raw?.etag).trim(),
+    lastModified: asString(raw?.lastModified).trim(),
+    latest: raw?.latest ? normalizeLatestReleaseSummary(raw.latest) : null,
+    rateLimitResetAt: Number.isFinite(raw?.rateLimitResetAt) ? Math.max(0, raw.rateLimitResetAt) : 0
+  };
+}
+
+async function loadLatestReleaseStatusCache() {
+  if (latestReleaseStatusCacheLoaded) {
+    return latestReleaseStatusCache;
+  }
+
+  const cachePath = getLatestReleaseStatusCachePath();
+
+  try {
+    const content = await fs.promises.readFile(cachePath, 'utf8');
+    latestReleaseStatusCache = normalizeLatestReleaseStatusCacheEntry(JSON.parse(content));
+  } catch (error) {
+    if (error && error.code !== 'ENOENT' && !(error instanceof SyntaxError)) {
+      throw error;
+    }
+
+    latestReleaseStatusCache = null;
+  }
+
+  latestReleaseStatusCacheLoaded = true;
+  return latestReleaseStatusCache;
+}
+
+async function persistLatestReleaseStatusCache(entry) {
+  const normalized = normalizeLatestReleaseStatusCacheEntry(entry);
+  const cachePath = getLatestReleaseStatusCachePath();
+  const tempPath = path.join(
+    path.dirname(cachePath),
+    `${GITHUB_RELEASE_STATUS_CACHE_FILE_NAME}.${process.pid}.${Date.now()}.tmp`
+  );
+
+  await fs.promises.mkdir(path.dirname(cachePath), { recursive: true });
+
+  try {
+    await fs.promises.writeFile(tempPath, `${JSON.stringify(normalized, null, 2)}\n`, 'utf8');
+    await fs.promises.rename(tempPath, cachePath);
+  } catch (error) {
+    await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+
+  latestReleaseStatusCache = normalized;
+  latestReleaseStatusCacheLoaded = true;
+  return normalized;
+}
+
+function getCachedLatestReleaseStatus(cache, currentVersion, maxAgeMs, now = Date.now()) {
+  if (
+    !cache ||
+    !Number.isFinite(cache.checkedAt) ||
+    cache.checkedAt <= 0 ||
+    !Number.isFinite(maxAgeMs)
+  ) {
+    return null;
+  }
+
+  const age = Math.max(0, now - cache.checkedAt);
+  if (age > maxAgeMs) {
+    return null;
+  }
+
+  return buildLatestReleaseStatusPayload(currentVersion, cache.latest, cache.checkedAt, 'github-cache');
+}
+
+function getGithubApiToken() {
+  for (const envName of GITHUB_TOKEN_ENV_NAMES) {
+    const token = asString(process.env?.[envName]).trim();
+    if (token) {
+      return token;
+    }
+  }
+
+  return '';
+}
+
+function buildGithubRequestHeaders({ etag = '', lastModified = '' } = {}) {
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'CLI-in-One'
+  };
+  const token = getGithubApiToken();
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  if (etag) {
+    headers['If-None-Match'] = etag;
+  } else if (lastModified) {
+    headers['If-Modified-Since'] = lastModified;
+  }
+
+  return headers;
+}
+
+function parsePositiveInteger(value) {
+  const parsed = Number.parseInt(asString(value).trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function formatAbsoluteLocalDateTime(timestamp) {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) {
+    return '';
+  }
+
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    }).format(new Date(timestamp));
+  } catch {
+    return new Date(timestamp).toISOString();
+  }
+}
+
+function getGithubRateLimitResetAt(response) {
+  const retryAfterSeconds = parsePositiveInteger(response?.headers?.get('retry-after'));
+  if (retryAfterSeconds > 0) {
+    return Date.now() + retryAfterSeconds * 1000;
+  }
+
+  const resetAtSeconds = parsePositiveInteger(response?.headers?.get('x-ratelimit-reset'));
+  return resetAtSeconds > 0 ? resetAtSeconds * 1000 : 0;
+}
+
+function isGithubRateLimitResponse(response, detail = '') {
+  if (!response || ![403, 429].includes(response.status)) {
+    return false;
+  }
+
+  if (asString(response.headers?.get('x-ratelimit-remaining')).trim() === '0') {
+    return true;
+  }
+
+  const normalizedDetail = detail.toLowerCase();
+  return normalizedDetail.includes('rate limit');
+}
+
+function createGithubApiError(response, detail = '') {
+  const rateLimitResetAt = getGithubRateLimitResetAt(response);
+  const rateLimited = isGithubRateLimitResponse(response, detail);
+  let message = `GitHub Releases 返回 ${response.status}${detail ? `：${detail}` : ''}`;
+
+  if (rateLimited) {
+    const resetAtText = formatAbsoluteLocalDateTime(rateLimitResetAt);
+    const tokenHint = getGithubApiToken()
+      ? ''
+      : '，或设置环境变量 CLI_IN_ONE_GITHUB_TOKEN、GITHUB_TOKEN 或 GH_TOKEN 以提高限额';
+    message = resetAtText
+      ? `GitHub Releases 已达到速率限制，请在 ${resetAtText} 后重试${tokenHint}。`
+      : `GitHub Releases 已达到速率限制，请稍后重试${tokenHint}。`;
+  }
+
+  const error = new Error(message);
+  error.isGithubRateLimited = rateLimited;
+  error.rateLimitResetAt = rateLimitResetAt;
+  error.status = response?.status || 0;
+  return error;
+}
+
+function extractGithubResponseHeaders(response) {
+  return {
+    etag: asString(response?.headers?.get('etag')).trim(),
+    lastModified: asString(response?.headers?.get('last-modified')).trim()
+  };
+}
+
+async function fetchGithubJsonResponse(
+  url,
+  {
+    allowNotFound = false,
+    allowNotModified = false,
+    etag = '',
+    lastModified = ''
+  } = {}
+) {
+  if (typeof fetch !== 'function') {
+    throw new Error('当前运行环境不支持 fetch。');
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GITHUB_RELEASE_FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      headers: buildGithubRequestHeaders({ etag, lastModified }),
+      signal: controller.signal
+    });
+    const headers = extractGithubResponseHeaders(response);
+
+    if (response.status === 304 && allowNotModified) {
+      return {
+        data: null,
+        headers,
+        notFound: false,
+        notModified: true,
+        url: response.url
+      };
+    }
+
+    if (response.status === 404 && allowNotFound) {
+      return {
+        data: null,
+        headers,
+        notFound: true,
+        notModified: false,
+        url: response.url
+      };
+    }
+
+    if (!response.ok) {
+      let detail = '';
+      try {
+        const payload = await response.json();
+        detail = asString(payload?.message).trim();
+      } catch {
+        detail = await response.text().catch(() => '');
+      }
+      throw createGithubApiError(response, detail);
+    }
+
+    return {
+      data: await response.json(),
+      headers,
+      notFound: false,
+      notModified: false,
+      url: response.url
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('GitHub Releases 请求超时。');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function fetchGithubReleaseForVersion(version) {
@@ -836,78 +1171,119 @@ async function readGithubReleaseChangelog(version) {
 function normalizeGithubReleaseSummary(release) {
   const tagName = asString(release?.tag_name).trim();
   const version = normalizeReleaseVersion(tagName || release?.name);
-  const releaseDate = asString(release?.published_at || release?.created_at).slice(0, 10);
-  const releaseUrl = asString(release?.html_url).trim()
-    || (tagName ? `${GITHUB_RELEASES_URL}/tag/${encodeURIComponent(tagName)}` : GITHUB_RELEASES_URL);
 
-  return {
-    date: releaseDate,
+  return normalizeLatestReleaseSummary({
+    date: asString(release?.published_at || release?.created_at).slice(0, 10),
     draft: Boolean(release?.draft),
     prerelease: Boolean(release?.prerelease),
     tagName,
     title: stripInlineMarkdown(release?.name) || tagName || formatReleaseVersionLabel(version),
-    url: releaseUrl,
+    url: asString(release?.html_url).trim()
+      || (tagName ? `${GITHUB_RELEASES_URL}/tag/${encodeURIComponent(tagName)}` : GITHUB_RELEASES_URL),
     version
-  };
+  });
 }
 
 async function readLatestReleaseStatus(version, options = {}) {
   const currentVersion = normalizeReleaseVersion(version || app.getVersion());
   const now = Date.now();
   const force = options && typeof options === 'object' && options.force === true;
+  const cachedSummary = await loadLatestReleaseStatusCache();
+  const freshCachedStatus = getCachedLatestReleaseStatus(
+    cachedSummary,
+    currentVersion,
+    GITHUB_LATEST_RELEASE_STATUS_CACHE_TTL_MS,
+    now
+  );
 
-  if (
-    !force &&
-    latestReleaseStatusCache &&
-    latestReleaseStatusCache.currentVersion === currentVersion &&
-    now - latestReleaseStatusCache.checkedAt < GITHUB_LATEST_RELEASE_STATUS_CACHE_TTL_MS
-  ) {
-    return latestReleaseStatusCache.payload;
+  if (!force && freshCachedStatus) {
+    return freshCachedStatus;
+  }
+
+  const staleCachedStatus = getCachedLatestReleaseStatus(
+    cachedSummary,
+    currentVersion,
+    GITHUB_LATEST_RELEASE_STATUS_STALE_FALLBACK_MAX_AGE_MS,
+    now
+  );
+
+  if (cachedSummary?.rateLimitResetAt > now) {
+    if (staleCachedStatus) {
+      return staleCachedStatus;
+    }
+
+    return {
+      checkedAt: now,
+      comparison: 0,
+      currentVersion,
+      error: createGithubApiError({
+        headers: {
+          get(name) {
+            return name === 'x-ratelimit-reset'
+              ? String(Math.floor(cachedSummary.rateLimitResetAt / 1000))
+              : '';
+          }
+        },
+        status: 403
+      }, 'API rate limit exceeded').message,
+      found: false,
+      isOutdated: false,
+      latestUrl: GITHUB_RELEASES_URL,
+      latestVersion: '',
+      source: 'github'
+    };
   }
 
   try {
-    const release = await fetchGithubJson(`${GITHUB_RELEASES_API_URL}/latest`, { allowNotFound: true });
-    if (!release) {
-      return {
+    const response = await fetchGithubJsonResponse(`${GITHUB_RELEASES_API_URL}/latest`, {
+      allowNotFound: true,
+      allowNotModified: Boolean(cachedSummary?.etag || cachedSummary?.lastModified),
+      etag: cachedSummary?.etag || '',
+      lastModified: cachedSummary?.lastModified || ''
+    });
+
+    if (response.notModified && cachedSummary) {
+      const nextCache = await persistLatestReleaseStatusCache({
+        ...cachedSummary,
         checkedAt: now,
-        comparison: 0,
-        currentVersion,
-        found: false,
-        isOutdated: false,
-        latestUrl: GITHUB_RELEASES_URL,
-        latestVersion: '',
-        source: 'github'
-      };
+        etag: response.headers.etag || cachedSummary.etag,
+        lastModified: response.headers.lastModified || cachedSummary.lastModified,
+        rateLimitResetAt: 0
+      });
+      return buildLatestReleaseStatusPayload(currentVersion, nextCache.latest, nextCache.checkedAt);
     }
 
-    const latest = normalizeGithubReleaseSummary(release);
-    const comparison = currentVersion && latest.version
-      ? compareReleaseVersions(currentVersion, latest.version)
-      : 0;
-    const payload = {
-      checkedAt: now,
-      comparison,
-      currentVersion,
-      found: Boolean(latest.version),
-      isOutdated: Boolean(currentVersion && latest.version && comparison < 0),
-      latestDate: latest.date,
-      latestDraft: latest.draft,
-      latestPrerelease: latest.prerelease,
-      latestTagName: latest.tagName,
-      latestTitle: latest.title,
-      latestUrl: latest.url,
-      latestVersion: latest.version,
-      source: 'github'
-    };
+    if (response.notFound) {
+      const nextCache = await persistLatestReleaseStatusCache({
+        checkedAt: now,
+        etag: response.headers.etag,
+        lastModified: response.headers.lastModified,
+        latest: null,
+        rateLimitResetAt: 0
+      });
+      return buildLatestReleaseStatusPayload(currentVersion, nextCache.latest, nextCache.checkedAt);
+    }
 
-    latestReleaseStatusCache = {
+    const nextCache = await persistLatestReleaseStatusCache({
       checkedAt: now,
-      currentVersion,
-      payload
-    };
-
-    return payload;
+      etag: response.headers.etag,
+      lastModified: response.headers.lastModified,
+      latest: normalizeGithubReleaseSummary(response.data),
+      rateLimitResetAt: 0
+    });
+    return buildLatestReleaseStatusPayload(currentVersion, nextCache.latest, nextCache.checkedAt);
   } catch (error) {
+    if (Number.isFinite(error?.rateLimitResetAt) && error.rateLimitResetAt > 0) {
+      await persistLatestReleaseStatusCache({
+        ...(cachedSummary || {}),
+        rateLimitResetAt: error.rateLimitResetAt
+      }).catch(() => {});
+    }
+
+    if (staleCachedStatus) {
+      return staleCachedStatus;
+    }
+
     return {
       checkedAt: now,
       comparison: 0,
@@ -995,11 +1371,61 @@ function getCodexHomeDir() {
   return path.join(getManagedSettingsHomesDir(), path.basename(rawHomeDir));
 }
 
-function buildSessionEnv(extraEnv = {}) {
+function getEnvPathKey(env) {
+  return Object.keys(env).find((key) => key.toLowerCase() === 'path') || 'PATH';
+}
+
+function prependEnvPathValue(currentValue, directoryPath) {
+  const current = String(currentValue || '');
+  const normalizedDirectory = path.resolve(directoryPath);
+  const exists = current
+    .split(path.delimiter)
+    .filter(Boolean)
+    .some((item) => path.resolve(item).toLowerCase() === normalizedDirectory.toLowerCase());
+
+  if (exists) {
+    return current;
+  }
+
+  return [directoryPath, current].filter(Boolean).join(path.delimiter);
+}
+
+function applyAgentBridgeEnv(env, sessionMeta = {}) {
+  const pathKey = getEnvPathKey(env);
+  env[pathKey] = prependEnvPathValue(env[pathKey], getAgentBridgeBinDir());
+  env.CLI_IN_ONE_AGENT_BRIDGE_DIR = getAgentBridgeDir();
+  env.CLI_IN_ONE_AGENT_BRIDGE_SESSIONS = getAgentBridgeSessionsPath();
+  env.CLI_IN_ONE_NODE_PATH = process.execPath;
+
+  const sessionId = asString(sessionMeta.id).trim();
+  if (sessionId) {
+    env.CLI_IN_ONE_SESSION_ID = sessionId;
+  }
+
+  const sessionTitle = asString(sessionMeta.title).trim();
+  if (sessionTitle) {
+    env.CLI_IN_ONE_SESSION_TITLE = sessionTitle;
+  }
+
+  const sessionCwd = asString(sessionMeta.cwd).trim();
+  if (sessionCwd) {
+    env.CLI_IN_ONE_SESSION_CWD = sessionCwd;
+  }
+
+  const cliProviderId = asString(sessionMeta.cliProviderId).trim();
+  if (cliProviderId) {
+    env.CLI_IN_ONE_SESSION_CLI = cliProviderId;
+  }
+
+  return env;
+}
+
+function buildSessionEnv(extraEnv = {}, sessionMeta = {}) {
   const env = {
     ...process.env,
     ...extraEnv
   };
+  applyAgentBridgeEnv(env, sessionMeta);
   const codexHomeDir = getCodexHomeDir();
 
   if (codexHomeDir === path.resolve(os.homedir())) {
@@ -1509,6 +1935,7 @@ function getWorkspaceTreeReadOptions(options = {}) {
     includeRoot: options.includeRoot !== false,
     includeText: options.includeText === true,
     ignoreHeavyDirectories: options.ignoreHeavyDirectories !== false,
+    lazy: options.lazy === true,
     maxChildrenPerDirectory: coerceWorkspaceTreeLimit(
       options.maxChildrenPerDirectory,
       WORKSPACE_TREE_MAX_CHILDREN_PER_DIRECTORY,
@@ -1580,8 +2007,141 @@ function shouldIncludeWorkspaceSkillFile(sourceId, relativePath) {
   return workspaceSkillGithubAllowedDirectoryNames.has(firstSegment);
 }
 
+function getWorkspaceSkillSourceBasePath(rootPath, source) {
+  return source?.scope === 'global' ? os.homedir() : rootPath;
+}
+
+function isWorkspaceSkillDefinitionFile(fileName) {
+  return String(fileName || '').trim().toLowerCase() === 'skill.md';
+}
+
+function normalizeWorkspaceSkillSlashName(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^\//, '')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120);
+}
+
+function normalizeWorkspaceSkillMetadataValue(value) {
+  const trimmed = String(value || '').trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === '"' && last === '"') || (first === '\'' && last === '\'')) {
+      return trimmed.slice(1, -1).trim();
+    }
+  }
+
+  return trimmed;
+}
+
+function parseWorkspaceSkillMarkdown(content) {
+  const text = String(content || '').replace(/^\uFEFF/, '');
+  const frontmatterMatch = text.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+
+  if (!frontmatterMatch) {
+    return {
+      body: text.trim(),
+      metadata: {}
+    };
+  }
+
+  const metadata = {};
+  frontmatterMatch[1].split(/\r?\n/g).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) {
+      return;
+    }
+
+    const match = trimmed.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+    if (!match) {
+      return;
+    }
+
+    metadata[match[1].toLowerCase()] = normalizeWorkspaceSkillMetadataValue(match[2]);
+  });
+
+  return {
+    body: text.slice(frontmatterMatch[0].length).trim(),
+    metadata
+  };
+}
+
+async function readWorkspaceSkillMarkdownContent(filePath) {
+  const stats = await fs.promises.stat(filePath);
+  const byteLength = Math.min(stats.size, WORKSPACE_SKILL_MAX_CONTENT_BYTES);
+  let content = '';
+
+  if (byteLength > 0) {
+    const file = await fs.promises.open(filePath, 'r');
+    try {
+      const buffer = Buffer.alloc(byteLength);
+      await file.read(buffer, 0, byteLength, 0);
+      content = buffer.toString('utf8');
+    } finally {
+      await file.close();
+    }
+  }
+
+  return {
+    content,
+    contentTruncated: stats.size > WORKSPACE_SKILL_MAX_CONTENT_BYTES
+  };
+}
+
+async function readWorkspaceSkillDefinition(source, filePath, relativePath) {
+  let content = '';
+  let contentTruncated = false;
+  let readError = '';
+
+  try {
+    const payload = await readWorkspaceSkillMarkdownContent(filePath);
+    content = payload.content;
+    contentTruncated = payload.contentTruncated;
+  } catch (error) {
+    readError = error.message || String(error);
+  }
+
+  const parsed = parseWorkspaceSkillMarkdown(content);
+  const normalizedRelativePath = normalizeWorkspaceSkillRelativePath(relativePath);
+  const directoryRelativePath = normalizeWorkspaceSkillRelativePath(path.dirname(relativePath));
+  const fallbackName = normalizeWorkspaceSkillSlashName(
+    path.basename(directoryRelativePath === '.' ? path.dirname(filePath) : directoryRelativePath)
+  );
+  const rawName = normalizeWorkspaceSkillMetadataValue(parsed.metadata.name) || fallbackName;
+  const slashName = normalizeWorkspaceSkillSlashName(rawName);
+
+  if (!slashName) {
+    return null;
+  }
+
+  return {
+    id: [
+      source.id,
+      source.scope || 'project',
+      normalizeWorkspaceSkillRelativePath(relativePath)
+    ].filter(Boolean).join(':'),
+    name: rawName,
+    slashName,
+    description: normalizeWorkspaceSkillMetadataValue(parsed.metadata.description),
+    path: filePath,
+    directoryPath: path.dirname(filePath),
+    relativePath: normalizedRelativePath,
+    directoryRelativePath: directoryRelativePath === '.' ? '' : directoryRelativePath,
+    sourceId: source.id,
+    sourceDirectoryName: source.directoryName,
+    sourceScope: source.scope || 'project',
+    content,
+    body: parsed.body || content.trim(),
+    contentTruncated,
+    error: readError
+  };
+}
+
 async function readWorkspaceSkillSourceSnapshot(rootPath, source) {
-  const sourcePath = path.join(rootPath, source.directoryName);
+  const sourcePath = path.join(getWorkspaceSkillSourceBasePath(rootPath, source), source.directoryName);
   let sourceStats = null;
 
   try {
@@ -1642,6 +2202,7 @@ async function readWorkspaceSkillSourceSnapshot(rootPath, source) {
   }
 
   const files = [];
+  const skills = [];
   let truncated = false;
 
   const walk = async (directoryPath, relativeDirectoryPath, depth) => {
@@ -1687,6 +2248,17 @@ async function readWorkspaceSkillSourceSnapshot(rootPath, source) {
         path: path.join(directoryPath, entry.name),
         relativePath: normalizeWorkspaceSkillRelativePath(nextRelativePath)
       });
+
+      if (isWorkspaceSkillDefinitionFile(entry.name)) {
+        const skill = await readWorkspaceSkillDefinition(
+          source,
+          path.join(directoryPath, entry.name),
+          nextRelativePath
+        );
+        if (skill) {
+          skills.push(skill);
+        }
+      }
     }
   };
 
@@ -1709,14 +2281,22 @@ async function readWorkspaceSkillSourceSnapshot(rootPath, source) {
     numeric: true,
     sensitivity: 'base'
   }));
+  skills.sort((left, right) => (
+    left.slashName.localeCompare(right.slashName, undefined, { numeric: true, sensitivity: 'base' })
+    || left.relativePath.localeCompare(right.relativePath, undefined, { numeric: true, sensitivity: 'base' })
+  ));
 
   return {
     id: source.id,
+    label: source.label || '',
+    scope: source.scope || 'project',
     directoryName: source.directoryName,
     exists: true,
     fileCount: files.length,
     files,
     path: sourcePath,
+    skillCount: skills.length,
+    skills,
     truncated
   };
 }
@@ -1739,6 +2319,7 @@ async function readWorkspaceTreeSnapshot(options = {}) {
     path: cwd,
     relativePath: '',
     type: 'directory',
+    childrenLoaded: true,
     children: []
   } : null;
 
@@ -1837,6 +2418,7 @@ async function readWorkspaceTreeSnapshot(options = {}) {
         path: entryPath,
         relativePath: normalizedRelativePath,
         type: entryIsDirectory ? 'directory' : entryIsLink ? 'link' : 'file',
+        childrenLoaded: entryIsDirectory ? (entryIsIgnored || entryIsLink ? true : !readOptions.lazy) : undefined,
         ignored: entryIsIgnored,
         link: entryIsLink,
         children: []
@@ -1853,6 +2435,10 @@ async function readWorkspaceTreeSnapshot(options = {}) {
         }
 
         if (entryIsLink) {
+          continue;
+        }
+
+        if (readOptions.lazy) {
           continue;
         }
 
@@ -1899,22 +2485,495 @@ async function readWorkspaceTreeSnapshot(options = {}) {
   };
 }
 
+function runGitWorkspaceCommand(cwd, args, options = {}) {
+  const maxBytes = clampNumber(options.maxBytes, 1024, WORKSPACE_DIFF_MAX_BYTES, WORKSPACE_DIFF_MAX_BYTES);
+  const timeoutMs = clampNumber(
+    options.timeoutMs,
+    1000,
+    WORKSPACE_DIFF_COMMAND_TIMEOUT_MS,
+    WORKSPACE_DIFF_COMMAND_TIMEOUT_MS
+  );
+
+  return new Promise((resolve) => {
+    const child = spawn('git', args, {
+      cwd,
+      env: buildSessionEnv(),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    const chunks = [];
+    const errorChunks = [];
+    let byteCount = 0;
+    let errorByteCount = 0;
+    let truncated = false;
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      truncated = true;
+      child.kill();
+    }, timeoutMs);
+
+    const collect = (buffer, targetChunks, countName) => {
+      if (truncated) {
+        return;
+      }
+
+      const nextBytes = countName === 'stderr'
+        ? errorByteCount + buffer.length
+        : byteCount + buffer.length;
+      if (nextBytes > maxBytes) {
+        const remaining = Math.max(0, maxBytes - (countName === 'stderr' ? errorByteCount : byteCount));
+        if (remaining > 0) {
+          targetChunks.push(buffer.subarray(0, remaining));
+        }
+        truncated = true;
+        child.kill();
+        return;
+      }
+
+      targetChunks.push(buffer);
+      if (countName === 'stderr') {
+        errorByteCount = nextBytes;
+      } else {
+        byteCount = nextBytes;
+      }
+    };
+
+    child.stdout.on('data', (buffer) => collect(buffer, chunks, 'stdout'));
+    child.stderr.on('data', (buffer) => collect(buffer, errorChunks, 'stderr'));
+    child.on('error', (error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        code: -1,
+        error: error.message,
+        stderr: error.message,
+        stdout: '',
+        truncated
+      });
+    });
+    child.on('close', (code) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        code,
+        error: '',
+        stderr: Buffer.concat(errorChunks).toString('utf8'),
+        stdout: Buffer.concat(chunks).toString('utf8'),
+        truncated
+      });
+    });
+  });
+}
+
+function normalizeGitCommandText(value) {
+  return asString(value).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+}
+
+async function readWorkspaceDiffSnapshot(options = {}) {
+  const cwd = resolveExistingDirectoryOrThrow(options.cwd);
+  const maxBytes = clampNumber(options.maxBytes, 16 * 1024, WORKSPACE_DIFF_MAX_BYTES, WORKSPACE_DIFF_MAX_BYTES);
+  const rootResult = await runGitWorkspaceCommand(cwd, ['rev-parse', '--show-toplevel'], {
+    maxBytes: 16 * 1024
+  });
+
+  if (rootResult.code !== 0) {
+    throw new Error(normalizeGitCommandText(rootResult.stderr) || '当前目录不是 Git 仓库。');
+  }
+
+  const repositoryRoot = normalizeGitCommandText(rootResult.stdout) || cwd;
+  const commandMaxBytes = Math.max(16 * 1024, Math.floor(maxBytes / 2));
+  const [statusResult, stagedStatResult, unstagedStatResult, stagedDiffResult, unstagedDiffResult] = await Promise.all([
+    runGitWorkspaceCommand(cwd, ['status', '--short'], { maxBytes: 64 * 1024 }),
+    runGitWorkspaceCommand(cwd, ['diff', '--cached', '--stat', '--no-color'], { maxBytes: 64 * 1024 }),
+    runGitWorkspaceCommand(cwd, ['diff', '--stat', '--no-color'], { maxBytes: 64 * 1024 }),
+    runGitWorkspaceCommand(cwd, ['diff', '--cached', '--no-color', '--no-ext-diff'], { maxBytes: commandMaxBytes }),
+    runGitWorkspaceCommand(cwd, ['diff', '--no-color', '--no-ext-diff'], { maxBytes: commandMaxBytes })
+  ]);
+  const failedResult = [statusResult, stagedStatResult, unstagedStatResult, stagedDiffResult, unstagedDiffResult]
+    .find((result) => result.code !== 0 && normalizeGitCommandText(result.stderr));
+
+  if (failedResult) {
+    throw new Error(normalizeGitCommandText(failedResult.stderr));
+  }
+
+  const status = normalizeGitCommandText(statusResult.stdout);
+  const stagedStat = normalizeGitCommandText(stagedStatResult.stdout);
+  const unstagedStat = normalizeGitCommandText(unstagedStatResult.stdout);
+  const stagedDiff = normalizeGitCommandText(stagedDiffResult.stdout);
+  const unstagedDiff = normalizeGitCommandText(unstagedDiffResult.stdout);
+  const sections = [];
+
+  if (status) {
+    sections.push(`Status:\n${status}`);
+  }
+  if (stagedStat) {
+    sections.push(`Staged diff stat:\n${stagedStat}`);
+  }
+  if (stagedDiff) {
+    sections.push(`Staged diff:\n${stagedDiff}`);
+  }
+  if (unstagedStat) {
+    sections.push(`Unstaged diff stat:\n${unstagedStat}`);
+  }
+  if (unstagedDiff) {
+    sections.push(`Unstaged diff:\n${unstagedDiff}`);
+  }
+
+  const truncated = [statusResult, stagedStatResult, unstagedStatResult, stagedDiffResult, unstagedDiffResult]
+    .some((result) => result.truncated);
+  if (truncated) {
+    sections.push('[cli-in-one] Diff output was truncated.');
+  }
+
+  return {
+    cwd,
+    generatedAt: Date.now(),
+    repositoryRoot,
+    stagedDiff,
+    stagedStat,
+    status,
+    text: sections.join('\n\n'),
+    truncated,
+    unstagedDiff,
+    unstagedStat
+  };
+}
+
 async function readWorkspaceSkillsSnapshot(options = {}) {
   const cwd = resolveExistingDirectoryOrThrow(options.cwd);
   const scopes = [];
   let totalFiles = 0;
+  let totalSkills = 0;
+  const seenSkillPaths = new Set();
 
   for (const source of workspaceSkillSources) {
     const snapshot = await readWorkspaceSkillSourceSnapshot(cwd, source);
+    if (Array.isArray(snapshot.skills) && snapshot.skills.length > 0) {
+      snapshot.skills = snapshot.skills.filter((skill) => {
+        const skillPath = asString(skill?.path).trim();
+        if (!skillPath) {
+          return false;
+        }
+
+        const key = path.resolve(skillPath).toLowerCase();
+        if (seenSkillPaths.has(key)) {
+          return false;
+        }
+
+        seenSkillPaths.add(key);
+        return true;
+      });
+      snapshot.skillCount = snapshot.skills.length;
+    }
     scopes.push(snapshot);
     totalFiles += snapshot.fileCount || 0;
+    totalSkills += snapshot.skillCount || 0;
   }
 
   return {
     cwd,
     scannedAt: Date.now(),
     scopes,
-    totalFiles
+    totalFiles,
+    totalSkills
+  };
+}
+
+function normalizeAgentContextText(value, maxChars = AGENT_CONTEXT_TEXT_MAX_CHARS) {
+  const text = asString(value)
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\u0000/g, '');
+
+  if (text.length <= maxChars) {
+    return {
+      text: text.trimEnd(),
+      truncated: false
+    };
+  }
+
+  return {
+    text: text.slice(0, maxChars).trimEnd(),
+    truncated: true
+  };
+}
+
+function looksLikeBinaryBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+    return false;
+  }
+
+  let controlCount = 0;
+  const sampleLength = Math.min(buffer.length, 4096);
+  for (let index = 0; index < sampleLength; index += 1) {
+    const value = buffer[index];
+    if (value === 0) {
+      return true;
+    }
+    if (value < 32 && value !== 9 && value !== 10 && value !== 13 && value !== 8) {
+      controlCount += 1;
+    }
+  }
+
+  return controlCount / sampleLength > 0.08;
+}
+
+async function readFileHead(filePath, maxBytes) {
+  const handle = await fs.promises.open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function resolveWorkspaceContextFile(options = {}) {
+  const cwd = resolveExistingDirectoryOrThrow(options.cwd);
+  const requestedPath = asString(options.path || options.targetPath || options.filePath)
+    .trim()
+    .replace(/^@+/, '');
+
+  if (!requestedPath) {
+    throw new Error('请选择要加入上下文的文件。');
+  }
+
+  const candidatePath = path.isAbsolute(requestedPath)
+    ? path.resolve(requestedPath)
+    : path.resolve(cwd, requestedPath);
+  const relativePath = path.relative(cwd, candidatePath);
+
+  if (!isPathInside(cwd, candidatePath)) {
+    throw new Error('只能读取当前工作区内的文件。');
+  }
+
+  const stats = await fs.promises.stat(candidatePath).catch((error) => {
+    if (error && error.code === 'ENOENT') {
+      throw new Error('选择的文件不存在。');
+    }
+    throw error;
+  });
+
+  if (!stats.isFile()) {
+    throw new Error('只能把文件加入上下文。');
+  }
+
+  const [cwdRealPath, fileRealPath] = await Promise.all([
+    fs.promises.realpath(cwd),
+    fs.promises.realpath(candidatePath)
+  ]);
+  if (!isPathInside(cwdRealPath, fileRealPath)) {
+    throw new Error('只能读取当前工作区内的文件。');
+  }
+
+  return {
+    cwd,
+    path: candidatePath,
+    relativePath: normalizeWorkspaceTreeRelativePath(relativePath),
+    size: stats.size
+  };
+}
+
+async function readWorkspaceFileContext(options = {}) {
+  const file = await resolveWorkspaceContextFile(options);
+  const bytesToRead = Math.min(file.size, AGENT_CONTEXT_FILE_MAX_BYTES);
+  const buffer = await readFileHead(file.path, bytesToRead);
+
+  if (looksLikeBinaryBuffer(buffer)) {
+    throw new Error('这个文件看起来不是文本文件。');
+  }
+
+  const normalized = normalizeAgentContextText(buffer.toString('utf8'));
+  const truncated = normalized.truncated || file.size > AGENT_CONTEXT_FILE_MAX_BYTES;
+
+  return {
+    cwd: file.cwd,
+    path: file.path,
+    relativePath: file.relativePath,
+    name: path.basename(file.path),
+    size: file.size,
+    truncated,
+    content: normalized.text
+  };
+}
+
+function decodeBasicHtmlEntities(value) {
+  return asString(value)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_match, hex) => {
+      const codePoint = Number.parseInt(hex, 16);
+      return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10FFFF
+        ? String.fromCodePoint(codePoint)
+        : '';
+    })
+    .replace(/&#(\d+);/g, (_match, digits) => {
+      const codePoint = Number.parseInt(digits, 10);
+      return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10FFFF
+        ? String.fromCodePoint(codePoint)
+        : '';
+    });
+}
+
+function extractHtmlTitle(content) {
+  const match = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(asString(content));
+  if (!match) {
+    return '';
+  }
+
+  return decodeBasicHtmlEntities(match[1])
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
+}
+
+function extractReadableTextFromHtml(content) {
+  const withoutNoise = asString(content)
+    .replace(/<script\b[\s\S]*?<\/script>/gi, '\n')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, '\n')
+    .replace(/<noscript\b[\s\S]*?<\/noscript>/gi, '\n')
+    .replace(/<svg\b[\s\S]*?<\/svg>/gi, '\n')
+    .replace(/<!--[\s\S]*?-->/g, '\n');
+  const text = withoutNoise
+    .replace(/<(?:br|hr)\b[^>]*>/gi, '\n')
+    .replace(/<\/(?:p|div|section|article|header|footer|main|aside|nav|li|tr|h[1-6]|pre|blockquote)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+
+  return decodeBasicHtmlEntities(text)
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+async function readFetchResponseBuffer(response, maxBytes) {
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return {
+      buffer: buffer.length > maxBytes ? buffer.subarray(0, maxBytes) : buffer,
+      truncated: buffer.length > maxBytes
+    };
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  let truncated = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      const chunk = Buffer.from(value);
+      if (totalBytes + chunk.length > maxBytes) {
+        chunks.push(chunk.subarray(0, Math.max(0, maxBytes - totalBytes)));
+        totalBytes = maxBytes;
+        truncated = true;
+        await reader.cancel().catch(() => {});
+        break;
+      }
+
+      chunks.push(chunk);
+      totalBytes += chunk.length;
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+
+  return {
+    buffer: Buffer.concat(chunks, totalBytes),
+    truncated
+  };
+}
+
+async function fetchAgentContextUrl(options = {}) {
+  const rawUrl = asString(options.url).trim();
+  if (!rawUrl) {
+    throw new Error('请输入要加入上下文的 URL。');
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(rawUrl);
+  } catch {
+    throw new Error('URL 地址无效。');
+  }
+
+  if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') {
+    throw new Error('只支持 http(s) URL。');
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AGENT_CONTEXT_FETCH_TIMEOUT_MS);
+  let response;
+
+  try {
+    response = await fetch(parsedUrl.toString(), {
+      headers: {
+        Accept: 'text/html,text/plain,application/json,application/xml;q=0.9,*/*;q=0.5',
+        'User-Agent': 'CLI-in-One-Agent-Context/1.0'
+      },
+      redirect: 'follow',
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('URL 读取超时。');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    throw new Error(`URL 读取失败：HTTP ${response.status}`);
+  }
+
+  const contentType = asString(response.headers.get('content-type')).split(';')[0].trim().toLowerCase();
+  const contentLength = Number.parseInt(response.headers.get('content-length') || '', 10);
+  if (Number.isFinite(contentLength) && contentLength > AGENT_CONTEXT_URL_MAX_BYTES * 4) {
+    throw new Error('URL 内容太大，无法加入上下文。');
+  }
+
+  const body = await readFetchResponseBuffer(response, AGENT_CONTEXT_URL_MAX_BYTES);
+  if (looksLikeBinaryBuffer(body.buffer)) {
+    throw new Error('URL 返回的内容看起来不是文本。');
+  }
+
+  const rawContent = body.buffer.toString('utf8');
+  const html = contentType === 'text/html' || /<\/?[a-z][\s\S]*>/i.test(rawContent);
+  const extractedText = html ? extractReadableTextFromHtml(rawContent) : rawContent;
+  const normalized = normalizeAgentContextText(extractedText);
+
+  return {
+    url: response.url || parsedUrl.toString(),
+    requestedUrl: parsedUrl.toString(),
+    title: html ? extractHtmlTitle(rawContent) : '',
+    contentType,
+    truncated: body.truncated || normalized.truncated,
+    content: normalized.text
   };
 }
 
@@ -2034,12 +3093,619 @@ async function pruneEmptyLegacyTempSettingsHomes() {
   }));
 }
 
+function getAgentBridgeHelperScript() {
+  return String.raw`#!/usr/bin/env node
+const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+function usage() {
+  return [
+    'CLI in One agent bridge',
+    '',
+    'Usage:',
+    '  cli-in-one sessions',
+    '  cli-in-one dispatch --target <session-id-or-title> --message "<task>"',
+    '  cli-in-one dispatch --target <session-id-or-title> --file task.txt',
+    '  cli-in-one dispatch --target <session-id-or-title> --stdin',
+    '',
+    'Options:',
+    '  -t, --target <value>   Target live session id, id prefix, exact title, or unique title fragment.',
+    '  -m, --message <text>   Text to send to the target session.',
+    '  -f, --file <path>      Read message text from a file.',
+    '      --stdin            Read message text from standard input.',
+    '      --no-enter         Send text without the final Enter key.',
+    '      --timeout <ms>     Wait time for bridge acknowledgement. Default: 10000.'
+  ].join(os.EOL);
+}
+
+function fail(message, code = 1) {
+  console.error(message);
+  process.exit(code);
+}
+
+function getBridgeDir() {
+  const bridgeDir = String(process.env.CLI_IN_ONE_AGENT_BRIDGE_DIR || '').trim();
+  if (!bridgeDir) {
+    fail('CLI_IN_ONE_AGENT_BRIDGE_DIR is not set. Run this command inside a CLI in One session.');
+  }
+  return bridgeDir;
+}
+
+function parseArgs(argv) {
+  const result = {
+    flags: new Set(),
+    positionals: [],
+    values: {}
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (!arg.startsWith('-') || arg === '-') {
+      result.positionals.push(arg);
+      continue;
+    }
+
+    const eqIndex = arg.indexOf('=');
+    const rawName = eqIndex > 0 ? arg.slice(0, eqIndex) : arg;
+    const name = rawName.replace(/^-+/, '');
+    const valueFromEquals = eqIndex > 0 ? arg.slice(eqIndex + 1) : null;
+    const expectsValue = new Set(['t', 'target', 'm', 'message', 'f', 'file', 'timeout']).has(name);
+
+    if (expectsValue) {
+      const value = valueFromEquals !== null ? valueFromEquals : argv[index + 1];
+      if (typeof value === 'undefined' || (value.startsWith('-') && valueFromEquals === null)) {
+        fail('Missing value for --' + name);
+      }
+      if (valueFromEquals === null) {
+        index += 1;
+      }
+      result.values[name] = value;
+      continue;
+    }
+
+    result.flags.add(name);
+  }
+
+  return result;
+}
+
+function readJsonFile(filePath, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function formatCell(value, width) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= width) {
+    return text.padEnd(width, ' ');
+  }
+  return text.slice(0, Math.max(0, width - 1)) + '…';
+}
+
+function printSessions() {
+  const bridgeDir = getBridgeDir();
+  const sessionsPath = process.env.CLI_IN_ONE_AGENT_BRIDGE_SESSIONS
+    || path.join(bridgeDir, 'sessions.json');
+  const payload = readJsonFile(sessionsPath, { sessions: [] });
+  const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+  const currentId = String(process.env.CLI_IN_ONE_SESSION_ID || '');
+
+  if (sessions.length === 0) {
+    console.log('No live CLI in One sessions were published yet.');
+    return;
+  }
+
+  console.log([
+    formatCell('ID', 12),
+    formatCell('TITLE', 28),
+    formatCell('CLI', 14),
+    formatCell('SELF', 5),
+    'CWD'
+  ].join('  '));
+
+  for (const session of sessions) {
+    const id = String(session.id || '');
+    console.log([
+      formatCell(id.slice(0, 12), 12),
+      formatCell(session.title || '', 28),
+      formatCell(session.cliProviderId || '', 14),
+      formatCell(id === currentId ? 'yes' : '', 5),
+      String(session.cwd || '')
+    ].join('  '));
+  }
+}
+
+function readDispatchMessage(args) {
+  const message = args.values.message ?? args.values.m;
+  if (typeof message === 'string') {
+    return message;
+  }
+
+  const filePath = args.values.file ?? args.values.f;
+  if (typeof filePath === 'string') {
+    return fs.readFileSync(path.resolve(filePath), 'utf8');
+  }
+
+  if (args.flags.has('stdin')) {
+    return fs.readFileSync(0, 'utf8');
+  }
+
+  return args.positionals.join(' ');
+}
+
+function sleep(ms) {
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, ms);
+}
+
+function waitForResponse(responsePath, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    if (fs.existsSync(responsePath)) {
+      const response = readJsonFile(responsePath, null);
+      try {
+        fs.rmSync(responsePath, { force: true });
+      } catch {}
+      return response;
+    }
+    sleep(100);
+  }
+  return null;
+}
+
+function dispatch(args) {
+  const target = String(args.values.target ?? args.values.t ?? '').trim();
+  if (!target) {
+    fail('Missing --target. Run "cli-in-one sessions" to choose a target session.');
+  }
+
+  const message = readDispatchMessage(args);
+  if (!String(message || '').trim()) {
+    fail('Missing message. Use --message, --file, --stdin, or positional text.');
+  }
+
+  const bridgeDir = getBridgeDir();
+  const inboxDir = path.join(bridgeDir, 'inbox');
+  const responsesDir = path.join(bridgeDir, 'responses');
+  fs.mkdirSync(inboxDir, { recursive: true });
+  fs.mkdirSync(responsesDir, { recursive: true });
+
+  const id = Date.now() + '-' + process.pid + '-' + crypto.randomBytes(6).toString('hex');
+  const responsePath = path.join(responsesDir, id + '.json');
+  const requestPath = path.join(inboxDir, id + '.json');
+  const tempPath = requestPath + '.tmp';
+  const timeoutValue = Number.parseInt(args.values.timeout || '10000', 10);
+  const timeoutMs = Number.isFinite(timeoutValue) ? Math.max(1000, timeoutValue) : 10000;
+  const request = {
+    version: 1,
+    id,
+    type: 'dispatch',
+    target,
+    message,
+    enter: !args.flags.has('no-enter'),
+    sourceSessionId: String(process.env.CLI_IN_ONE_SESSION_ID || ''),
+    sourceSessionTitle: String(process.env.CLI_IN_ONE_SESSION_TITLE || ''),
+    createdAt: Date.now(),
+    responsePath
+  };
+
+  fs.writeFileSync(tempPath, JSON.stringify(request, null, 2), 'utf8');
+  fs.renameSync(tempPath, requestPath);
+
+  const response = waitForResponse(responsePath, timeoutMs);
+  if (!response) {
+    fail('Timed out waiting for CLI in One to process the dispatch request.');
+  }
+  if (!response.ok) {
+    fail(response.error || 'Dispatch failed.');
+  }
+
+  console.log(response.message || ('Dispatched to ' + (response.targetTitle || response.targetId || target) + '.'));
+}
+
+const command = String(process.argv[2] || 'help').trim().toLowerCase();
+const args = parseArgs(process.argv.slice(3));
+
+if (command === 'sessions' || command === 'list' || command === 'ls') {
+  printSessions();
+} else if (command === 'dispatch' || command === 'send') {
+  dispatch(args);
+} else if (command === 'help' || command === '--help' || command === '-h') {
+  console.log(usage());
+} else {
+  console.error('Unknown command: ' + command);
+  console.log('');
+  console.log(usage());
+  process.exit(1);
+}
+`;
+}
+
+function getAgentBridgeCmdScript() {
+  return [
+    '@echo off',
+    'setlocal',
+    'if not defined CLI_IN_ONE_NODE_PATH set "CLI_IN_ONE_NODE_PATH=node"',
+    'set "ELECTRON_RUN_AS_NODE=1"',
+    '"%CLI_IN_ONE_NODE_PATH%" "%~dp0cli-in-one-agent.js" %*',
+    'exit /b %ERRORLEVEL%',
+    ''
+  ].join('\r\n');
+}
+
+function getAgentBridgePowerShellScript() {
+  return [
+    '$node = $env:CLI_IN_ONE_NODE_PATH',
+    'if ([string]::IsNullOrWhiteSpace($node)) { $node = "node" }',
+    '$env:ELECTRON_RUN_AS_NODE = "1"',
+    '& $node "$PSScriptRoot\\cli-in-one-agent.js" @args',
+    'exit $LASTEXITCODE',
+    ''
+  ].join('\n');
+}
+
+function getAgentBridgeUnixScript() {
+  return [
+    '#!/usr/bin/env sh',
+    'set -eu',
+    ': "${CLI_IN_ONE_NODE_PATH:=node}"',
+    'SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"',
+    'ELECTRON_RUN_AS_NODE=1 "$CLI_IN_ONE_NODE_PATH" "$SCRIPT_DIR/cli-in-one-agent.js" "$@"',
+    ''
+  ].join('\n');
+}
+
+async function writeTextFileIfChanged(filePath, content, options = {}) {
+  let current = null;
+  try {
+    current = await fs.promises.readFile(filePath, 'utf8');
+  } catch (error) {
+    if (!error || error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  if (current === content) {
+    return false;
+  }
+
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.promises.writeFile(filePath, content, 'utf8');
+  if (Number.isFinite(options.mode)) {
+    await fs.promises.chmod(filePath, options.mode).catch(() => {});
+  }
+  return true;
+}
+
+async function ensureAgentBridgeFiles() {
+  const bridgeDir = getAgentBridgeDir();
+  const binDir = getAgentBridgeBinDir();
+
+  await Promise.all([
+    fs.promises.mkdir(getAgentBridgeInboxDir(), { recursive: true }),
+    fs.promises.mkdir(getAgentBridgeResponsesDir(), { recursive: true }),
+    fs.promises.mkdir(binDir, { recursive: true })
+  ]);
+
+  await Promise.all([
+    writeTextFileIfChanged(
+      path.join(binDir, AGENT_BRIDGE_HELPER_FILE_NAME),
+      getAgentBridgeHelperScript(),
+      { mode: 0o755 }
+    ),
+    writeTextFileIfChanged(
+      path.join(binDir, AGENT_BRIDGE_COMMAND_FILE_NAME),
+      getAgentBridgeCmdScript()
+    ),
+    writeTextFileIfChanged(
+      path.join(binDir, AGENT_BRIDGE_POWERSHELL_FILE_NAME),
+      getAgentBridgePowerShellScript()
+    ),
+    writeTextFileIfChanged(
+      path.join(binDir, AGENT_BRIDGE_UNIX_COMMAND_FILE_NAME),
+      getAgentBridgeUnixScript(),
+      { mode: 0o755 }
+    )
+  ]);
+
+  await fs.promises.mkdir(bridgeDir, { recursive: true });
+}
+
+function writeJsonFileAtomicSync(filePath, payload) {
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(tempPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  fs.renameSync(tempPath, filePath);
+}
+
+function serializeAgentBridgeSession(session) {
+  return {
+    backend: session.backend || '',
+    cliProviderId: session.cliProviderId || 'shell',
+    createdAt: session.createdAt || Date.now(),
+    cwd: session.cwd || '',
+    id: session.id,
+    initialCommand: session.initialCommand || '',
+    title: session.title || session.id
+  };
+}
+
+function publishAgentBridgeSessions() {
+  try {
+    const liveSessions = Array.from(sessions.values())
+      .filter((session) => session && !session.exited && session.process)
+      .map(serializeAgentBridgeSession)
+      .sort((left, right) => (left.createdAt || 0) - (right.createdAt || 0));
+
+    writeJsonFileAtomicSync(getAgentBridgeSessionsPath(), {
+      app: 'CLI in One',
+      publishedAt: Date.now(),
+      sessions: liveSessions,
+      version: 1
+    });
+  } catch (error) {
+    console.warn(`[agent-bridge] failed to publish sessions: ${error.message}`);
+  }
+}
+
+function normalizeAgentBridgeDispatchInput(message, enter = true) {
+  const normalized = String(message || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const payload = normalized.replace(/\n/g, '\r');
+  return enter && !payload.endsWith('\r') ? `${payload}\r` : payload;
+}
+
+function getAgentBridgeLiveSessions() {
+  return Array.from(sessions.values()).filter((session) => (
+    session && !session.exited && session.process
+  ));
+}
+
+function findUniqueAgentBridgeSession(candidates, description) {
+  if (candidates.length === 1) {
+    return candidates[0];
+  }
+  if (candidates.length > 1) {
+    const names = candidates
+      .slice(0, 5)
+      .map((session) => `${session.title || session.id} (${session.id.slice(0, 8)})`)
+      .join(', ');
+    throw new Error(`目标 ${description} 匹配到多个会话：${names}`);
+  }
+  return null;
+}
+
+function resolveAgentBridgeTargetSession(target, sourceSessionId = '') {
+  const normalizedTarget = asString(target).trim();
+  const liveSessions = getAgentBridgeLiveSessions();
+  if (!normalizedTarget) {
+    throw new Error('缺少目标会话。请先运行 cli-in-one sessions 查看可用目标。');
+  }
+
+  if (normalizedTarget.toLowerCase() === 'self') {
+    const selfSession = liveSessions.find((session) => session.id === sourceSessionId);
+    if (!selfSession) {
+      throw new Error('当前会话不可用，无法使用 self 作为目标。');
+    }
+    return selfSession;
+  }
+
+  const exactId = liveSessions.find((session) => session.id === normalizedTarget);
+  if (exactId) {
+    return exactId;
+  }
+
+  const lowerTarget = normalizedTarget.toLowerCase();
+  const exactTitle = liveSessions.find((session) => (
+    asString(session.title).trim().toLowerCase() === lowerTarget
+  ));
+  if (exactTitle) {
+    return exactTitle;
+  }
+
+  const idPrefixMatch = findUniqueAgentBridgeSession(
+    liveSessions.filter((session) => session.id.toLowerCase().startsWith(lowerTarget)),
+    `id 前缀 "${normalizedTarget}"`
+  );
+  if (idPrefixMatch) {
+    return idPrefixMatch;
+  }
+
+  const titleFragmentMatch = findUniqueAgentBridgeSession(
+    liveSessions.filter((session) => asString(session.title).trim().toLowerCase().includes(lowerTarget)),
+    `标题片段 "${normalizedTarget}"`
+  );
+  if (titleFragmentMatch) {
+    return titleFragmentMatch;
+  }
+
+  throw new Error(`未找到目标会话：${normalizedTarget}`);
+}
+
+async function writeAgentBridgeResponse(request, response) {
+  const responsePath = path.resolve(asString(request?.responsePath).trim());
+  if (!responsePath || !isPathInside(getAgentBridgeResponsesDir(), responsePath)) {
+    return;
+  }
+
+  await fs.promises.mkdir(path.dirname(responsePath), { recursive: true });
+  await fs.promises.writeFile(responsePath, `${JSON.stringify(response, null, 2)}\n`, 'utf8');
+}
+
+function pruneAgentBridgeResponses() {
+  const responsesDir = getAgentBridgeResponsesDir();
+  const cutoff = Date.now() - AGENT_BRIDGE_RESPONSE_TTL_MS;
+
+  fs.promises.readdir(responsesDir, { withFileTypes: true }).then((entries) => (
+    Promise.all(entries.map(async (entry) => {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) {
+        return;
+      }
+
+      const responsePath = path.join(responsesDir, entry.name);
+      try {
+        const stats = await fs.promises.stat(responsePath);
+        if (stats.mtimeMs < cutoff) {
+          await fs.promises.rm(responsePath, { force: true });
+        }
+      } catch {
+        // Response pruning is best-effort only.
+      }
+    }))
+  )).catch(() => {});
+}
+
+async function handleAgentBridgeRequest(request) {
+  if (!request || typeof request !== 'object' || request.type !== 'dispatch') {
+    throw new Error('不支持的 agent bridge 请求。');
+  }
+
+  const message = asString(request.message);
+  if (!message.trim()) {
+    throw new Error('分配内容为空。');
+  }
+  if (message.length > AGENT_BRIDGE_MESSAGE_MAX_CHARS) {
+    throw new Error(`分配内容过长，最多 ${AGENT_BRIDGE_MESSAGE_MAX_CHARS} 个字符。`);
+  }
+
+  const targetSession = resolveAgentBridgeTargetSession(request.target, request.sourceSessionId);
+  const payload = normalizeAgentBridgeDispatchInput(message, request.enter !== false);
+  if (!payload) {
+    throw new Error('分配内容为空。');
+  }
+
+  const wrote = writeToSessionProcess(targetSession, payload);
+  if (!wrote) {
+    throw new Error(`无法写入目标会话：${targetSession.title || targetSession.id}`);
+  }
+
+  if (targetSession.backend !== 'conpty') {
+    appendTerminalTranscript(targetSession, payload);
+  }
+
+  sendToRenderer(mainWindow?.webContents, 'agent-bridge:dispatch', {
+    id: asString(request.id).trim(),
+    message,
+    sourceSessionId: asString(request.sourceSessionId).trim(),
+    sourceSessionTitle: asString(request.sourceSessionTitle).trim(),
+    targetId: targetSession.id,
+    targetTitle: targetSession.title || targetSession.id,
+    timestamp: Date.now()
+  });
+
+  return {
+    message: `Dispatched to ${targetSession.title || targetSession.id} (${targetSession.id.slice(0, 8)}).`,
+    targetId: targetSession.id,
+    targetTitle: targetSession.title || targetSession.id
+  };
+}
+
+async function processAgentBridgeRequestFile(filePath) {
+  let request = null;
+  try {
+    const stats = await fs.promises.stat(filePath);
+    if (!stats.isFile() || stats.size > AGENT_BRIDGE_REQUEST_MAX_BYTES) {
+      throw new Error('agent bridge 请求文件无效或过大。');
+    }
+    request = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+    const result = await handleAgentBridgeRequest(request);
+    await writeAgentBridgeResponse(request, {
+      ok: true,
+      ...result
+    });
+  } catch (error) {
+    if (request) {
+      await writeAgentBridgeResponse(request, {
+        ok: false,
+        error: error?.message || String(error)
+      });
+    }
+    console.warn(`[agent-bridge] failed to process request: ${error?.message || error}`);
+  } finally {
+    await fs.promises.rm(filePath, { force: true }).catch(() => {});
+  }
+}
+
+function scheduleAgentBridgeInboxScan(delayMs = 80) {
+  if (agentBridgeInboxScanTimer) {
+    return;
+  }
+
+  agentBridgeInboxScanTimer = setTimeout(() => {
+    agentBridgeInboxScanTimer = null;
+    scanAgentBridgeInbox().catch((error) => {
+      console.warn(`[agent-bridge] inbox scan failed: ${error.message}`);
+    });
+  }, delayMs);
+
+  agentBridgeInboxScanTimer.unref?.();
+}
+
+async function scanAgentBridgeInbox() {
+  if (agentBridgeInboxProcessing) {
+    scheduleAgentBridgeInboxScan(120);
+    return;
+  }
+
+  agentBridgeInboxProcessing = true;
+  try {
+    const inboxDir = getAgentBridgeInboxDir();
+    const entries = await fs.promises.readdir(inboxDir, { withFileTypes: true }).catch((error) => {
+      if (error && error.code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    });
+    const requestFiles = entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .map((entry) => path.join(inboxDir, entry.name))
+      .sort();
+
+    for (const requestFile of requestFiles) {
+      await processAgentBridgeRequestFile(requestFile);
+    }
+  } finally {
+    agentBridgeInboxProcessing = false;
+  }
+}
+
+async function startAgentBridgeWatcher() {
+  await ensureAgentBridgeFiles();
+  publishAgentBridgeSessions();
+  pruneAgentBridgeResponses();
+  scheduleAgentBridgeInboxScan(0);
+
+  try {
+    agentBridgeWatcher?.close();
+  } catch {}
+
+  try {
+    agentBridgeWatcher = fs.watch(getAgentBridgeInboxDir(), { persistent: false }, () => {
+      scheduleAgentBridgeInboxScan();
+    });
+  } catch (error) {
+    console.warn(`[agent-bridge] fs.watch unavailable: ${error.message}`);
+  }
+
+  const pollTimer = setInterval(() => {
+    scheduleAgentBridgeInboxScan(0);
+    pruneAgentBridgeResponses();
+  }, 1000);
+  pollTimer.unref?.();
+}
+
 async function prepareProgramStorage() {
   await fs.promises.mkdir(getProgramStorageDir(), { recursive: true }).catch(() => {});
   await movePathIfMissing(getLegacyDefaultHistoryDir(), getDefaultHistoryDir()).catch(() => {});
   await movePathIfMissing(getLegacyCodexQuickProfilesPath(), getCodexQuickProfilesPath()).catch(() => {});
   await migrateLegacyTempSettingsHomes();
   await pruneEmptyLegacyTempSettingsHomes();
+  await ensureAgentBridgeFiles();
 }
 
 function sendToRenderer(webContents, channel, payload) {
@@ -2720,7 +4386,8 @@ function createDefaultImageApiConfig() {
     model: IMAGE_API_DEFAULT_MODEL,
     n: IMAGE_API_DEFAULT_COUNT,
     size: IMAGE_API_DEFAULT_SIZE,
-    upscale: IMAGE_API_DEFAULT_UPSCALE
+    upscale: IMAGE_API_DEFAULT_UPSCALE,
+    requestEditorEnabled: false
   };
 }
 
@@ -2802,7 +4469,8 @@ function normalizeImageApiConfig(raw = {}, previousConfig = createDefaultImageAp
     model: asString(raw?.model, previous.model).trim() || IMAGE_API_DEFAULT_MODEL,
     n: normalizeImageApiCount(raw?.n ?? previous.n),
     size: normalizeImageApiSize(raw?.size ?? previous.size),
-    upscale: normalizeImageApiUpscale(raw?.upscale ?? previous.upscale)
+    upscale: normalizeImageApiUpscale(raw?.upscale ?? previous.upscale),
+    requestEditorEnabled: Boolean(raw?.requestEditorEnabled ?? previous.requestEditorEnabled)
   };
 }
 
@@ -2820,7 +4488,8 @@ function redactImageApiConfig(config) {
     model: normalized.model || IMAGE_API_DEFAULT_MODEL,
     n: normalizeImageApiCount(normalized.n),
     size: normalized.size || IMAGE_API_DEFAULT_SIZE,
-    upscale: normalizeImageApiUpscale(normalized.upscale)
+    upscale: normalizeImageApiUpscale(normalized.upscale),
+    requestEditorEnabled: Boolean(normalized.requestEditorEnabled)
   };
 }
 
@@ -2890,7 +4559,7 @@ function normalizeImageApiHistoryItem(record, index = 0) {
   const kind = rawKind === 'task' && !pathValue && !normalizedPath ? 'task' : 'image';
   const status = normalizeImageApiHistoryStatus(record.status, kind === 'task' ? 'failed' : 'success');
 
-  if (kind === 'task' && !IMAGE_API_FAILED_STATUSES.has(status)) {
+  if (kind === 'task' && status !== 'success' && !IMAGE_API_FAILED_STATUSES.has(status)) {
     return null;
   }
 
@@ -2922,7 +4591,22 @@ function normalizeImageApiHistoryItem(record, index = 0) {
     normalizedPath,
     path: pathValue || normalizedPath,
     prompt: asString(record.prompt),
-    error: asString(record.error).trim()
+    error: asString(record.error).trim(),
+    pollEvents: Array.isArray(record.pollEvents)
+      ? record.pollEvents.map((event, eventIndex) => serializeImageApiPollEvent(event, eventIndex))
+      : [],
+    successPayload: typeof record.successPayload === 'undefined'
+      ? null
+      : sanitizeImageApiPayload(record.successPayload),
+    failurePayload: typeof record.failurePayload === 'undefined'
+      ? null
+      : sanitizeImageApiPayload(record.failurePayload),
+    requestParams: typeof record.requestParams === 'undefined'
+      ? null
+      : sanitizeImageApiPayload(record.requestParams),
+    requestBody: typeof record.requestBody === 'undefined'
+      ? null
+      : sanitizeImageApiPayload(record.requestBody)
   };
 }
 
@@ -3238,6 +4922,67 @@ async function fetchImageApiJson(url, options = {}, timeoutMs = IMAGE_API_DISPAT
   return body;
 }
 
+function getImageApiRequestParams(value) {
+  const source = getJsonObject(value);
+  const params = {};
+
+  Object.entries(source).forEach(([key, entryValue]) => {
+    const paramName = asString(key).trim();
+    if (!paramName) {
+      return;
+    }
+
+    if (entryValue === null || typeof entryValue === 'undefined') {
+      params[paramName] = '';
+      return;
+    }
+
+    if (Array.isArray(entryValue)) {
+      params[paramName] = entryValue
+        .filter((item) => item !== null && typeof item !== 'undefined')
+        .map((item) => typeof item === 'object' ? JSON.stringify(item) : String(item));
+      return;
+    }
+
+    params[paramName] = typeof entryValue === 'object' ? JSON.stringify(entryValue) : String(entryValue);
+  });
+
+  return params;
+}
+
+function applyImageApiRequestParams(requestUrl, params) {
+  requestUrl.search = '';
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (Array.isArray(value)) {
+      value.forEach((item) => requestUrl.searchParams.append(key, item));
+      return;
+    }
+
+    requestUrl.searchParams.set(key, value);
+  });
+}
+
+async function normalizeImageApiRequestBodyReferenceImages(body, fallbackReferences = []) {
+  const rawBody = getJsonObject(body);
+  const nextBody = { ...rawBody };
+  const sourceReferences = Array.isArray(rawBody.reference_images)
+    ? rawBody.reference_images
+    : fallbackReferences;
+  const referenceImages = await normalizeImageApiReferenceImages(sourceReferences);
+
+  if (referenceImages.length > 0) {
+    nextBody.reference_images = referenceImages;
+  } else if (Array.isArray(rawBody.reference_images)) {
+    delete nextBody.reference_images;
+  }
+
+  return {
+    body: nextBody,
+    referenceImageCount: referenceImages.length
+  };
+}
+
 function getImageApiResultUrlEntries(result, config) {
   const entries = [];
   const seen = new Set();
@@ -3343,6 +5088,12 @@ function serializeImageApiTask(task) {
     failurePayload: typeof task?.failurePayload === 'undefined'
       ? null
       : sanitizeImageApiPayload(task.failurePayload),
+    requestParams: typeof task?.requestParams === 'undefined'
+      ? null
+      : sanitizeImageApiPayload(task.requestParams),
+    requestBody: typeof task?.requestBody === 'undefined'
+      ? null
+      : sanitizeImageApiPayload(task.requestBody),
     creditCost: task?.creditCost ?? null,
     error: asString(task?.error)
   };
@@ -3590,11 +5341,6 @@ async function finishImageApiTask(webContents, task, config, dispatched) {
 }
 
 async function generateImageWithApi(options = {}, context = {}) {
-  const prompt = asString(options.prompt).trim();
-  if (!prompt) {
-    throw new Error('请输入图片提示词。');
-  }
-
   const savedConfig = await readImageApiConfig({ includeSecret: true });
   const config = {
     ...savedConfig,
@@ -3605,30 +5351,48 @@ async function generateImageWithApi(options = {}, context = {}) {
   };
   const { generationUrl } = buildImageApiUrls(config.baseUrl);
   const requestUrl = new URL(generationUrl);
-  requestUrl.searchParams.set('async', '1');
+  const requestParams = getImageApiRequestParams(
+    Object.prototype.hasOwnProperty.call(options || {}, 'requestParams')
+      ? options.requestParams
+      : { async: '1' }
+  );
+  applyImageApiRequestParams(requestUrl, requestParams);
 
-  const body = {
+  const defaultBody = {
     model: config.model || IMAGE_API_DEFAULT_MODEL,
-    prompt,
+    prompt: asString(options.prompt).trim(),
     n: normalizeImageApiCount(config.n),
     size: config.size || IMAGE_API_DEFAULT_SIZE
   };
   if (config.upscale) {
-    body.upscale = config.upscale;
+    defaultBody.upscale = config.upscale;
   }
-  const referenceImages = await normalizeImageApiReferenceImages(options.referenceImageUrls);
-  if (referenceImages.length > 0) {
-    body.reference_images = referenceImages;
+
+  const customBody = Object.prototype.hasOwnProperty.call(options || {}, 'requestBody')
+    ? getJsonObject(options.requestBody)
+    : null;
+  const requestBodySource = customBody ? { ...customBody } : defaultBody;
+  if (!asString(requestBodySource.prompt).trim() && defaultBody.prompt) {
+    requestBodySource.prompt = defaultBody.prompt;
   }
+  const { body, referenceImageCount } = await normalizeImageApiRequestBodyReferenceImages(
+    requestBodySource,
+    options.referenceImageUrls
+  );
+  const prompt = asString(body.prompt).trim();
+  if (!prompt) {
+    throw new Error('请输入图片提示词。');
+  }
+  const taskCount = Number.parseInt(body.n, 10);
 
   const task = {
     id: normalizeImageApiClientTaskId(options.clientTaskId || options.id),
     taskId: '',
-    model: body.model,
-    n: body.n,
-    size: body.size,
-    upscale: config.upscale,
-    referenceImageCount: referenceImages.length,
+    model: asString(body.model, config.model).trim() || IMAGE_API_DEFAULT_MODEL,
+    n: Number.isFinite(taskCount) ? taskCount : normalizeImageApiCount(config.n),
+    size: asString(body.size, config.size).trim() || IMAGE_API_DEFAULT_SIZE,
+    upscale: normalizeImageApiUpscaleLoose(body.upscale ?? config.upscale),
+    referenceImageCount,
     status: 'submitting',
     prompt,
     created: null,
@@ -3640,6 +5404,8 @@ async function generateImageWithApi(options = {}, context = {}) {
     pollEvents: [],
     successPayload: null,
     failurePayload: null,
+    requestParams: sanitizeImageApiPayload(requestParams),
+    requestBody: sanitizeImageApiPayload(body),
     creditCost: null,
     error: ''
   };
@@ -3821,6 +5587,11 @@ async function createTerminalSession(webContents, options = {}) {
         env: buildSessionEnv({
           COLORTERM: 'truecolor',
           TERM: 'xterm-256color'
+        }, {
+          cliProviderId: cliProvider?.id || requestedCliProviderId,
+          cwd,
+          id,
+          title
         })
       });
     } catch (error) {
@@ -3869,6 +5640,7 @@ async function createTerminalSession(webContents, options = {}) {
         current.process = null;
         recordUsageForSession(current, endedAt);
       }
+      publishAgentBridgeSessions();
       sendToRenderer(webContents, 'terminal:exit', {
         id,
         exitCode,
@@ -3877,10 +5649,16 @@ async function createTerminalSession(webContents, options = {}) {
     });
 
     sessions.set(id, session);
+    publishAgentBridgeSessions();
   } else {
     const proc = spawn(shell, args, {
       cwd,
-      env: buildSessionEnv(),
+      env: buildSessionEnv({}, {
+        cliProviderId: cliProvider?.id || requestedCliProviderId,
+        cwd,
+        id,
+        title
+      }),
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe']
     });
@@ -3928,6 +5706,7 @@ async function createTerminalSession(webContents, options = {}) {
         current.process = null;
         recordUsageForSession(current, endedAt);
       }
+      publishAgentBridgeSessions();
       sendToRenderer(webContents, 'terminal:exit', {
         id,
         exitCode,
@@ -3936,6 +5715,7 @@ async function createTerminalSession(webContents, options = {}) {
     });
 
     sessions.set(id, session);
+    publishAgentBridgeSessions();
 
     if (ptyStartError) {
       const data = `\r\n[cli-in-one] node-pty failed to start ${shell}: ${ptyStartError.message}\r\n[cli-in-one] fell back to pipe mode.\r\n`;
@@ -3981,8 +5761,23 @@ function updateTerminalSessionMeta(id, patch = {}) {
     session.codexProviderName = asString(patch.codexProviderName).trim();
   }
 
+  if (Object.prototype.hasOwnProperty.call(patch, 'cliProviderId')) {
+    const cliProvider = getCliProviderById(asString(patch.cliProviderId).trim());
+    if (cliProvider) {
+      session.cliProviderId = cliProvider.id;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'initialCommand')) {
+    session.initialCommand = asString(patch.initialCommand).trim();
+  }
+
+  publishAgentBridgeSessions();
+
   return {
     id: session.id,
+    cliProviderId: session.cliProviderId || '',
+    initialCommand: session.initialCommand || '',
     title: session.title,
     codexModel: session.codexModel || '',
     codexProviderName: session.codexProviderName || ''
@@ -4031,6 +5826,7 @@ function killSession(id) {
   session.signal = session.signal || 'killed';
   recordUsageForSession(session, endedAt);
   sessions.delete(id);
+  publishAgentBridgeSessions();
   return true;
 }
 
@@ -5816,6 +7612,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   await prepareProgramStorage();
+  await startAgentBridgeWatcher();
 
   ipcMain.handle('app:info', async () => {
     const historyDir = getDefaultHistoryDir();
@@ -5881,8 +7678,20 @@ app.whenReady().then(async () => {
     return readWorkspaceTreeSnapshot(options || {});
   });
 
+  ipcMain.handle('workspace:read-diff', (_event, options = {}) => {
+    return readWorkspaceDiffSnapshot(options || {});
+  });
+
   ipcMain.handle('workspace:read-skills', (_event, options = {}) => {
     return readWorkspaceSkillsSnapshot(options || {});
+  });
+
+  ipcMain.handle('agent-context:read-file', (_event, options = {}) => {
+    return readWorkspaceFileContext(options || {});
+  });
+
+  ipcMain.handle('agent-context:fetch-url', (_event, options = {}) => {
+    return fetchAgentContextUrl(options || {});
   });
 
   ipcMain.handle('codex-config:read', (_event, kind = 'config') => {
@@ -6143,7 +7952,12 @@ app.whenReady().then(async () => {
   });
 });
 
-app.on('before-quit', killAllSessions);
+app.on('before-quit', () => {
+  try {
+    agentBridgeWatcher?.close();
+  } catch {}
+  killAllSessions();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

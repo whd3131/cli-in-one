@@ -7,6 +7,7 @@ import {
   Archive,
   BrainCircuit,
   Bot,
+  CalendarClock,
   Check,
   ChevronDown,
   ChevronRight,
@@ -14,6 +15,7 @@ import {
   ClipboardPaste,
   Cpu,
   ExternalLink,
+  FileDiff,
   FolderOpen,
   FolderPlus,
   GitBranch,
@@ -50,8 +52,10 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { DiffReviewModal } from '@/components/DiffReviewModal';
 import { FloatingCommandDock } from '@/components/FloatingCommandDock';
 import { ImageGenerationCanvasPage } from '@/components/ImageGenerationCanvasPage';
+import { PromptManagementDialog } from '@/components/PromptManagementDialog';
 import { SessionReviewModal } from '@/components/SessionReviewModal';
 import { WorkspaceTreeSidebar } from '@/components/WorkspaceTreeSidebar';
 import { Input } from '@/components/ui/input';
@@ -78,6 +82,7 @@ import {
 import {
   appendSessionReviewOutput,
   buildSessionReviewSummaryText,
+  getSessionReviewPreviewText,
   getSessionReviewStatusCounts
 } from '@/lib/sessionReview';
 import { getWorkspaceTreeInsertPath } from '@/lib/workspaceTree';
@@ -92,6 +97,7 @@ const bridge = window.cliBridge;
 const settingsKey = 'cli-in-one.settings.v3';
 const workspaceKey = 'cli-in-one.workspace.v1';
 const agentsKey = 'cli-in-one.agents.v1';
+const autopilotKey = 'cli-in-one.autopilot.v1';
 const appLogoUrl = `${import.meta.env.BASE_URL}logo.webp`;
 const imageApiHelpUrl = 'https://github.com/432539/gpt2api';
 const releasePageUrl = 'https://github.com/whd3131/cli-in-one/releases';
@@ -120,6 +126,18 @@ const canvasTodoMinWidth = 280;
 const canvasTodoMinHeight = 240;
 const canvasTodoDefaultWidth = 340;
 const canvasTodoDefaultHeight = 420;
+const agentPlanTodoDefaultWidth = 380;
+const agentPlanTodoDefaultHeight = 500;
+const agentPlanTodoGap = 22;
+const canvasTodoPlanTextMaxLength = 6000;
+const canvasTodoTaskTextMaxLength = 260;
+const canvasTodoOutputCarryMaxChars = 1200;
+const canvasTodoPlanStatusOrder = {
+  todo: 0,
+  in_progress: 1,
+  blocked: 1,
+  done: 2
+};
 const canvasConnectionTones = [
   { color: '#7c3aed', glow: 'rgba(124, 58, 237, 0.2)' },
   { color: '#0d9488', glow: 'rgba(13, 148, 136, 0.2)' },
@@ -138,6 +156,7 @@ const appZoomStep = 0.05;
 const appZoomPresetFactors = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75];
 const systemStatsRefreshMs = 2000;
 const terminalScrollbackLines = 1500;
+const terminalPanelOpenDurationMs = 250;
 const memoryUsageWarningThreshold = 0.85;
 const memoryUsageCriticalThreshold = 0.95;
 const panelIdleThresholdMs = 12000;
@@ -146,6 +165,14 @@ const agentTaskSubmitDelayMs = 1800;
 const commandDockTaskSubmitDelayMs = 1800;
 const commandDockDispatchSparkleMs = 5200;
 const commandDockHistoryLimit = 10;
+const commandDockContextMaxItems = 24;
+const commandDockContextTextMaxChars = 80000;
+const commandDockTerminalContextMaxChars = 24000;
+const autopilotSchedulerIntervalMs = 30000;
+const autopilotDefaultTime = '09:00';
+const autopilotDefaultCronExpression = '0 9 * * 1-5';
+const autopilotScheduleTypes = new Set(['daily', 'weekday', 'weekly', 'cron']);
+const autopilotWeekdayIds = ['1', '2', '3', '4', '5', '6', '0'];
 const workspaceSkillsInitialLoadDelayMs = 180;
 const commandDockShortcutOptions = [
   { id: 'enter', label: 'Enter', ctrlKey: false, shiftKey: false, altKey: false, metaKey: false },
@@ -356,6 +383,7 @@ const cliProviderMap = new Map(
 const defaultCliProviderId = cliProviderMap.has('codex')
   ? 'codex'
   : (cliProviders[0]?.id || 'shell');
+const shellCliProviderId = 'shell';
 
 function getLocalizedCliValue(source, language, fallback = '') {
   if (source && typeof source === 'object') {
@@ -560,6 +588,59 @@ function getPanelCliProvider(panel) {
   return resolveCliProvider(panel?.cliProviderId, panel?.initialCommand);
 }
 
+function isAgentCliProvider(provider) {
+  const providerId = String(provider?.id || '').trim();
+  return Boolean(providerId && providerId !== shellCliProviderId);
+}
+
+function collectSubmittedTerminalCommands(buffer, data) {
+  const commands = [];
+  let nextBuffer = String(buffer || '').slice(-500);
+  let skippingEscape = false;
+
+  for (const character of String(data || '')) {
+    if (skippingEscape) {
+      if (/[A-Za-z~]/.test(character)) {
+        skippingEscape = false;
+      }
+      continue;
+    }
+
+    if (character === '\x1b') {
+      skippingEscape = true;
+      continue;
+    }
+
+    if (character === '\r' || character === '\n') {
+      const command = nextBuffer.trim();
+      if (command) {
+        commands.push(command);
+      }
+      nextBuffer = '';
+      continue;
+    }
+
+    if (character === '\x03' || character === '\x15' || character === '\x18') {
+      nextBuffer = '';
+      continue;
+    }
+
+    if (character === '\b' || character === '\x7f') {
+      nextBuffer = nextBuffer.slice(0, -1);
+      continue;
+    }
+
+    if (character >= ' ' && character !== '\x7f') {
+      nextBuffer = `${nextBuffer}${character}`.slice(-500);
+    }
+  }
+
+  return {
+    buffer: nextBuffer,
+    commands
+  };
+}
+
 const terminalThemes = {
   dark: {
     background: '#090a0c',
@@ -673,7 +754,8 @@ const imageApiConfigDefaults = {
   n: 1,
   path: '',
   size: '1024x1024',
-  upscale: ''
+  upscale: '',
+  requestEditorEnabled: false
 };
 
 const approvalPolicyOptions = ['', 'untrusted', 'on-request', 'never'];
@@ -721,6 +803,7 @@ const messages = {
     pinProject: '置顶项目',
     unpinProject: '取消置顶',
     dragProject: '拖拽排序',
+    completedProjectSessionsBadge: '该项目有 {count} 个已完成会话',
     codexConfig: 'Codex 配置',
     projects: '项目',
     projectEmpty: '选择一个目录后会在这里管理项目。',
@@ -739,6 +822,11 @@ const messages = {
     addSession: '新增会话',
     sessionList: '当前会话',
     sessionListEmpty: '当前视图还没有会话，点击上方新增会话。',
+    canvasSessionStatusQueue: '会话状态',
+    canvasSessionStatusRefresh: '刷新会话状态',
+    canvasSessionStatusUpdatedAt: '更新 {time}',
+    canvasSessionStatusFocus: '定位会话',
+    canvasSessionStatusEndpoint: '端点',
     agents: 'Agents',
     agentsDialogTitle: 'Agents',
     agentsDialogDescription: '保存可复用的 agent instructions，并把任务分配给指定 CLI 自动启动。',
@@ -750,6 +838,11 @@ const messages = {
     agentNamePlaceholder: '例如：代码审查、测试修复、文档整理',
     agentInstructions: 'Agent instructions',
     agentInstructionsPlaceholder: '写下这个 Agent 每次执行任务时都要遵循的角色、约束和工作方式。',
+    agentSkills: '关联 Skills',
+    agentSkillsHint: '启动 Agent 时会把已选 skill 的目录路径注入任务提示词。',
+    agentSkillsSelectedCount: '已选 {count}',
+    agentSkillsEmpty: '当前工作区没有可关联的 skill。',
+    agentSkillMissing: '未在当前扫描结果中',
     agentAvatar: '头像',
     uploadAgentAvatar: '上传头像',
     removeAgentAvatar: '移除头像',
@@ -767,6 +860,67 @@ const messages = {
     agentAvatarSaveFailed: '头像上传失败：{message}',
     agentAvatarInvalid: '请选择图片文件。',
     agentDeleteConfirm: '确认删除 Agent“{name}”？',
+    agentUtilityBarTitle: 'Agent 工具栏',
+    agentUtilityQuickTarget: '设为目标',
+    agentUtilityQuickTargetTitle: '设为快捷发送目标',
+    agentUtilityAttachImage: '图片',
+    agentUtilityAttachImageTitle: '添加图片上下文到快捷发送',
+    agentUtilityFiles: '文件',
+    agentUtilityFilesTitle: '打开文件树并加入文件上下文',
+    agentUtilityDiff: 'Diff',
+    agentUtilityDiffTitle: '插入当前 Git diff',
+    agentUtilityDiffLoading: '读取中',
+    agentUtilityReview: '审阅',
+    agentUtilityReviewTitle: '打开 Diff/Review 面板并定位该会话',
+    agentUtilityTargetReady: '快捷发送目标已切换到 {name}',
+    agentUtilityDiffContextHeader: '当前 Git diff（{path}）',
+    agentUtilityDiffEmpty: '当前工作区没有 Git diff。',
+    agentUtilityDiffInserted: '已插入 Git diff 上下文。',
+    agentUtilityDiffFailed: '读取 Git diff 失败：{message}',
+    agentUtilityPanelMissing: '未找到这个 Agent 会话。',
+    autopilot: 'Autopilot',
+    autopilotDialogTitle: 'Autopilot',
+    autopilotDialogDescription: '配置启动后自动运行的 runbook，分配给已有 Agent，并按计划触发。',
+    autopilotEmpty: '还没有 Autopilot。新增一个 runbook 并选择 Agent。',
+    newAutopilot: '新增 Autopilot',
+    saveAutopilot: '保存 Autopilot',
+    deleteAutopilot: '删除 Autopilot',
+    autopilotName: '名称',
+    autopilotNamePlaceholder: '例如：每日巡检、工作日构建检查',
+    autopilotAgent: '分配 Agent',
+    autopilotRunbook: 'Runbook',
+    autopilotRunbookPlaceholder: '写下自动执行时要交给 Agent 的完整 runbook。',
+    autopilotEnabled: '启用计划运行',
+    autopilotSchedule: 'Schedule',
+    autopilotScheduleDaily: 'Daily',
+    autopilotScheduleWeekday: 'Weekday',
+    autopilotScheduleWeekly: 'Weekly',
+    autopilotScheduleCron: 'Custom cron',
+    autopilotTime: '时间',
+    autopilotWeekday: '星期',
+    autopilotCron: 'Cron',
+    autopilotCronPlaceholder: '例如：0 9 * * 1-5',
+    autopilotLastRun: '上次运行',
+    autopilotNextRun: '下次运行',
+    autopilotNeverRun: '从未运行',
+    autopilotNotScheduled: '未排程',
+    autopilotRunNow: '立即运行',
+    autopilotRequired: '请先选择或新增一个 Autopilot。',
+    autopilotAgentRequired: '请选择要分配的 Agent。',
+    autopilotRunbookRequired: 'Runbook 不能为空。',
+    autopilotCronInvalid: 'Cron 表达式必须是 5 段，并使用有效的分钟、小时、日期、月份和星期字段。',
+    autopilotSaved: 'Autopilot 已保存：{name}',
+    autopilotDeleted: 'Autopilot 已删除：{name}',
+    autopilotStarted: 'Autopilot 已启动：{name}',
+    autopilotMissingAgent: 'Autopilot「{name}」找不到分配的 Agent。',
+    autopilotDeleteConfirm: '确认删除 Autopilot“{name}”？',
+    weekdayMonday: '周一',
+    weekdayTuesday: '周二',
+    weekdayWednesday: '周三',
+    weekdayThursday: '周四',
+    weekdayFriday: '周五',
+    weekdaySaturday: '周六',
+    weekdaySunday: '周日',
     addCommandLine: '新增 CMD',
     addProjectDialogTitle: '新增项目',
     addProjectDialogDescription: '先配置项目目录和名称，确认后再加入侧边栏。',
@@ -889,6 +1043,14 @@ const messages = {
     canvasTodoEmpty: '还没有待办。',
     canvasTodoProgress: '{done}/{total} 完成',
     canvasTodoProgressEmpty: '0 个待办',
+    canvasTodoPlan: 'Plan',
+    canvasTodoPlanPlaceholder: '写下计划、背景或验收标准。',
+    canvasTodoTasks: 'Tasks',
+    canvasTodoAutoSync: '从输出同步',
+    canvasTodoManualSync: '手动维护',
+    canvasTodoLinkedSession: '绑定会话：{name}',
+    agentPlanTodoTitle: '{name} Plan',
+    agentPlanTodoCreated: '已为 Agent 创建 Plan/Todo 卡片。',
     groupEndpoints: '分组端点',
     ungroupEndpoints: '取消分组',
     endpointGroup: '端点组',
@@ -925,7 +1087,7 @@ const messages = {
     floatingComposerTargetNoMatch: '没有匹配的会话。',
     floatingComposerUnavailable: '当前画布没有可接收输入的会话。',
     floatingComposerPlaceholder: '输入内容后发送到 {name}',
-    floatingComposerHint: '{sendShortcut} 发送，{dispatchShortcut} 分发任务，Shift+Enter 换行，粘贴或拖拽图片会保存到程序目录的 .files',
+    floatingComposerHint: '{sendShortcut} 发送，{dispatchShortcut} 分发任务，Shift+Enter 换行，粘贴或拖拽图片会加入上下文包',
     floatingComposerCurrent: '当前',
     floatingComposerSend: '发送',
     floatingComposerCollapse: '收起快捷发送',
@@ -938,6 +1100,27 @@ const messages = {
     floatingComposerImagesAdded: '已添加 {count} 张图片',
     floatingComposerImageMissingDir: '未找到可保存图片的目录。',
     floatingComposerImageSaveFailed: '图片保存失败：{message}',
+    floatingComposerContextPack: '上下文包',
+    floatingComposerContextCount: '{count} 项上下文',
+    floatingComposerContextEmpty: '暂无上下文',
+    floatingComposerContextClear: '清空上下文包',
+    floatingComposerContextRemove: '移除上下文',
+    floatingComposerContextAddFile: '从文件树选择项目文件',
+    floatingComposerContextAddTerminalSelection: '加入终端选区',
+    floatingComposerContextAddLatestOutput: '加入目标会话最近输出',
+    floatingComposerContextAddSelectedText: '加入选中文本或剪贴板',
+    floatingComposerContextAddUrl: '加入 URL 内容',
+    floatingComposerContextAdded: '已加入上下文：{name}',
+    floatingComposerContextAddFailed: '加入上下文失败：{message}',
+    floatingComposerContextNoTerminalSelection: '先在某个终端里选中输出。',
+    floatingComposerContextNoSelectedText: '没有可加入的选中文本或剪贴板文本。',
+    floatingComposerContextSelectedText: '选中文本',
+    floatingComposerContextFile: '文件',
+    floatingComposerContextImage: '图片',
+    floatingComposerContextUrl: 'URL',
+    floatingComposerContextTerminalSelection: '终端选区',
+    floatingComposerContextTerminalOutput: '终端输出',
+    floatingComposerUrlPrompt: '输入要加入上下文的 URL',
     imageGeneration: 'GPT 生图',
     imageGenerationTitle: 'GPT 生图',
     imageGenerationDescription: '使用已配置的图像 API 生成图片。',
@@ -990,10 +1173,19 @@ const messages = {
     imageGenerationTaskIdLabel: 'Task ID',
     imageGenerationFailureReason: '失败原因',
     imageGenerationPollHistory: '轮询记录',
+    imageGenerationPollHistoryCount: '{count} 次轮询',
     imageGenerationPollResult: '轮询 #{index}',
+    imageGenerationRequestParams: '请求参数',
+    imageGenerationRequestBody: '请求体',
+    imageGenerationRequestEditor: '请求编辑器',
+    imageGenerationRequestEditorReset: '同步当前 UI',
+    imageGenerationRequestJsonInvalid: '{name} 必须是 JSON 对象：{message}',
+    imageGenerationRequestPromptRequired: '请求体里需要 prompt，或在提示词输入框填写 prompt。',
     imageGenerationSuccessPayload: '成功 Payload',
     imageGenerationFailurePayload: '失败 Payload',
     imageGenerationNoPayload: '暂无 payload',
+    imageGenerationViewFullPrompt: '查看完整提示词',
+    imageGenerationViewFullPayload: '查看完整 Payload',
     imageGenerationCopyReference: '复制图片引用',
     imageGenerationOpenFile: '打开图片',
     imageGenerationCopied: '图片引用已复制。',
@@ -1036,6 +1228,19 @@ const messages = {
     quickPromptLoadFailed: '读取常用 prompt 失败：{message}',
     quickPromptSaveFailed: '保存常用 prompt 失败：{message}',
     quickPromptDeleteFailed: '删除常用 prompt 失败：{message}',
+    promptMenu: '提示词',
+    promptManagerTitle: '提示词管理中心',
+    promptManagerDescription: '维护快捷发送里的常用 prompt。',
+    promptManagerNew: '新增 prompt',
+    promptManagerEmpty: '还没有常用 prompt。',
+    promptManagerTitleLabel: '标题',
+    promptManagerTitlePlaceholder: '给这个 prompt 起个名字',
+    promptManagerContentLabel: 'Prompt 内容',
+    promptManagerContentPlaceholder: '输入常用 prompt 内容',
+    promptManagerDiscardConfirm: '当前 prompt 有未保存更改，确认丢弃？',
+    promptManagerSaved: '已保存：{name}',
+    promptManagerDeleted: '已删除：{name}',
+    promptManagerCount: '{count} 条',
     sessionRuntime: '运行',
     sessionContext: '上下文',
     exportSession: '导出会话',
@@ -1043,6 +1248,8 @@ const messages = {
     sessionExported: '已导出：{path}',
     exportSessionFailed: '导出失败：{message}',
     historyFolder: '历史记录',
+    openHistoryFolder: '打开历史记录',
+    historyFolderUnavailable: '历史目录未就绪',
     restart: '重启',
     close: '关闭',
     restartConfirm: '确认重启这个会话？当前运行状态会被中断。',
@@ -1105,6 +1312,8 @@ const messages = {
     imageApiUpscale: '清晰度',
     imageApiCount: '数量',
     imageApiKeySavedPlaceholder: '已保存，留空保持不变',
+    imageApiRequestEditor: '显示请求编辑器',
+    imageApiRequestEditorHint: '开启后 GPT 生图面板会显示可编辑的 URL 请求参数和 JSON 请求体。',
     clearApiKey: '清除密钥',
     saveImageApiConfig: '保存图像 API',
     usageTracking: '用量与成本',
@@ -1188,7 +1397,7 @@ const messages = {
     localData: '本地存储',
     localDataSummary: '应用偏好、项目列表、画布布局和导出记录都保存在当前设备。',
     appNetwork: '应用联网',
-    appNetworkSummary: '启动后会请求 GitHub Releases 检查最新版本；点击版本号时会读取本版本 changelog；使用图像 API 时会连接你配置的服务；应用不做云同步。',
+    appNetworkSummary: '启动后会请求 GitHub Releases 检查最新版本；点击版本号时会读取本版本 changelog；使用图像 API 或快捷发送 URL 上下文时会连接对应服务；应用不做云同步。',
     cliNetworkNotice: 'CLI 说明',
     cliNetworkNoticeSummary: '终端里运行的 Codex、Claude Code、Cursor 或其他命令是否联网，取决于这些工具自身的行为和配置。',
     modelUnset: '未设置模型',
@@ -1197,7 +1406,7 @@ const messages = {
     backupHistory: '历史备份',
     noBackups: '暂无备份',
     restoreBackup: '恢复备份',
-    settingsDescription: '应用偏好、Codex 和 Claude Code 配置文件。',
+    settingsDescription: '应用偏好、历史记录、Codex 和 Claude Code 配置文件。',
     switchedProject: '当前项目：{name}',
     addedProject: '已新增项目：{name}',
     switchedExistingProject: '已切换到项目：{name}',
@@ -1253,10 +1462,10 @@ const messages = {
     workspaceTreeUnavailable: '当前没有可查看的工作区目录。',
     workspaceTreeFailed: '读取文件树失败：{message}',
     workspaceTreeCopied: '文件树已复制到剪贴板。',
-    workspaceTreeInsertToComposer: '插入到快捷发送',
-    workspaceTreeSelectFileHint: '选中文件后，可把路径插入到底部快捷发送',
+    workspaceTreeInsertToComposer: '加入上下文包',
+    workspaceTreeSelectFileHint: '选中文件后，可加入快捷发送上下文包',
     workspaceTreeSelectedFile: '已选：{path}',
-    workspaceTreePathInserted: '已插入文件路径：{path}',
+    workspaceTreePathInserted: '已加入文件上下文：{path}',
     workspaceTreeNoData: '还没有读取文件树。',
     workspaceTreeEmpty: '这个目录目前是空的。',
     workspaceTreeIgnored: '已跳过',
@@ -1280,6 +1489,30 @@ const messages = {
     sessionReviewSetQuickTarget: '设为快捷发送目标',
     sessionReviewUpdatedAt: '更新 {time}',
     sessionReviewNeverUpdated: '未更新',
+    refresh: '刷新',
+    cancel: '取消',
+    diffReview: 'Diff 审阅',
+    diffReviewTitle: 'Diff / Review',
+    diffReviewDescription: '查看当前 Git diff，集中写下审阅意见，再把这些反馈交给指定 Agent 处理。',
+    diffReviewNoWorkspace: '当前没有可用的工作区目录。',
+    diffReviewLoadFailed: '读取 Git diff 失败。',
+    diffReviewUpdatedAt: '更新 {time}',
+    diffReviewCopyDiff: '复制 diff',
+    diffReviewDiffLabel: 'Git diff',
+    diffReviewLoading: '正在读取 Git diff…',
+    diffReviewNoDiffBody: '当前没有可显示的 diff。',
+    diffReviewClean: '当前工作区没有 Git diff。',
+    diffReviewCommentsLabel: '审阅意见',
+    diffReviewSummary: '变更摘要',
+    diffReviewStatusEmpty: '没有 status 输出。',
+    diffReviewStaged: '已暂存',
+    diffReviewUnstaged: '未暂存',
+    diffReviewAgent: '发送给 Agent',
+    diffReviewAgentPlaceholder: '选择 Agent',
+    diffReviewOpenAgents: '管理 Agents',
+    diffReviewCommentsPlaceholder: '把要批量发回 Agent 的评论写在这里，例如：\n- 这里会覆盖用户改动，改成增量处理\n- 给新增 IPC 补错误提示\n- 跑一次 renderer build',
+    diffReviewSend: '发送给 Agent',
+    diffReviewQueued: '已发送审阅意见给 Agent：{name}',
     apiKeyPlaceholder: 'sk-...',
     baseUrlPlaceholder: 'https://api.example.com/v1',
     modelPlaceholder: 'gpt-5.1-codex-max'
@@ -1293,6 +1526,7 @@ const messages = {
     pinProject: 'Pin project',
     unpinProject: 'Unpin project',
     dragProject: 'Drag to reorder',
+    completedProjectSessionsBadge: '{count} completed session(s) in this project',
     codexConfig: 'Codex config',
     projects: 'Projects',
     projectEmpty: 'Choose a folder to manage projects here.',
@@ -1311,6 +1545,11 @@ const messages = {
     addSession: 'New session',
     sessionList: 'Current sessions',
     sessionListEmpty: 'No sessions in this view yet. Create one above.',
+    canvasSessionStatusQueue: 'Session status',
+    canvasSessionStatusRefresh: 'Refresh session status',
+    canvasSessionStatusUpdatedAt: 'Updated {time}',
+    canvasSessionStatusFocus: 'Focus session',
+    canvasSessionStatusEndpoint: 'Endpoint',
     agents: 'Agents',
     agentsDialogTitle: 'Agents',
     agentsDialogDescription: 'Save reusable agent instructions, then assign a task to launch the selected CLI automatically.',
@@ -1322,6 +1561,11 @@ const messages = {
     agentNamePlaceholder: 'For example: code review, test repair, docs cleanup',
     agentInstructions: 'Agent instructions',
     agentInstructionsPlaceholder: 'Write the role, constraints, and working style this agent should follow on every task.',
+    agentSkills: 'Associated skills',
+    agentSkillsHint: 'Selected skill directory paths are injected into the task prompt when the agent starts.',
+    agentSkillsSelectedCount: '{count} selected',
+    agentSkillsEmpty: 'No attachable skills were found in the current workspace.',
+    agentSkillMissing: 'Not found in the current scan',
     agentAvatar: 'Avatar',
     uploadAgentAvatar: 'Upload avatar',
     removeAgentAvatar: 'Remove avatar',
@@ -1339,6 +1583,67 @@ const messages = {
     agentAvatarSaveFailed: 'Failed to upload avatar: {message}',
     agentAvatarInvalid: 'Choose an image file.',
     agentDeleteConfirm: 'Delete agent "{name}"?',
+    agentUtilityBarTitle: 'Agent tools',
+    agentUtilityQuickTarget: 'Target',
+    agentUtilityQuickTargetTitle: 'Set as the Quick Send target',
+    agentUtilityAttachImage: 'Image',
+    agentUtilityAttachImageTitle: 'Add image context to Quick Send',
+    agentUtilityFiles: 'Files',
+    agentUtilityFilesTitle: 'Open the file tree and add file context',
+    agentUtilityDiff: 'Diff',
+    agentUtilityDiffTitle: 'Insert the current Git diff',
+    agentUtilityDiffLoading: 'Reading',
+    agentUtilityReview: 'Review',
+    agentUtilityReviewTitle: 'Open Diff/Review and focus this session',
+    agentUtilityTargetReady: 'Quick Send target switched to {name}',
+    agentUtilityDiffContextHeader: 'Current Git diff ({path})',
+    agentUtilityDiffEmpty: 'There is no Git diff in the current workspace.',
+    agentUtilityDiffInserted: 'Inserted Git diff context.',
+    agentUtilityDiffFailed: 'Failed to read Git diff: {message}',
+    agentUtilityPanelMissing: 'Could not find this agent session.',
+    autopilot: 'Autopilot',
+    autopilotDialogTitle: 'Autopilot',
+    autopilotDialogDescription: 'Configure startup-ready runbooks, assign them to saved agents, and trigger them on a schedule.',
+    autopilotEmpty: 'No autopilots yet. Create a runbook and choose an agent.',
+    newAutopilot: 'New autopilot',
+    saveAutopilot: 'Save autopilot',
+    deleteAutopilot: 'Delete autopilot',
+    autopilotName: 'Name',
+    autopilotNamePlaceholder: 'For example: daily audit, weekday build check',
+    autopilotAgent: 'Assigned agent',
+    autopilotRunbook: 'Runbook',
+    autopilotRunbookPlaceholder: 'Write the full runbook to hand to the agent when this runs.',
+    autopilotEnabled: 'Enable scheduled run',
+    autopilotSchedule: 'Schedule',
+    autopilotScheduleDaily: 'Daily',
+    autopilotScheduleWeekday: 'Weekday',
+    autopilotScheduleWeekly: 'Weekly',
+    autopilotScheduleCron: 'Custom cron',
+    autopilotTime: 'Time',
+    autopilotWeekday: 'Weekday',
+    autopilotCron: 'Cron',
+    autopilotCronPlaceholder: 'For example: 0 9 * * 1-5',
+    autopilotLastRun: 'Last run',
+    autopilotNextRun: 'Next run',
+    autopilotNeverRun: 'Never run',
+    autopilotNotScheduled: 'Not scheduled',
+    autopilotRunNow: 'Run now',
+    autopilotRequired: 'Select or create an autopilot first.',
+    autopilotAgentRequired: 'Choose an agent to assign.',
+    autopilotRunbookRequired: 'Runbook is required.',
+    autopilotCronInvalid: 'Cron must have 5 fields with valid minute, hour, day-of-month, month, and day-of-week values.',
+    autopilotSaved: 'Autopilot saved: {name}',
+    autopilotDeleted: 'Autopilot deleted: {name}',
+    autopilotStarted: 'Autopilot started: {name}',
+    autopilotMissingAgent: 'Autopilot "{name}" cannot find its assigned agent.',
+    autopilotDeleteConfirm: 'Delete autopilot "{name}"?',
+    weekdayMonday: 'Monday',
+    weekdayTuesday: 'Tuesday',
+    weekdayWednesday: 'Wednesday',
+    weekdayThursday: 'Thursday',
+    weekdayFriday: 'Friday',
+    weekdaySaturday: 'Saturday',
+    weekdaySunday: 'Sunday',
     addCommandLine: 'New CMD',
     addProjectDialogTitle: 'Add project',
     addProjectDialogDescription: 'Choose the project folder and name before adding it to the sidebar.',
@@ -1461,6 +1766,14 @@ const messages = {
     canvasTodoEmpty: 'No tasks yet.',
     canvasTodoProgress: '{done}/{total} done',
     canvasTodoProgressEmpty: '0 tasks',
+    canvasTodoPlan: 'Plan',
+    canvasTodoPlanPlaceholder: 'Write the plan, context, or acceptance criteria.',
+    canvasTodoTasks: 'Tasks',
+    canvasTodoAutoSync: 'Sync from output',
+    canvasTodoManualSync: 'Manual',
+    canvasTodoLinkedSession: 'Linked session: {name}',
+    agentPlanTodoTitle: '{name} Plan',
+    agentPlanTodoCreated: 'Created a Plan/Todo card for the agent.',
     groupEndpoints: 'Group endpoints',
     ungroupEndpoints: 'Ungroup endpoints',
     endpointGroup: 'Endpoint group',
@@ -1497,7 +1810,7 @@ const messages = {
     floatingComposerTargetNoMatch: 'No matching sessions.',
     floatingComposerUnavailable: 'No live session on this canvas can receive input.',
     floatingComposerPlaceholder: 'Type here and send to {name}',
-    floatingComposerHint: '{sendShortcut} to send, {dispatchShortcut} to dispatch tasks, Shift+Enter for newline, paste or drop images to save them into the app .files folder',
+    floatingComposerHint: '{sendShortcut} to send, {dispatchShortcut} to dispatch tasks, Shift+Enter for newline, paste or drop images to add them to the context pack',
     floatingComposerCurrent: 'Current',
     floatingComposerSend: 'Send',
     floatingComposerCollapse: 'Collapse quick send',
@@ -1510,6 +1823,27 @@ const messages = {
     floatingComposerImagesAdded: 'Added {count} image(s)',
     floatingComposerImageMissingDir: 'No directory is available for saving images.',
     floatingComposerImageSaveFailed: 'Failed to save image: {message}',
+    floatingComposerContextPack: 'Context pack',
+    floatingComposerContextCount: '{count} context item(s)',
+    floatingComposerContextEmpty: 'No context',
+    floatingComposerContextClear: 'Clear context pack',
+    floatingComposerContextRemove: 'Remove context',
+    floatingComposerContextAddFile: 'Choose a project file from the file tree',
+    floatingComposerContextAddTerminalSelection: 'Add terminal selection',
+    floatingComposerContextAddLatestOutput: 'Add latest target output',
+    floatingComposerContextAddSelectedText: 'Add selected text or clipboard',
+    floatingComposerContextAddUrl: 'Add URL content',
+    floatingComposerContextAdded: 'Added context: {name}',
+    floatingComposerContextAddFailed: 'Failed to add context: {message}',
+    floatingComposerContextNoTerminalSelection: 'Select output in a terminal first.',
+    floatingComposerContextNoSelectedText: 'No selected text or clipboard text is available.',
+    floatingComposerContextSelectedText: 'Selected text',
+    floatingComposerContextFile: 'File',
+    floatingComposerContextImage: 'Image',
+    floatingComposerContextUrl: 'URL',
+    floatingComposerContextTerminalSelection: 'Terminal selection',
+    floatingComposerContextTerminalOutput: 'Terminal output',
+    floatingComposerUrlPrompt: 'Enter the URL to add as context',
     imageGeneration: 'GPT Image',
     imageGenerationTitle: 'GPT Image',
     imageGenerationDescription: 'Generate images with the configured Image API.',
@@ -1562,10 +1896,19 @@ const messages = {
     imageGenerationTaskIdLabel: 'Task ID',
     imageGenerationFailureReason: 'Failure reason',
     imageGenerationPollHistory: 'Poll history',
+    imageGenerationPollHistoryCount: '{count} poll(s)',
     imageGenerationPollResult: 'Poll #{index}',
+    imageGenerationRequestParams: 'Request params',
+    imageGenerationRequestBody: 'Request body',
+    imageGenerationRequestEditor: 'Request editor',
+    imageGenerationRequestEditorReset: 'Sync current UI',
+    imageGenerationRequestJsonInvalid: '{name} must be a JSON object: {message}',
+    imageGenerationRequestPromptRequired: 'The request body needs a prompt, or fill the prompt field.',
     imageGenerationSuccessPayload: 'Success payload',
     imageGenerationFailurePayload: 'Failure payload',
     imageGenerationNoPayload: 'No payload',
+    imageGenerationViewFullPrompt: 'View full prompt',
+    imageGenerationViewFullPayload: 'View full payload',
     imageGenerationCopyReference: 'Copy image reference',
     imageGenerationOpenFile: 'Open image',
     imageGenerationCopied: 'Image reference copied.',
@@ -1608,6 +1951,19 @@ const messages = {
     quickPromptLoadFailed: 'Failed to read saved prompts: {message}',
     quickPromptSaveFailed: 'Failed to save prompt: {message}',
     quickPromptDeleteFailed: 'Failed to delete prompt: {message}',
+    promptMenu: 'Prompts',
+    promptManagerTitle: 'Prompt manager',
+    promptManagerDescription: 'Manage Quick Send saved prompts.',
+    promptManagerNew: 'New prompt',
+    promptManagerEmpty: 'No saved prompts yet.',
+    promptManagerTitleLabel: 'Title',
+    promptManagerTitlePlaceholder: 'Name this prompt',
+    promptManagerContentLabel: 'Prompt content',
+    promptManagerContentPlaceholder: 'Type the saved prompt content',
+    promptManagerDiscardConfirm: 'This prompt has unsaved changes. Discard them?',
+    promptManagerSaved: 'Saved: {name}',
+    promptManagerDeleted: 'Deleted: {name}',
+    promptManagerCount: '{count} item(s)',
     sessionRuntime: 'Run',
     sessionContext: 'Context',
     exportSession: 'Export session',
@@ -1615,6 +1971,8 @@ const messages = {
     sessionExported: 'Exported: {path}',
     exportSessionFailed: 'Export failed: {message}',
     historyFolder: 'History',
+    openHistoryFolder: 'Open history',
+    historyFolderUnavailable: 'History folder is not ready',
     restart: 'Restart',
     close: 'Close',
     restartConfirm: 'Restart this session? Its current running state will be interrupted.',
@@ -1677,6 +2035,8 @@ const messages = {
     imageApiUpscale: 'Upscale',
     imageApiCount: 'Count',
     imageApiKeySavedPlaceholder: 'Saved; leave blank to keep it',
+    imageApiRequestEditor: 'Show request editor',
+    imageApiRequestEditorHint: 'When enabled, the GPT Image panel shows editable URL request params and JSON request body.',
     clearApiKey: 'Clear key',
     saveImageApiConfig: 'Save Image API',
     usageTracking: 'Usage and cost',
@@ -1760,7 +2120,7 @@ const messages = {
     localData: 'Local storage',
     localDataSummary: 'App preferences, project lists, canvas layouts, and exported records stay on this device.',
     appNetwork: 'App network',
-    appNetworkSummary: 'On startup, the app requests GitHub Releases to check the latest version; clicking the version loads this version changelog; using Image API connects to your configured service; the app does not sync data to any cloud service.',
+    appNetworkSummary: 'On startup, the app requests GitHub Releases to check the latest version; clicking the version loads this version changelog; using Image API or quick-send URL context connects to the relevant service; the app does not sync data to any cloud service.',
     cliNetworkNotice: 'CLI notice',
     cliNetworkNoticeSummary: 'Whether Codex, Claude Code, Cursor, or any other command inside the terminal connects to a network depends on that tool itself.',
     modelUnset: 'Model not set',
@@ -1769,7 +2129,7 @@ const messages = {
     backupHistory: 'Backups',
     noBackups: 'No backups',
     restoreBackup: 'Restore',
-    settingsDescription: 'App preferences, Codex config files, and Claude Code config files.',
+    settingsDescription: 'App preferences, history, Codex config files, and Claude Code config files.',
     switchedProject: 'Current project: {name}',
     addedProject: 'Added project: {name}',
     switchedExistingProject: 'Switched to project: {name}',
@@ -1825,10 +2185,10 @@ const messages = {
     workspaceTreeUnavailable: 'There is no workspace directory to inspect.',
     workspaceTreeFailed: 'Failed to read file tree: {message}',
     workspaceTreeCopied: 'File tree copied to clipboard.',
-    workspaceTreeInsertToComposer: 'Insert into quick send',
-    workspaceTreeSelectFileHint: 'Select a file to insert its path into quick send.',
+    workspaceTreeInsertToComposer: 'Add to context pack',
+    workspaceTreeSelectFileHint: 'Select a file to add it to the quick send context pack.',
     workspaceTreeSelectedFile: 'Selected: {path}',
-    workspaceTreePathInserted: 'Inserted file path: {path}',
+    workspaceTreePathInserted: 'Added file context: {path}',
     workspaceTreeNoData: 'File tree has not been loaded yet.',
     workspaceTreeEmpty: 'This directory is currently empty.',
     workspaceTreeIgnored: 'Skipped',
@@ -1852,6 +2212,30 @@ const messages = {
     sessionReviewSetQuickTarget: 'Set quick-send target',
     sessionReviewUpdatedAt: 'Updated {time}',
     sessionReviewNeverUpdated: 'Not updated',
+    refresh: 'Refresh',
+    cancel: 'Cancel',
+    diffReview: 'Diff review',
+    diffReviewTitle: 'Diff / Review',
+    diffReviewDescription: 'Review the current Git diff, write batched comments, then send that feedback to a selected Agent.',
+    diffReviewNoWorkspace: 'No workspace directory is available.',
+    diffReviewLoadFailed: 'Failed to read Git diff.',
+    diffReviewUpdatedAt: 'Updated {time}',
+    diffReviewCopyDiff: 'Copy diff',
+    diffReviewDiffLabel: 'Git diff',
+    diffReviewLoading: 'Reading Git diff...',
+    diffReviewNoDiffBody: 'There is no diff to display.',
+    diffReviewClean: 'There is no Git diff in the current workspace.',
+    diffReviewCommentsLabel: 'Review comments',
+    diffReviewSummary: 'Change summary',
+    diffReviewStatusEmpty: 'No status output.',
+    diffReviewStaged: 'Staged',
+    diffReviewUnstaged: 'Unstaged',
+    diffReviewAgent: 'Send to Agent',
+    diffReviewAgentPlaceholder: 'Choose an Agent',
+    diffReviewOpenAgents: 'Manage Agents',
+    diffReviewCommentsPlaceholder: 'Write the comments to send back to the Agent, for example:\n- This may overwrite user changes; make it incremental\n- Add error handling to the new IPC path\n- Run the renderer build once',
+    diffReviewSend: 'Send to Agent',
+    diffReviewQueued: 'Sent review comments to Agent: {name}',
     apiKeyPlaceholder: 'sk-...',
     baseUrlPlaceholder: 'https://api.example.com/v1',
     modelPlaceholder: 'gpt-5.1-codex-max'
@@ -1927,7 +2311,8 @@ function normalizeImageApiConfig(raw) {
     n: Number.isFinite(count) ? Math.min(4, Math.max(1, count)) : imageApiConfigDefaults.n,
     model: String(raw?.model || imageApiConfigDefaults.model).trim() || imageApiConfigDefaults.model,
     size: String(raw?.size || imageApiConfigDefaults.size).trim() || imageApiConfigDefaults.size,
-    upscale: normalizeImageApiUpscale(raw?.upscale)
+    upscale: normalizeImageApiUpscale(raw?.upscale),
+    requestEditorEnabled: Boolean(raw?.requestEditorEnabled)
   };
 }
 
@@ -2420,12 +2805,40 @@ function withWorkspaceCanvasFrames(workspace, canvasKey, frames) {
   };
 }
 
+function normalizeCanvasTodoStatus(value, done = false) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (normalized === 'done' || normalized === 'completed' || normalized === 'success') {
+    return 'done';
+  }
+  if (normalized === 'in_progress' || normalized === 'running' || normalized === 'doing' || normalized === 'active') {
+    return 'in_progress';
+  }
+  if (normalized === 'blocked' || normalized === 'failed' || normalized === 'error') {
+    return 'blocked';
+  }
+  return done ? 'done' : 'todo';
+}
+
+function normalizeCanvasTodoTaskText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, canvasTodoTaskTextMaxLength);
+}
+
+function normalizeCanvasTodoPlanText(value) {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .slice(0, canvasTodoPlanTextMaxLength);
+}
+
 function normalizeCanvasTodoItem(item, index = 0) {
   const now = Date.now();
+  const status = normalizeCanvasTodoStatus(item?.status, Boolean(item?.done));
   return {
     id: item?.id || createLocalId('canvas-todo-item'),
-    text: typeof item?.text === 'string' ? item.text : '',
-    done: Boolean(item?.done),
+    text: normalizeCanvasTodoTaskText(item?.text),
+    status,
+    done: status === 'done',
+    source: String(item?.source || '').trim(),
     createdAt: Number.isFinite(item?.createdAt) ? item.createdAt : now + index,
     updatedAt: Number.isFinite(item?.updatedAt) ? item.updatedAt : now + index
   };
@@ -2439,6 +2852,15 @@ function normalizeCanvasTodo(todo, index = 0) {
     id: todo?.id || createLocalId('canvas-todo'),
     title: typeof todo?.title === 'string' ? todo.title : '',
     pinned: Boolean(todo?.pinned),
+    linkedPanelId: String(todo?.linkedPanelId || '').trim(),
+    linkedPanelTitle: String(todo?.linkedPanelTitle || '').trim(),
+    source: String(todo?.source || '').trim(),
+    agentId: String(todo?.agentId || '').trim(),
+    agentName: String(todo?.agentName || '').trim(),
+    autoSync: Boolean(todo?.autoSync),
+    followPanel: Boolean(todo?.linkedPanelId) && todo?.followPanel !== false,
+    planText: normalizeCanvasTodoPlanText(todo?.planText),
+    lastExtractedAt: Number.isFinite(todo?.lastExtractedAt) ? todo.lastExtractedAt : 0,
     x: Number.isFinite(todo?.x) ? todo.x : fallbackX,
     y: Number.isFinite(todo?.y) ? todo.y : fallbackY,
     width: Number.isFinite(todo?.width)
@@ -2478,7 +2900,9 @@ function sameCanvasTodoItem(left, right) {
     right &&
     left.id === right.id &&
     left.text === right.text &&
+    left.status === right.status &&
     left.done === right.done &&
+    left.source === right.source &&
     left.createdAt === right.createdAt &&
     left.updatedAt === right.updatedAt
   );
@@ -2491,6 +2915,15 @@ function sameCanvasTodo(left, right) {
     left.id === right.id &&
     left.title === right.title &&
     left.pinned === right.pinned &&
+    left.linkedPanelId === right.linkedPanelId &&
+    left.linkedPanelTitle === right.linkedPanelTitle &&
+    left.source === right.source &&
+    left.agentId === right.agentId &&
+    left.agentName === right.agentName &&
+    left.autoSync === right.autoSync &&
+    left.followPanel === right.followPanel &&
+    left.planText === right.planText &&
+    left.lastExtractedAt === right.lastExtractedAt &&
     left.x === right.x &&
     left.y === right.y &&
     left.width === right.width &&
@@ -2535,6 +2968,243 @@ function withWorkspaceCanvasTodos(workspace, canvasKey, todos) {
     ...workspace,
     canvasTodos: nextCanvasTodos
   };
+}
+
+function normalizeCanvasTodoOutputText(value) {
+  return String(value || '')
+    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1B[()][A-Za-z0-9]/g, '')
+    .replace(/\x1B[@-Z\\-_]/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[\x00\x07\x0B\x0C\x0E-\x1F]/g, (char) => (
+      char === '\n' || char === '\t' || char === '\b' ? char : ''
+    ))
+    .replace(/[^\n]\x08/g, '')
+    .replace(/\x08/g, '');
+}
+
+function getCanvasTodoTaskKey(text) {
+  return normalizeCanvasTodoTaskText(text)
+    .toLowerCase()
+    .replace(/[`"'“”‘’.,;:!?()[\]{}<>，。；：！？（）【】]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeExtractedCanvasTodoStatus(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (['x', '✓', '✔', 'done', 'complete', 'completed', 'success', 'passed', 'finished', '完成', '已完成'].includes(normalized)) {
+    return 'done';
+  }
+  if (['~', '-', '…', '...', 'doing', 'active', 'running', 'in_progress', 'progress', '进行中', '处理中'].includes(normalized)) {
+    return 'in_progress';
+  }
+  if (['blocked', 'failed', 'error', 'stuck', '阻塞', '失败'].includes(normalized)) {
+    return 'blocked';
+  }
+  return 'todo';
+}
+
+function cleanExtractedCanvasTodoTaskText(value) {
+  return normalizeCanvasTodoTaskText(
+    String(value || '')
+      .replace(/\s+\((?:pending|todo|queued|doing|running|in progress|done|completed|blocked|failed)\)\s*$/i, '')
+      .replace(/\s+[。.]?\s*$/g, '')
+  );
+}
+
+function parseCanvasTodoTaskLine(rawLine) {
+  const line = String(rawLine || '').replace(/^[\s>|│┃┆]+/g, '').trim();
+  if (!line || /^[-=_*]{3,}$/.test(line)) {
+    return null;
+  }
+
+  const taskListMatch = line.match(/^(?:[-*+]|\d+[.)])\s+\[([^\]]*)\]\s+(.+)$/);
+  if (taskListMatch) {
+    const text = cleanExtractedCanvasTodoTaskText(taskListMatch[2]);
+    return text ? { text, status: normalizeExtractedCanvasTodoStatus(taskListMatch[1]) } : null;
+  }
+
+  const bracketStatusMatch = line.match(/^(?:[-*+]|\d+[.)])?\s*\[([a-zA-Z_\-\s]+|完成|已完成|进行中|阻塞|失败)\]\s+(.+)$/);
+  if (bracketStatusMatch) {
+    const text = cleanExtractedCanvasTodoTaskText(bracketStatusMatch[2]);
+    return text ? { text, status: normalizeExtractedCanvasTodoStatus(bracketStatusMatch[1]) } : null;
+  }
+
+  const prefixedStatusMatch = line.match(/^(?:[-*+]|\d+[.)])\s+(todo|pending|queued|doing|running|in progress|done|completed|blocked|failed|待办|进行中|完成|已完成|阻塞|失败)\s*[:：-]\s+(.+)$/i);
+  if (prefixedStatusMatch) {
+    const text = cleanExtractedCanvasTodoTaskText(prefixedStatusMatch[2]);
+    return text ? { text, status: normalizeExtractedCanvasTodoStatus(prefixedStatusMatch[1]) } : null;
+  }
+
+  const doneGlyphMatch = line.match(/^(?:[-*+]\s*)?(?:✓|✔|☑)\s+(.+)$/);
+  if (doneGlyphMatch) {
+    const text = cleanExtractedCanvasTodoTaskText(doneGlyphMatch[1]);
+    return text ? { text, status: 'done' } : null;
+  }
+
+  const pendingGlyphMatch = line.match(/^(?:[-*+]\s*)?(?:□|☐|○|◯)\s+(.+)$/);
+  if (pendingGlyphMatch) {
+    const text = cleanExtractedCanvasTodoTaskText(pendingGlyphMatch[1]);
+    return text ? { text, status: 'todo' } : null;
+  }
+
+  const activeGlyphMatch = line.match(/^(?:[-*+]\s*)?(?:▶|►|…|\.\.\.)\s+(.+)$/);
+  if (activeGlyphMatch) {
+    const text = cleanExtractedCanvasTodoTaskText(activeGlyphMatch[1]);
+    return text ? { text, status: 'in_progress' } : null;
+  }
+
+  return null;
+}
+
+function extractCanvasTodoPlanTextFromLines(lines) {
+  const normalizedLines = Array.isArray(lines) ? lines : [];
+  const startIndex = normalizedLines.findIndex((line) => {
+    const text = String(line || '').trim().replace(/[*_`#：:]+$/g, '').toLowerCase();
+    return text === 'plan' || text === 'planning' || text === '计划';
+  });
+  if (startIndex < 0) {
+    return '';
+  }
+
+  const collected = [];
+  for (let index = startIndex + 1; index < normalizedLines.length; index += 1) {
+    const line = String(normalizedLines[index] || '').replace(/^[\s>|│┃┆]+/g, '').trim();
+    if (!line) {
+      if (collected.length > 0) {
+        break;
+      }
+      continue;
+    }
+    if (/^(tasks?|todo|task list|任务|待办)\s*[:：]?$/i.test(line)) {
+      break;
+    }
+    if (collected.length >= 8) {
+      break;
+    }
+    collected.push(line);
+  }
+
+  const planText = collected.join('\n').trim();
+  return collected.length >= 2 || planText.length >= 24 ? normalizeCanvasTodoPlanText(planText) : '';
+}
+
+function extractCanvasTodoProgressFromOutput(value) {
+  const output = normalizeCanvasTodoOutputText(value);
+  if (!output.trim()) {
+    return { tasks: [], planText: '' };
+  }
+
+  const lines = output.split('\n');
+  const tasks = [];
+  const seenKeys = new Set();
+  lines.forEach((line) => {
+    const task = parseCanvasTodoTaskLine(line);
+    if (!task) {
+      return;
+    }
+
+    const key = getCanvasTodoTaskKey(task.text);
+    if (!key || seenKeys.has(key)) {
+      return;
+    }
+
+    seenKeys.add(key);
+    tasks.push(task);
+  });
+
+  return {
+    tasks,
+    planText: extractCanvasTodoPlanTextFromLines(lines)
+  };
+}
+
+function resolveCanvasTodoMergedStatus(currentStatus, extractedStatus) {
+  const current = normalizeCanvasTodoStatus(currentStatus);
+  const next = normalizeCanvasTodoStatus(extractedStatus);
+  if (next === 'done') {
+    return 'done';
+  }
+  if (current === 'done') {
+    return current;
+  }
+  if (next === 'todo' && current !== 'todo') {
+    return current;
+  }
+
+  const currentRank = canvasTodoPlanStatusOrder[current] ?? 0;
+  const nextRank = canvasTodoPlanStatusOrder[next] ?? 0;
+  return nextRank >= currentRank ? next : current;
+}
+
+function mergeCanvasTodoExtractedProgress(todo, extracted, now = Date.now()) {
+  const tasks = Array.isArray(extracted?.tasks) ? extracted.tasks : [];
+  const extractedPlanText = normalizeCanvasTodoPlanText(extracted?.planText);
+  if (tasks.length === 0 && !extractedPlanText) {
+    return todo;
+  }
+
+  const items = Array.isArray(todo.items) ? todo.items.map((item) => normalizeCanvasTodoItem(item)) : [];
+  const keyToIndex = new Map();
+  items.forEach((item, index) => {
+    const key = getCanvasTodoTaskKey(item.text);
+    if (key && !keyToIndex.has(key)) {
+      keyToIndex.set(key, index);
+    }
+  });
+
+  let changed = false;
+  tasks.forEach((task) => {
+    const text = cleanExtractedCanvasTodoTaskText(task.text);
+    const key = getCanvasTodoTaskKey(text);
+    if (!key) {
+      return;
+    }
+
+    const nextStatus = normalizeCanvasTodoStatus(task.status);
+    if (!keyToIndex.has(key)) {
+      keyToIndex.set(key, items.length);
+      items.push(normalizeCanvasTodoItem({
+        id: createLocalId('canvas-todo-item'),
+        text,
+        status: nextStatus,
+        source: 'output',
+        createdAt: now,
+        updatedAt: now
+      }));
+      changed = true;
+      return;
+    }
+
+    const index = keyToIndex.get(key);
+    const currentItem = items[index];
+    const mergedStatus = resolveCanvasTodoMergedStatus(currentItem.status, nextStatus);
+    if (mergedStatus !== currentItem.status) {
+      items[index] = normalizeCanvasTodoItem({
+        ...currentItem,
+        status: mergedStatus,
+        done: mergedStatus === 'done',
+        source: currentItem.source || 'output',
+        updatedAt: now
+      });
+      changed = true;
+    }
+  });
+
+  const shouldAdoptPlanText = extractedPlanText && !String(todo.planText || '').trim();
+  if (!changed && !shouldAdoptPlanText) {
+    return todo;
+  }
+
+  return normalizeCanvasTodo({
+    ...todo,
+    planText: shouldAdoptPlanText ? extractedPlanText : todo.planText,
+    items,
+    lastExtractedAt: now
+  });
 }
 
 function getCanvasConnectionPairKey(fromId, toId) {
@@ -2822,6 +3492,233 @@ function trimTrailingLineBreaks(value) {
   return String(value || '').replace(/(?:\r\n|\r|\n)+$/g, '');
 }
 
+function normalizeCommandDockContextText(value, maxChars = commandDockContextTextMaxChars) {
+  const text = String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd();
+  if (text.length <= maxChars) {
+    return {
+      text,
+      truncated: false
+    };
+  }
+
+  return {
+    text: text.slice(0, maxChars).trimEnd(),
+    truncated: true
+  };
+}
+
+function getCommandDockContextPathName(value, fallback = '') {
+  const normalized = String(value || '').replace(/\\/g, '/').trim();
+  if (!normalized) {
+    return fallback;
+  }
+
+  return normalized.split('/').filter(Boolean).pop() || normalized || fallback;
+}
+
+function createCommandDockContextItem(kind, options = {}) {
+  const normalizedContent = normalizeCommandDockContextText(
+    options.content,
+    Number.isFinite(options.maxChars) ? options.maxChars : commandDockContextTextMaxChars
+  );
+  const pathValue = String(options.path || '').trim();
+  const urlValue = String(options.url || '').trim();
+  const title = String(
+    options.title
+    || getCommandDockContextPathName(pathValue)
+    || urlValue
+    || ''
+  ).trim();
+
+  return {
+    id: createLocalId('command-context'),
+    kind: String(kind || 'text').trim() || 'text',
+    title,
+    subtitle: String(options.subtitle || '').trim(),
+    path: pathValue,
+    url: urlValue,
+    content: normalizedContent.text,
+    panelId: String(options.panelId || '').trim(),
+    panelTitle: String(options.panelTitle || '').trim(),
+    truncated: Boolean(options.truncated || normalizedContent.truncated),
+    createdAt: Date.now()
+  };
+}
+
+function getCommandDockContextItemKey(item) {
+  const kind = String(item?.kind || 'text').trim() || 'text';
+  const pathValue = String(item?.path || '').trim();
+  const urlValue = String(item?.url || '').trim();
+
+  if (pathValue) {
+    return `${kind}:path:${pathValue.toLowerCase()}`;
+  }
+  if (urlValue) {
+    return `${kind}:url:${urlValue.toLowerCase()}`;
+  }
+
+  const content = String(item?.content || '').trim();
+  if (content) {
+    return `${kind}:content:${content.slice(0, 300)}`;
+  }
+
+  return `${kind}:${String(item?.title || item?.id || '').trim()}`;
+}
+
+function normalizeCommandDockContextItems(items) {
+  const result = [];
+  const seen = new Set();
+
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+
+    const key = getCommandDockContextItemKey(item);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+
+    const normalized = {
+      ...item,
+      kind: String(item.kind || 'text').trim() || 'text',
+      title: String(item.title || item.path || item.url || '').trim(),
+      subtitle: String(item.subtitle || '').trim(),
+      path: String(item.path || '').trim(),
+      url: String(item.url || '').trim(),
+      content: normalizeCommandDockContextText(item.content).text,
+      panelId: String(item.panelId || '').trim(),
+      panelTitle: String(item.panelTitle || '').trim(),
+      truncated: Boolean(item.truncated),
+      id: item.id || createLocalId('command-context')
+    };
+
+    if (!normalized.title && normalized.path) {
+      normalized.title = getCommandDockContextPathName(normalized.path);
+    }
+    if (!normalized.title && normalized.url) {
+      normalized.title = normalized.url;
+    }
+    if (!normalized.title && !normalized.content) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push(normalized);
+    if (result.length >= commandDockContextMaxItems) {
+      break;
+    }
+  }
+
+  return result;
+}
+
+function getCommandDockContextPromptKind(item) {
+  switch (item?.kind) {
+    case 'file':
+      return 'File';
+    case 'image':
+      return 'Image';
+    case 'url':
+      return 'URL';
+    case 'terminal-selection':
+      return 'Terminal selection';
+    case 'terminal-output':
+      return 'Terminal output';
+    default:
+      return 'Selected text';
+  }
+}
+
+function getCommandDockContextPromptTitle(item) {
+  return String(
+    item?.title
+    || item?.path
+    || item?.url
+    || item?.panelTitle
+    || getCommandDockContextPromptKind(item)
+  ).trim();
+}
+
+function getMarkdownFenceForContent(content) {
+  let fence = '```';
+  const text = String(content || '');
+  while (text.includes(fence)) {
+    fence += '`';
+  }
+  return fence;
+}
+
+function serializeCommandDockContextItem(item, index) {
+  const title = getCommandDockContextPromptTitle(item);
+  const lines = [`### ${index + 1}. ${getCommandDockContextPromptKind(item)}: ${title}`];
+
+  if (item.path) {
+    lines.push(`Path: ${item.kind === 'file' ? `@${normalizePromptFilePath(item.path)}` : normalizePromptFilePath(item.path)}`);
+  }
+  if (item.url) {
+    lines.push(`URL: ${item.url}`);
+  }
+  if (item.panelTitle) {
+    lines.push(`Session: ${item.panelTitle}`);
+  }
+  if (item.subtitle) {
+    lines.push(`Note: ${item.subtitle}`);
+  }
+  if (item.truncated) {
+    lines.push('Note: content was truncated before sending.');
+  }
+
+  const content = String(item.content || '').trimEnd();
+  if (item.kind === 'image') {
+    lines.push('', 'Image file path is included above. Use the local file if your CLI can read images.');
+    return lines.join('\n');
+  }
+
+  if (content) {
+    const fence = getMarkdownFenceForContent(content);
+    lines.push('', `${fence}text`, content, fence);
+  }
+
+  return lines.join('\n');
+}
+
+function buildCommandDockContextPayload(message, contextItems) {
+  const prompt = trimTrailingLineBreaks(message);
+  const items = normalizeCommandDockContextItems(contextItems);
+  if (items.length === 0) {
+    return prompt;
+  }
+
+  const lines = [];
+  if (String(prompt || '').trim()) {
+    lines.push(prompt.trimEnd(), '');
+  }
+
+  lines.push('## Context Package');
+  lines.push('Use the following context together with the request above.');
+  items.forEach((item, index) => {
+    lines.push('', serializeCommandDockContextItem(item, index));
+  });
+
+  return lines.join('\n').trim();
+}
+
+function formatCommandDockContextHistoryEntry(message, contextItems) {
+  const prompt = String(message || '').trim();
+  const items = normalizeCommandDockContextItems(contextItems);
+  if (items.length === 0) {
+    return prompt;
+  }
+
+  const summary = items
+    .slice(0, 4)
+    .map((item) => getCommandDockContextPromptTitle(item))
+    .join(', ');
+  const suffix = items.length > 4 ? ` +${items.length - 4}` : '';
+  return prompt ? `${prompt}\n[Context: ${summary}${suffix}]` : `[Context: ${summary}${suffix}]`;
+}
+
 function isCommandDockSubmitKey(event) {
   return event.key === 'Enter'
     || event.code === 'Enter'
@@ -3036,6 +3933,107 @@ function filterWorkspaceSkillMentionItems(items, query) {
   return sourceItems
     .filter((item) => item.searchText.includes(normalizedQuery))
     .slice(0, commandDockSkillMentionMaxItems);
+}
+
+function deriveSkillDirectoryFromPath(filePath) {
+  const normalizedPath = normalizePromptFilePath(filePath).replace(/\/+$/g, '');
+  if (!normalizedPath) {
+    return '';
+  }
+
+  const slashIndex = normalizedPath.lastIndexOf('/');
+  return slashIndex > 0 ? normalizedPath.slice(0, slashIndex) : '';
+}
+
+function getAgentSkillReferenceDirectoryPath(skill) {
+  const directoryPath = normalizePromptFilePath(skill?.directoryPath || '').replace(/\/+$/g, '');
+  if (directoryPath) {
+    return directoryPath;
+  }
+
+  return deriveSkillDirectoryFromPath(skill?.path);
+}
+
+function getAgentSkillReferenceKey(skill) {
+  return normalizePromptFilePath(
+    getAgentSkillReferenceDirectoryPath(skill)
+    || skill?.path
+    || skill?.id
+    || skill?.slashName
+    || skill?.name
+    || ''
+  ).trim().toLowerCase();
+}
+
+function normalizeAgentSkillReference(skill) {
+  if (!skill || typeof skill !== 'object') {
+    return null;
+  }
+
+  const directoryPath = getAgentSkillReferenceDirectoryPath(skill);
+  const pathValue = normalizePromptFilePath(skill.path || (directoryPath ? `${directoryPath}/SKILL.md` : ''));
+  if (!directoryPath && !pathValue) {
+    return null;
+  }
+
+  const slashName = String(skill.slashName || skill.name || '').trim().replace(/^\//, '');
+  const name = String(skill.name || slashName || directoryPath.split('/').filter(Boolean).pop() || '').trim();
+
+  return {
+    id: String(skill.id || directoryPath || pathValue || slashName).trim(),
+    name,
+    slashName,
+    description: String(skill.description || '').trim(),
+    path: pathValue,
+    directoryPath,
+    relativePath: normalizePromptFilePath(skill.relativePath || ''),
+    directoryRelativePath: normalizePromptFilePath(skill.directoryRelativePath || ''),
+    sourceDirectoryName: String(skill.sourceDirectoryName || '').trim(),
+    sourceId: String(skill.sourceId || '').trim(),
+    sourceScope: String(skill.sourceScope || '').trim()
+  };
+}
+
+function normalizeAgentSkillReferences(skills) {
+  const result = [];
+  const seen = new Set();
+
+  (Array.isArray(skills) ? skills : []).forEach((skill) => {
+    const normalized = normalizeAgentSkillReference(skill);
+    const key = getAgentSkillReferenceKey(normalized);
+    if (!normalized || !key || seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    result.push(normalized);
+  });
+
+  return result;
+}
+
+function mergeAgentSkillReferences(...skillGroups) {
+  return normalizeAgentSkillReferences(skillGroups.flatMap((group) => (Array.isArray(group) ? group : [])));
+}
+
+function areAgentSkillReferencesEqual(left, right) {
+  const leftKeys = normalizeAgentSkillReferences(left)
+    .map(getAgentSkillReferenceKey)
+    .filter(Boolean)
+    .sort();
+  const rightKeys = normalizeAgentSkillReferences(right)
+    .map(getAgentSkillReferenceKey)
+    .filter(Boolean)
+    .sort();
+
+  return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index]);
+}
+
+function getWorkspaceAgentSkillOptions(snapshot) {
+  const scopes = Array.isArray(snapshot?.scopes) ? snapshot.scopes : [];
+  return normalizeAgentSkillReferences(scopes.flatMap((scope) => (
+    Array.isArray(scope?.skills) ? scope.skills : []
+  )));
 }
 
 function isImageFile(file) {
@@ -3545,6 +4543,141 @@ function SessionRuntimeTag({ panel, now, t }) {
     >
       {t('sessionRuntime')} {elapsed}
     </span>
+  );
+}
+
+function formatSessionStatusQueueTime(timestamp, language) {
+  if (!Number.isFinite(timestamp)) {
+    return '--:--:--';
+  }
+
+  return new Date(timestamp).toLocaleTimeString(language === 'en' ? 'en-US' : 'zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+}
+
+function CanvasSessionStatusQueue({
+  activeId,
+  className,
+  commandTargetId,
+  language,
+  onFocusSession,
+  onRefresh,
+  panels,
+  refreshStamp,
+  t
+}) {
+  const queuePanels = Array.isArray(panels) ? panels : [];
+  const hasLivePanels = queuePanels.some((panel) => isPanelLive(panel));
+  const liveNow = useLiveNow(hasLivePanels, 1000);
+  const statusNow = hasLivePanels
+    ? liveNow
+    : Number.isFinite(refreshStamp) ? refreshStamp : Date.now();
+
+  if (queuePanels.length === 0) {
+    return null;
+  }
+
+  const statusCounts = queuePanels.reduce((counts, panel) => {
+    const state = getPanelExecutionState(panel, statusNow);
+    return {
+      ...counts,
+      [state]: (counts[state] || 0) + 1
+    };
+  }, { running: 0, idle: 0, completed: 0, error: 0 });
+  const refreshTime = formatSessionStatusQueueTime(statusNow, language);
+
+  return (
+    <div
+      className={cn('canvas-session-status-queue', className)}
+      onPointerDown={(event) => event.stopPropagation()}
+      onWheel={(event) => event.stopPropagation()}
+    >
+      <div className="canvas-session-status-header">
+        <div className="canvas-session-status-title">
+          <SquareTerminal className="h-4 w-4 text-primary" />
+          <span>{t('canvasSessionStatusQueue')}</span>
+          <Badge variant="outline" className="canvas-session-status-count">
+            {queuePanels.length}
+          </Badge>
+        </div>
+        <IconButton
+          label={t('canvasSessionStatusRefresh')}
+          variant="ghost"
+          className="h-7 w-7"
+          onClick={onRefresh}
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+        </IconButton>
+      </div>
+
+      <div className="canvas-session-status-summary" title={t('canvasSessionStatusUpdatedAt', { time: refreshTime })}>
+        {statusCounts.running > 0 && <SessionStatusTag count={statusCounts.running} state="running" t={t} />}
+        {statusCounts.idle > 0 && <SessionStatusTag count={statusCounts.idle} state="idle" t={t} />}
+        {statusCounts.completed > 0 && <SessionStatusTag count={statusCounts.completed} state="completed" t={t} />}
+        {statusCounts.error > 0 && <SessionStatusTag count={statusCounts.error} state="error" t={t} />}
+        <span className="canvas-session-status-updated">
+          {t('canvasSessionStatusUpdatedAt', { time: refreshTime })}
+        </span>
+      </div>
+
+      <div className="canvas-session-status-list">
+        {queuePanels.map((panel) => {
+          const provider = getPanelCliProvider(panel);
+          const state = getPanelExecutionState(panel, statusNow);
+          const title = panel.title || getPanelFallbackTitle(panel, language);
+          const runtime = getSessionRuntimeElapsed(panel, statusNow);
+          const pathLabel = panel.cwd || t('defaultDirectory');
+          const commandTargeted = panel.id === commandTargetId;
+
+          return (
+            <button
+              key={panel.id}
+              type="button"
+              className={cn(
+                'canvas-session-status-row',
+                activeId === panel.id && 'is-active',
+                commandTargeted && 'is-command-target',
+                panel.minimized && 'is-minimized'
+              )}
+              title={`${t('canvasSessionStatusFocus')}: ${title}\n${pathLabel}`}
+              onClick={() => onFocusSession?.(panel.id)}
+            >
+              <span className={cn('terminal-endpoint-dot', `is-${state}`)} aria-hidden="true" />
+              <span className="canvas-session-status-copy">
+                <span className="canvas-session-status-name-row">
+                  <span className="canvas-session-status-name">{title}</span>
+                  {panel.minimized && (
+                    <span className="canvas-session-status-mini-badge">{t('canvasSessionStatusEndpoint')}</span>
+                  )}
+                  {commandTargeted && (
+                    <span className="canvas-session-status-mini-badge is-target">
+                      {t('floatingComposerCurrent')}
+                    </span>
+                  )}
+                </span>
+                <span className="canvas-session-status-meta">
+                  <CliProviderBadge
+                    className="canvas-session-status-provider"
+                    language={language}
+                    provider={provider}
+                  />
+                  <span className="canvas-session-status-path">{pathLabel}</span>
+                </span>
+              </span>
+              <span className="canvas-session-status-side">
+                <SessionStatusTag state={state} t={t} />
+                <span className="canvas-session-status-runtime" title={`${t('sessionRuntime')} ${runtime}`}>
+                  {runtime}
+                </span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -4078,7 +5211,9 @@ function createImageGenerationTaskItem(source = {}, prompt = '') {
     error: String(source.error || '').trim(),
     pollEvents: normalizeImageGenerationPollEvents(source.pollEvents),
     successPayload: normalizeImageGenerationPayload(source.successPayload),
-    failurePayload: normalizeImageGenerationPayload(source.failurePayload)
+    failurePayload: normalizeImageGenerationPayload(source.failurePayload),
+    requestParams: normalizeImageGenerationPayload(source.requestParams),
+    requestBody: normalizeImageGenerationPayload(source.requestBody)
   };
 }
 
@@ -4203,7 +5338,9 @@ function serializeImageGenerationHistoryItem(item) {
     error: String(item.error || '').trim(),
     pollEvents: normalizeImageGenerationPollEvents(item.pollEvents),
     successPayload: normalizeImageGenerationPayload(item.successPayload),
-    failurePayload: normalizeImageGenerationPayload(item.failurePayload)
+    failurePayload: normalizeImageGenerationPayload(item.failurePayload),
+    requestParams: normalizeImageGenerationPayload(item.requestParams),
+    requestBody: normalizeImageGenerationPayload(item.requestBody)
   };
 }
 
@@ -4296,6 +5433,7 @@ function normalizeAgentRecord(record, fallbackIndex = 0) {
     name,
     instructions: String(record.instructions || ''),
     cliProviderId,
+    skills: normalizeAgentSkillReferences(record.skills),
     avatarPath: String(record.avatarPath || ''),
     avatarName: String(record.avatarName || ''),
     createdAt: Number.isFinite(record.createdAt) ? record.createdAt : now,
@@ -4310,6 +5448,7 @@ function createAgentRecord(name, cliProviderId = defaultCliProviderId) {
     name: String(name || '').trim() || 'Agent',
     instructions: '',
     cliProviderId: getCliProviderById(cliProviderId)?.id || defaultCliProviderId,
+    skills: [],
     avatarPath: '',
     avatarName: '',
     createdAt: now,
@@ -4350,6 +5489,7 @@ function loadAgents() {
 function buildAgentTaskPrompt(agent, taskDescription) {
   const name = String(agent?.name || 'Agent').trim();
   const instructions = String(agent?.instructions || '').trim();
+  const skills = normalizeAgentSkillReferences(agent?.skills);
   const task = String(taskDescription || '').trim();
   const sections = [`You are the saved CLI in One agent "${name}".`];
 
@@ -4357,8 +5497,442 @@ function buildAgentTaskPrompt(agent, taskDescription) {
     sections.push(`Agent instructions:\n${instructions}`);
   }
 
+  if (skills.length > 0) {
+    sections.push([
+      'Associated skills:',
+      'The following skill directories are attached to this agent. When relevant, read and follow the SKILL.md in each directory:',
+      ...skills
+        .map((skill) => getAgentSkillReferenceDirectoryPath(skill))
+        .filter(Boolean)
+        .map((directoryPath) => `- ${directoryPath}`)
+    ].join('\n'));
+  }
+
+  sections.push([
+    'Progress tracking:',
+    'Start with a concise editable plan and a Markdown task list.',
+    'Use "- [ ] task" for pending work, "- [~] task" for active work, and "- [x] task" for completed work when reporting progress.'
+  ].join('\n'));
+
   sections.push(`Task:\n${task}`);
   return sections.join('\n\n');
+}
+
+function buildInteractiveCodeReviewTask({ comments, snapshot }) {
+  const repositoryRoot = String(snapshot?.repositoryRoot || snapshot?.cwd || '').trim();
+  const status = String(snapshot?.status || '').trim();
+  const stagedStat = String(snapshot?.stagedStat || '').trim();
+  const unstagedStat = String(snapshot?.unstagedStat || '').trim();
+  const diffText = String(snapshot?.text || '').trim();
+  const sections = [
+    'You are receiving batched human code review feedback for the current workspace.',
+    [
+      'Review objective:',
+      'Apply the requested fixes from the human comments below.',
+      'Keep the change scoped to the reviewed diff.',
+      'Do not revert or overwrite unrelated user changes.',
+      'After editing, summarize what changed and list any verification you ran.'
+    ].join('\n')
+  ];
+
+  if (repositoryRoot) {
+    sections.push(`Repository:\n${repositoryRoot}`);
+  }
+
+  sections.push(`Human review comments:\n${String(comments || '').trim()}`);
+
+  if (status) {
+    sections.push(`Git status:\n${status}`);
+  }
+  if (stagedStat || unstagedStat) {
+    sections.push([
+      stagedStat && `Staged diff stat:\n${stagedStat}`,
+      unstagedStat && `Unstaged diff stat:\n${unstagedStat}`
+    ].filter(Boolean).join('\n\n'));
+  }
+  if (diffText) {
+    sections.push(`Current Git diff:\n\`\`\`diff\n${diffText}\n\`\`\``);
+  }
+  if (snapshot?.truncated) {
+    sections.push('Note: The diff snapshot was truncated. Re-read the local git diff before making edits if more context is needed.');
+  }
+
+  return sections.join('\n\n');
+}
+
+function normalizeAutopilotScheduleType(value) {
+  const normalized = String(value || '').trim();
+  if (normalized === 'week') {
+    return 'weekly';
+  }
+  if (normalized === 'custom' || normalized === 'custom-cron') {
+    return 'cron';
+  }
+  return autopilotScheduleTypes.has(normalized) ? normalized : 'daily';
+}
+
+function normalizeAutopilotTime(value) {
+  const match = /^(\d{1,2}):(\d{1,2})$/.exec(String(value || '').trim());
+  if (!match) {
+    return autopilotDefaultTime;
+  }
+
+  const hour = Number.parseInt(match[1], 10);
+  const minute = Number.parseInt(match[2], 10);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+    return autopilotDefaultTime;
+  }
+
+  const normalizedHour = Math.min(23, Math.max(0, hour));
+  const normalizedMinute = Math.min(59, Math.max(0, minute));
+  return `${String(normalizedHour).padStart(2, '0')}:${String(normalizedMinute).padStart(2, '0')}`;
+}
+
+function getAutopilotTimeParts(value) {
+  const [hour, minute] = normalizeAutopilotTime(value).split(':').map((part) => Number.parseInt(part, 10));
+  return { hour, minute };
+}
+
+function normalizeAutopilotWeekday(value) {
+  const normalized = String(Number.parseInt(value, 10));
+  return autopilotWeekdayIds.includes(normalized) ? normalized : '1';
+}
+
+function normalizeAutopilotCronExpression(value) {
+  const normalized = String(value || '').trim().replace(/\s+/g, ' ');
+  return normalized || autopilotDefaultCronExpression;
+}
+
+function normalizeAutopilotTimestamp(value, fallback = 0) {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : fallback;
+}
+
+function createAutopilotRecord(agentId = '') {
+  const now = Date.now();
+  return {
+    id: createLocalId('autopilot'),
+    name: 'Autopilot',
+    enabled: false,
+    agentId: String(agentId || '').trim(),
+    runbook: '',
+    scheduleType: 'daily',
+    time: autopilotDefaultTime,
+    weekday: '1',
+    cronExpression: autopilotDefaultCronExpression,
+    lastRunAt: 0,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function normalizeAutopilotRecord(record, fallbackIndex = 0) {
+  if (!record || typeof record !== 'object') {
+    return null;
+  }
+
+  const now = Date.now();
+  const id = String(record.id || '').trim() || createLocalId('autopilot');
+  const name = String(record.name || '').trim() || `Autopilot ${fallbackIndex + 1}`;
+  const scheduleType = normalizeAutopilotScheduleType(record.scheduleType || record.schedule);
+
+  return {
+    id,
+    name,
+    enabled: Boolean(record.enabled),
+    agentId: String(record.agentId || '').trim(),
+    runbook: String(record.runbook || record.task || ''),
+    scheduleType,
+    time: normalizeAutopilotTime(record.time || record.runAt),
+    weekday: normalizeAutopilotWeekday(record.weekday),
+    cronExpression: normalizeAutopilotCronExpression(record.cronExpression || record.cron),
+    lastRunAt: normalizeAutopilotTimestamp(record.lastRunAt),
+    createdAt: normalizeAutopilotTimestamp(record.createdAt, now),
+    updatedAt: normalizeAutopilotTimestamp(record.updatedAt, now)
+  };
+}
+
+function normalizeAutopilots(raw) {
+  const source = Array.isArray(raw)
+    ? raw
+    : Array.isArray(raw?.autopilots) ? raw.autopilots : [];
+  const seenIds = new Set();
+
+  return source
+    .map((record, index) => normalizeAutopilotRecord(record, index))
+    .filter(Boolean)
+    .map((autopilot) => {
+      if (!seenIds.has(autopilot.id)) {
+        seenIds.add(autopilot.id);
+        return autopilot;
+      }
+
+      const nextAutopilot = { ...autopilot, id: createLocalId('autopilot') };
+      seenIds.add(nextAutopilot.id);
+      return nextAutopilot;
+    });
+}
+
+function loadAutopilots() {
+  try {
+    return normalizeAutopilots(JSON.parse(localStorage.getItem(autopilotKey) || '[]'));
+  } catch {
+    localStorage.removeItem(autopilotKey);
+    return [];
+  }
+}
+
+function buildAutopilotRunbookTask(autopilot) {
+  const name = String(autopilot?.name || 'Autopilot').trim();
+  const runbook = String(autopilot?.runbook || '').trim();
+
+  return [
+    `Autopilot runbook: ${name}`,
+    'This task was launched automatically by CLI in One Autopilot.',
+    `Runbook:\n${runbook}`
+  ].join('\n\n');
+}
+
+const cronMonthAliases = {
+  jan: 1,
+  feb: 2,
+  mar: 3,
+  apr: 4,
+  may: 5,
+  jun: 6,
+  jul: 7,
+  aug: 8,
+  sep: 9,
+  oct: 10,
+  nov: 11,
+  dec: 12
+};
+
+const cronWeekdayAliases = {
+  sun: 0,
+  mon: 1,
+  tue: 2,
+  wed: 3,
+  thu: 4,
+  fri: 5,
+  sat: 6
+};
+
+function parseCronFieldValue(value, min, max, options = {}) {
+  const raw = String(value || '').trim().toLowerCase();
+  const aliases = options.aliases || {};
+  const aliasValue = Object.prototype.hasOwnProperty.call(aliases, raw) ? aliases[raw] : null;
+  const parsed = aliasValue ?? (/^\d+$/.test(raw) ? Number.parseInt(raw, 10) : Number.NaN);
+  const upperBound = options.dayOfWeek ? 7 : max;
+
+  if (!Number.isFinite(parsed) || parsed < min || parsed > upperBound) {
+    return null;
+  }
+
+  return options.dayOfWeek && parsed === 7 ? 0 : parsed;
+}
+
+function expandCronField(field, min, max, options = {}) {
+  const raw = String(field || '').trim().toLowerCase();
+  if (!raw) {
+    return null;
+  }
+
+  const wildcardValues = () => new Set(
+    Array.from({ length: max - min + 1 }, (_item, index) => min + index)
+  );
+
+  if (raw === '*' || raw === '?') {
+    return wildcardValues();
+  }
+
+  const values = new Set();
+  for (const segment of raw.split(',')) {
+    const [rangePart, stepPart] = segment.split('/');
+    const step = stepPart ? Number.parseInt(stepPart, 10) : 1;
+    if (!rangePart || !Number.isFinite(step) || step < 1) {
+      return null;
+    }
+
+    let start = null;
+    let end = null;
+    if (rangePart === '*' || rangePart === '?') {
+      start = min;
+      end = options.dayOfWeek ? 7 : max;
+    } else if (rangePart.includes('-')) {
+      const [startPart, endPart] = rangePart.split('-');
+      start = parseCronFieldValue(startPart, min, max, options);
+      end = parseCronFieldValue(endPart, min, max, options);
+      if (options.dayOfWeek && end === 0 && String(endPart).trim() === '7') {
+        end = 7;
+      }
+    } else {
+      start = parseCronFieldValue(rangePart, min, max, options);
+      end = start;
+    }
+
+    if (start === null || end === null || start > end) {
+      return null;
+    }
+
+    for (let value = start; value <= end; value += step) {
+      values.add(options.dayOfWeek && value === 7 ? 0 : value);
+    }
+  }
+
+  return values.size > 0 ? values : null;
+}
+
+function parseCronExpression(expression) {
+  const fields = String(expression || '').trim().replace(/\s+/g, ' ').split(' ');
+  if (fields.length !== 5) {
+    return null;
+  }
+
+  const minutes = expandCronField(fields[0], 0, 59);
+  const hours = expandCronField(fields[1], 0, 23);
+  const daysOfMonth = expandCronField(fields[2], 1, 31);
+  const months = expandCronField(fields[3], 1, 12, { aliases: cronMonthAliases });
+  const daysOfWeek = expandCronField(fields[4], 0, 6, {
+    aliases: cronWeekdayAliases,
+    dayOfWeek: true
+  });
+
+  if (!minutes || !hours || !daysOfMonth || !months || !daysOfWeek) {
+    return null;
+  }
+
+  return { minutes, hours, daysOfMonth, months, daysOfWeek };
+}
+
+function isCronMatch(parsedCron, date) {
+  return (
+    parsedCron.minutes.has(date.getMinutes()) &&
+    parsedCron.hours.has(date.getHours()) &&
+    parsedCron.daysOfMonth.has(date.getDate()) &&
+    parsedCron.months.has(date.getMonth() + 1) &&
+    parsedCron.daysOfWeek.has(date.getDay())
+  );
+}
+
+function getCronNextRunAt(expression, afterMs) {
+  const parsedCron = parseCronExpression(expression);
+  if (!parsedCron || !Number.isFinite(afterMs)) {
+    return null;
+  }
+
+  const candidate = new Date(afterMs + 60000);
+  candidate.setSeconds(0, 0);
+  const maxMinutes = 366 * 24 * 60;
+
+  for (let index = 0; index < maxMinutes; index += 1) {
+    if (isCronMatch(parsedCron, candidate)) {
+      return candidate.getTime();
+    }
+    candidate.setMinutes(candidate.getMinutes() + 1);
+  }
+
+  return null;
+}
+
+function getAutopilotTimedNextRunAt(afterMs, time, predicate, maxDays = 14) {
+  if (!Number.isFinite(afterMs)) {
+    return null;
+  }
+
+  const { hour, minute } = getAutopilotTimeParts(time);
+  const baseDate = new Date(afterMs);
+  for (let offset = 0; offset <= maxDays; offset += 1) {
+    const candidate = new Date(baseDate);
+    candidate.setDate(baseDate.getDate() + offset);
+    candidate.setHours(hour, minute, 0, 0);
+    if (candidate.getTime() > afterMs && predicate(candidate)) {
+      return candidate.getTime();
+    }
+  }
+
+  return null;
+}
+
+function getAutopilotNextRunAt(autopilot, afterMs = Date.now()) {
+  const record = normalizeAutopilotRecord(autopilot);
+  if (!record) {
+    return null;
+  }
+
+  if (record.scheduleType === 'cron') {
+    return getCronNextRunAt(record.cronExpression, afterMs);
+  }
+
+  if (record.scheduleType === 'weekday') {
+    return getAutopilotTimedNextRunAt(
+      afterMs,
+      record.time,
+      (date) => date.getDay() >= 1 && date.getDay() <= 5,
+      8
+    );
+  }
+
+  if (record.scheduleType === 'weekly') {
+    const weekday = Number.parseInt(record.weekday, 10);
+    return getAutopilotTimedNextRunAt(
+      afterMs,
+      record.time,
+      (date) => date.getDay() === weekday,
+      8
+    );
+  }
+
+  return getAutopilotTimedNextRunAt(afterMs, record.time, () => true, 2);
+}
+
+function formatAutopilotDateTime(value, language) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) {
+    return '';
+  }
+
+  return new Date(timestamp).toLocaleString(language === 'en' ? 'en-US' : 'zh-CN', {
+    hour12: false,
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function getAutopilotWeekdayLabel(weekday, t) {
+  const keyByDay = {
+    0: 'weekdaySunday',
+    1: 'weekdayMonday',
+    2: 'weekdayTuesday',
+    3: 'weekdayWednesday',
+    4: 'weekdayThursday',
+    5: 'weekdayFriday',
+    6: 'weekdaySaturday'
+  };
+  return t(keyByDay[Number.parseInt(weekday, 10)] || 'weekdayMonday');
+}
+
+function describeAutopilotSchedule(autopilot, t) {
+  const record = normalizeAutopilotRecord(autopilot);
+  if (!record) {
+    return '';
+  }
+
+  if (record.scheduleType === 'cron') {
+    return `${t('autopilotScheduleCron')}: ${record.cronExpression}`;
+  }
+
+  if (record.scheduleType === 'weekday') {
+    return `${t('autopilotScheduleWeekday')} ${record.time}`;
+  }
+
+  if (record.scheduleType === 'weekly') {
+    return `${t('autopilotScheduleWeekly')} ${getAutopilotWeekdayLabel(record.weekday, t)} ${record.time}`;
+  }
+
+  return `${t('autopilotScheduleDaily')} ${record.time}`;
 }
 
 function deriveNameFromPath(value) {
@@ -4425,6 +5999,7 @@ function resolveWorkspaceLaunchContext(activeProject, requestedCwd, fallbackCwd 
 function createEmptyWorkspace() {
   return {
     sidebarCollapsed: false,
+    promptMenuCollapsed: false,
     skillsCollapsed: false,
     activeProjectId: null,
     canvasMode: 'project',
@@ -4537,6 +6112,7 @@ function normalizeWorkspace(raw) {
   return {
     ...fallback,
     sidebarCollapsed: Boolean(raw.sidebarCollapsed),
+    promptMenuCollapsed: Boolean(raw.promptMenuCollapsed),
     skillsCollapsed: Boolean(raw.skillsCollapsed),
     activeProjectId,
     canvasMode,
@@ -4578,6 +6154,125 @@ function createEmptyWorkspaceSkillsSnapshot(rootPath = '') {
   };
 }
 
+function countWorkspaceTreeNodes(root) {
+  const counts = {
+    directoryCount: 0,
+    fileCount: 0,
+    omittedCount: 0,
+    truncated: false
+  };
+
+  const visit = (node, isRoot = false) => {
+    if (!node || typeof node !== 'object') {
+      return;
+    }
+
+    if (node.type === 'directory') {
+      if (!isRoot) {
+        counts.directoryCount += 1;
+      }
+
+      if (node.ignored) {
+        counts.omittedCount += 1;
+        counts.truncated = true;
+      }
+    } else if (node.type === 'file' || node.type === 'link') {
+      counts.fileCount += 1;
+    } else if (node.type === 'omitted') {
+      counts.omittedCount += Number(node.omittedCount) || 0;
+      counts.truncated = true;
+    } else if (node.type === 'depth-limit') {
+      counts.omittedCount += 1;
+      counts.truncated = true;
+    }
+
+    if (Array.isArray(node.children)) {
+      node.children.forEach((child) => visit(child, false));
+    }
+  };
+
+  visit(root, true);
+  return counts;
+}
+
+function mergeWorkspaceTreeNodeChildren(node, targetNodeId, loadedRoot) {
+  if (!node || !targetNodeId) {
+    return node;
+  }
+
+  if (node.id === targetNodeId) {
+    return {
+      ...node,
+      children: Array.isArray(loadedRoot?.children) ? loadedRoot.children : [],
+      childrenLoaded: true
+    };
+  }
+
+  const children = Array.isArray(node.children) ? node.children : [];
+  let changed = false;
+  const nextChildren = children.map((child) => {
+    const nextChild = mergeWorkspaceTreeNodeChildren(child, targetNodeId, loadedRoot);
+    if (nextChild !== child) {
+      changed = true;
+    }
+    return nextChild;
+  });
+
+  return changed ? { ...node, children: nextChildren } : node;
+}
+
+function normalizeWorkspaceTreeRelativePath(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+}
+
+function joinWorkspaceTreeRelativePath(basePath, childPath) {
+  const base = normalizeWorkspaceTreeRelativePath(basePath);
+  const child = normalizeWorkspaceTreeRelativePath(childPath);
+  return [base, child].filter(Boolean).join('/');
+}
+
+function rebaseWorkspaceTreeNodeRelativePaths(node, baseRelativePath) {
+  if (!node || typeof node !== 'object') {
+    return node;
+  }
+
+  const relativePath = normalizeWorkspaceTreeRelativePath(node.relativePath);
+  const nextChildren = Array.isArray(node.children)
+    ? node.children.map((child) => rebaseWorkspaceTreeNodeRelativePaths(child, baseRelativePath))
+    : [];
+
+  return {
+    ...node,
+    relativePath: relativePath ? joinWorkspaceTreeRelativePath(baseRelativePath, relativePath) : relativePath,
+    children: nextChildren
+  };
+}
+
+function rebaseWorkspaceTreeLoadedRoot(loadedRoot, targetRelativePath) {
+  if (!loadedRoot || typeof loadedRoot !== 'object') {
+    return loadedRoot;
+  }
+
+  return {
+    ...loadedRoot,
+    children: Array.isArray(loadedRoot.children)
+      ? loadedRoot.children.map((child) => rebaseWorkspaceTreeNodeRelativePaths(child, targetRelativePath))
+      : []
+  };
+}
+
+function withWorkspaceTreeCounts(snapshot) {
+  if (!snapshot?.root) {
+    return snapshot;
+  }
+
+  const counts = countWorkspaceTreeNodes(snapshot.root);
+  return {
+    ...snapshot,
+    ...counts
+  };
+}
+
 function normalizeWorkspaceSkillsSnapshot(snapshot, fallbackRootPath = '') {
   const rootPath = String(snapshot?.cwd || fallbackRootPath || '').trim();
   const scopeMap = new Map(
@@ -4598,6 +6293,16 @@ function normalizeWorkspaceSkillsSnapshot(snapshot, fallbackRootPath = '') {
         }))
         .filter((file) => file.path || file.relativePath || file.name)
       : [];
+    const skills = normalizeAgentSkillReferences(
+      Array.isArray(current.skills)
+        ? current.skills.map((skill) => ({
+          ...skill,
+          sourceDirectoryName: skill?.sourceDirectoryName || source.directoryName,
+          sourceId: skill?.sourceId || source.id,
+          sourceScope: skill?.sourceScope || source.scope || 'project'
+        }))
+        : []
+    );
 
     return {
       id: source.id,
@@ -4608,6 +6313,8 @@ function normalizeWorkspaceSkillsSnapshot(snapshot, fallbackRootPath = '') {
       fileCount: Number.isFinite(current.fileCount) ? current.fileCount : files.length,
       files,
       path: String(current.path || '').trim(),
+      skillCount: Number.isFinite(current.skillCount) ? current.skillCount : skills.length,
+      skills,
       truncated: Boolean(current.truncated)
     };
   });
@@ -4632,6 +6339,19 @@ function IconButton({ label, children, ...props }) {
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+function SidebarCollapseIcon({ collapsed }) {
+  return (
+    <span className="t-icon-swap sidebar-collapse-icon" data-state={collapsed ? 'b' : 'a'} aria-hidden="true">
+      <span className="t-icon" data-icon="a">
+        <PanelLeftClose className="h-4 w-4" />
+      </span>
+      <span className="t-icon" data-icon="b">
+        <PanelLeftOpen className="h-4 w-4" />
+      </span>
+    </span>
   );
 }
 
@@ -4789,7 +6509,9 @@ function CanvasTodoList({
   onItemRemove,
   onItemTextChange,
   onMove,
+  onPlanTextChange,
   onResize,
+  onAutoSyncChange,
   onTitleChange,
   onTitleCommit,
   onTogglePinned
@@ -4800,6 +6522,10 @@ function CanvasTodoList({
   const progressText = items.length > 0
     ? t('canvasTodoProgress', { done: completedCount, total: items.length })
     : t('canvasTodoProgressEmpty');
+  const linkedPanelTitle = todo.linkedPanelTitle || todo.agentName || '';
+  const linkedPanelLabel = linkedPanelTitle
+    ? t('canvasTodoLinkedSession', { name: linkedPanelTitle })
+    : '';
 
   const addDraftItem = () => {
     const text = draft.trim();
@@ -4886,7 +6612,12 @@ function CanvasTodoList({
 
   return (
     <section
-      className={cn('canvas-todo-panel', active && 'is-active', todo.pinned && 'is-pinned')}
+      className={cn(
+        'canvas-todo-panel',
+        active && 'is-active',
+        todo.pinned && 'is-pinned',
+        todo.linkedPanelId && 'is-linked'
+      )}
       style={{
         left: todo.x,
         top: todo.y,
@@ -4952,9 +6683,47 @@ function CanvasTodoList({
         </Button>
       </header>
 
-      <div className="canvas-todo-progress">{progressText}</div>
+      {(linkedPanelLabel || todo.linkedPanelId) && (
+        <div className="canvas-todo-meta-row">
+          {linkedPanelLabel && (
+            <div className="canvas-todo-linked-session" title={linkedPanelLabel}>
+              <Bot className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>{linkedPanelLabel}</span>
+            </div>
+          )}
+          <Button
+            type="button"
+            variant={todo.autoSync ? 'primary' : 'outline'}
+            size="sm"
+            className="canvas-todo-sync-button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onAutoSyncChange?.(todo.id, !todo.autoSync);
+            }}
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            {t(todo.autoSync ? 'canvasTodoAutoSync' : 'canvasTodoManualSync')}
+          </Button>
+        </div>
+      )}
+
+      <div className="canvas-todo-plan-block">
+        <div className="canvas-todo-section-title">{t('canvasTodoPlan')}</div>
+        <Textarea
+          className="canvas-todo-plan-text"
+          value={todo.planText || ''}
+          placeholder={t('canvasTodoPlanPlaceholder')}
+          spellCheck={false}
+          onChange={(event) => onPlanTextChange?.(todo.id, event.target.value)}
+          onKeyDown={(event) => event.stopPropagation()}
+        />
+      </div>
 
       <div className="canvas-todo-add-row">
+        <div className="canvas-todo-section-title">
+          <span>{t('canvasTodoTasks')}</span>
+          <span>{progressText}</span>
+        </div>
         <Input
           value={draft}
           placeholder={t('canvasTodoAddPlaceholder')}
@@ -4985,7 +6754,7 @@ function CanvasTodoList({
           items.map((item) => (
             <div
               key={item.id}
-              className={cn('canvas-todo-item', item.done && 'is-done')}
+              className={cn('canvas-todo-item', `is-${item.status || 'todo'}`, item.done && 'is-done')}
               role="listitem"
             >
               <input
@@ -5496,6 +7265,7 @@ function EndpointGroup({
 function TerminalPanel({
   panel,
   active,
+  language,
   runtimeNow,
   scale,
   sessionHeaderVisibility,
@@ -5510,6 +7280,11 @@ function TerminalPanel({
   arrangeAnimation = null,
   dispatchSparkleKey = '',
   onActivate,
+  onAgentAttachImages,
+  onAgentInsertDiff,
+  onAgentOpenFiles,
+  onAgentOpenReview,
+  onAgentSetQuickTarget,
   onClose,
   onConnectionPortClick,
   onConnectionPortPointerDown,
@@ -5531,10 +7306,14 @@ function TerminalPanel({
   const fitAddonRef = useRef(null);
   const scrollbarTrackRef = useRef(null);
   const terminalScaleRef = useRef(normalizeTerminalCanvasScale(scale));
+  const agentImageInputRef = useRef(null);
+  const [openMotionState, setOpenMotionState] = useState('opening');
+  const [agentDiffLoading, setAgentDiffLoading] = useState(false);
   const [scrollbarTrackHeight, setScrollbarTrackHeight] = useState(0);
   const [scrollbarState, setScrollbarState] = useState({ baseY: 0, rows: 0, viewportY: 0 });
   const [contextMenu, setContextMenu] = useState(null);
   const panelProvider = getPanelCliProvider(panel);
+  const panelProviderLabel = getCliProviderBadgeLabel(panelProvider, language);
   const sessionTag = getPanelSessionTag(panel);
   const headerVisibility = normalizeSessionHeaderVisibility(sessionHeaderVisibility);
   const showHeaderTag = headerVisibility.tag;
@@ -5547,6 +7326,7 @@ function TerminalPanel({
     || showHeaderContext
     || showHeaderStatus
     || showHeaderRuntime;
+  const showAgentUtilityBar = Boolean(String(panel.agentId || panel.agentTask || '').trim());
   const arrangeStyle = arrangeAnimation ? {
     '--canvas-arrange-delay': `${arrangeAnimation.delay || 0}ms`,
     '--canvas-arrange-duration': `${canvasArrangeDurationMs}ms`,
@@ -5593,9 +7373,49 @@ function TerminalPanel({
     terminalScaleRef.current = normalizeTerminalCanvasScale(scale);
   }, [scale]);
 
+  useEffect(() => {
+    setOpenMotionState('opening');
+    const frameId = window.requestAnimationFrame(() => setOpenMotionState('open'));
+    const timerId = window.setTimeout(() => setOpenMotionState('done'), terminalPanelOpenDurationMs + 80);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      window.clearTimeout(timerId);
+    };
+  }, [panel.id]);
+
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
   }, []);
+
+  const openAgentImagePicker = useCallback((event) => {
+    event?.stopPropagation?.();
+    agentImageInputRef.current?.click();
+  }, []);
+
+  const handleAgentImageInputChange = useCallback(async (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (files.length === 0) {
+      return;
+    }
+
+    await onAgentAttachImages?.(panel.id, files);
+  }, [onAgentAttachImages, panel.id]);
+
+  const handleAgentDiffClick = useCallback(async (event) => {
+    event.stopPropagation();
+    if (agentDiffLoading) {
+      return;
+    }
+
+    setAgentDiffLoading(true);
+    try {
+      await onAgentInsertDiff?.(panel.id);
+    } finally {
+      setAgentDiffLoading(false);
+    }
+  }, [agentDiffLoading, onAgentInsertDiff, panel.id]);
 
   const openPanelContextMenu = useCallback((event) => {
     if (!visible) {
@@ -5772,7 +7592,7 @@ function TerminalPanel({
     terminalTextarea?.addEventListener('focus', handleTextAreaFocus);
 
     const dataDisposable = term.onData((data) => {
-      onTerminalInput(panel.id);
+      onTerminalInput(panel.id, data);
       bridge.writeTerminal(panel.id, data);
     });
     const resizeDisposable = term.onResize(({ cols, rows }) => bridge.resizeTerminal(panel.id, cols, rows));
@@ -6110,6 +7930,7 @@ function TerminalPanel({
       className={cn(
         'terminal-panel',
         active && !panel.minimized && 'active',
+        showAgentUtilityBar && 'is-agent-session',
         panel.minimized && 'is-minimized',
         panel.minimized && selected && 'is-selected',
         commandTargeted && 'is-command-target',
@@ -6117,6 +7938,8 @@ function TerminalPanel({
         pendingConnectionSourceId === panel.id && 'is-connection-source',
         arrangeAnimation && 'is-arranging',
         dispatchSparkleKey && 'is-dispatch-sparkling',
+        openMotionState !== 'done' && 't-modal',
+        openMotionState === 'open' && 'is-open',
         !visible && 'is-hidden'
       )}
       data-terminal-id={panel.id}
@@ -6328,6 +8151,103 @@ function TerminalPanel({
             </Button>
           </div>
         </CardHeader>
+      )}
+      {showAgentUtilityBar && (
+        <div
+          className="agent-utility-bar"
+          onPointerDown={(event) => event.stopPropagation()}
+          onWheel={(event) => event.stopPropagation()}
+        >
+          <input
+            ref={agentImageInputRef}
+            className="hidden"
+            type="file"
+            accept="image/*"
+            multiple
+            tabIndex={-1}
+            onChange={handleAgentImageInputChange}
+          />
+          <div className="agent-utility-summary" title={panelProviderLabel}>
+            <CliProviderIcon provider={panelProvider} className="h-3.5 w-3.5" />
+            <span>{t('agentUtilityBarTitle')}</span>
+          </div>
+          <div className="agent-utility-actions">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="agent-utility-action"
+              title={t('agentUtilityQuickTargetTitle')}
+              aria-label={t('agentUtilityQuickTargetTitle')}
+              onClick={(event) => {
+                event.stopPropagation();
+                onAgentSetQuickTarget?.(panel.id);
+              }}
+            >
+              <MessageSquarePlus className="h-3.5 w-3.5" />
+              {t('agentUtilityQuickTarget')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="agent-utility-action"
+              title={t('agentUtilityAttachImageTitle')}
+              aria-label={t('agentUtilityAttachImageTitle')}
+              onClick={openAgentImagePicker}
+            >
+              <ImagePlus className="h-3.5 w-3.5" />
+              {t('agentUtilityAttachImage')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="agent-utility-action"
+              title={t('agentUtilityFilesTitle')}
+              aria-label={t('agentUtilityFilesTitle')}
+              onClick={(event) => {
+                event.stopPropagation();
+                onAgentOpenFiles?.(panel.id);
+              }}
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              {t('agentUtilityFiles')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="agent-utility-action"
+              title={t('agentUtilityDiffTitle')}
+              aria-label={t('agentUtilityDiffTitle')}
+              onClick={handleAgentDiffClick}
+              disabled={agentDiffLoading}
+            >
+              {agentDiffLoading ? (
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <GitBranch className="h-3.5 w-3.5" />
+              )}
+              {agentDiffLoading ? t('agentUtilityDiffLoading') : t('agentUtilityDiff')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="agent-utility-action"
+              title={t('agentUtilityReviewTitle')}
+              aria-label={t('agentUtilityReviewTitle')}
+              onClick={(event) => {
+                event.stopPropagation();
+                onAgentOpenReview?.(panel.id);
+              }}
+            >
+              <FileDiff className="h-3.5 w-3.5" />
+              {t('agentUtilityReview')}
+            </Button>
+          </div>
+        </div>
       )}
       <CardContent className="terminal-host p-2" onWheel={(event) => event.stopPropagation()}>
         <div ref={hostRef} className="terminal-host-surface" />
@@ -6582,11 +8502,13 @@ function CodexConfigDialog({
   appZoomFactor,
   canvasMode,
   commandDockShortcuts,
+  historyProject,
   initialSettingsTab = 'preferences',
   language,
   onAppZoomFactorChange,
   onCanvasModeChange,
   onCommandDockShortcutChange,
+  onHistoryProjectOpen,
   onLanguageChange,
   onOpenChange,
   onProfileChanged,
@@ -7263,18 +9185,35 @@ function CodexConfigDialog({
     }
   };
 
-  const handleOpenChange = (nextOpen) => {
-    if (!nextOpen && (dirty || profileDirty || claudeProfileDirty || imageApiDirty || usageDirty)) {
+  const confirmCloseWithUnsavedChanges = () => {
+    if (dirty || profileDirty || claudeProfileDirty || imageApiDirty || usageDirty) {
       const meta = getConfigFileMeta(activeFile);
       const name = dirty
         ? meta.title
         : profileDirty ? t('codexQuickConfig') : claudeProfileDirty ? t('claudeQuickConfig') : imageApiDirty ? t('imageApiConfig') : t('usageTracking');
       if (!window.confirm(t('unsavedCloseConfirm', { name }))) {
-        return;
+        return false;
       }
     }
 
+    return true;
+  };
+
+  const handleOpenChange = (nextOpen) => {
+    if (!nextOpen && !confirmCloseWithUnsavedChanges()) {
+      return;
+    }
+
     onOpenChange(nextOpen);
+  };
+
+  const openHistoryProject = () => {
+    if (!historyProject || !confirmCloseWithUnsavedChanges()) {
+      return;
+    }
+
+    onOpenChange(false);
+    onHistoryProjectOpen?.();
   };
 
   const switchFile = (nextFile) => {
@@ -7542,7 +9481,7 @@ function CodexConfigDialog({
         <Tabs
           value={activeSettingsTab}
           onValueChange={setActiveSettingsTab}
-          className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] p-3"
+          className="settings-tabs grid min-h-0 grid-rows-[auto_minmax(0,1fr)] p-3"
         >
           <TabsList className="w-full justify-start overflow-x-auto">
             <TabsTrigger className="shrink-0" value="preferences">{t('preferences')}</TabsTrigger>
@@ -7552,7 +9491,8 @@ function CodexConfigDialog({
             <TabsTrigger className="shrink-0" value="files">{t('configFiles')}</TabsTrigger>
           </TabsList>
 
-          <TabsContent value="preferences" className="min-h-0 overflow-y-auto pr-1">
+          <div className="settings-page-slide" data-settings-page={activeSettingsTab}>
+          <TabsContent keepMounted value="preferences" className="settings-page min-h-0 overflow-y-auto pr-1">
           <div className="grid gap-3 rounded-md border border-border bg-muted/35 p-3">
             <div className="grid gap-2">
               <div className="grid gap-1.5">
@@ -7569,6 +9509,23 @@ function CodexConfigDialog({
                   </Button>
                 </div>
               </div>
+              {historyProject && (
+                <div className="grid gap-2 border-t border-border/70 pt-3">
+                  <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                    <Label className="flex min-w-0 items-center gap-2 text-sm font-medium">
+                      <FolderOpen className="h-4 w-4 shrink-0" />
+                      <span className="truncate">{t('historyFolder')}</span>
+                    </Label>
+                    <Button type="button" variant="outline" size="sm" onClick={openHistoryProject}>
+                      <FolderOpen className="h-3.5 w-3.5" />
+                      {t('openHistoryFolder')}
+                    </Button>
+                  </div>
+                  <div className="truncate rounded-md border border-border bg-background/70 px-3 py-2 font-mono text-xs text-muted-foreground" title={historyProject.path}>
+                    {historyProject.path || t('historyFolderUnavailable')}
+                  </div>
+                </div>
+              )}
               <div className="grid gap-2 border-t border-border/70 pt-3">
                 <Label className="flex items-center gap-2 text-sm font-medium">
                   <LayoutGrid className="h-4 w-4" />
@@ -7718,7 +9675,7 @@ function CodexConfigDialog({
           </div>
           </TabsContent>
 
-          <TabsContent value="imageApi" className="min-h-0 overflow-y-auto pr-1">
+          <TabsContent keepMounted value="imageApi" className="settings-page min-h-0 overflow-y-auto pr-1">
           <div className="grid gap-3">
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-card/65 px-3 py-2 text-xs text-muted-foreground">
             <span className="min-w-[220px] flex-1 leading-5">{t('imageApiHelp')}</span>
@@ -7809,6 +9766,18 @@ function CodexConfigDialog({
                   onChange={(event) => handleImageApiConfigChange('n', event.target.value)}
                 />
               </div>
+              <Label className="grid min-w-0 gap-1.5 rounded-md border border-border bg-background/70 px-3 py-2 text-xs text-foreground md:col-span-4">
+                <span className="inline-flex min-w-0 items-center gap-2 font-medium">
+                  <input
+                    type="checkbox"
+                    className="h-3.5 w-3.5 accent-primary"
+                    checked={Boolean(imageApiConfig.requestEditorEnabled)}
+                    onChange={(event) => handleImageApiConfigChange('requestEditorEnabled', event.target.checked)}
+                  />
+                  <span>{t('imageApiRequestEditor')}</span>
+                </span>
+                <span className="leading-5 text-muted-foreground">{t('imageApiRequestEditorHint')}</span>
+              </Label>
               <div className="flex min-w-0 items-end gap-2 md:col-span-2">
                 <Button
                   type="button"
@@ -7834,7 +9803,7 @@ function CodexConfigDialog({
           </div>
           </TabsContent>
 
-          <TabsContent value="usage" className="min-h-0 overflow-y-auto pr-1">
+          <TabsContent keepMounted value="usage" className="settings-page min-h-0 overflow-y-auto pr-1">
           <UsageTrackingPanel
             language={language}
             loading={usageLoading}
@@ -7850,7 +9819,7 @@ function CodexConfigDialog({
           />
           </TabsContent>
 
-          <TabsContent value="quickConfig" className="min-h-0 overflow-y-auto pr-1">
+          <TabsContent keepMounted value="quickConfig" className="settings-page min-h-0 overflow-y-auto pr-1">
           <div className="grid gap-3">
           <div className="grid gap-3 rounded-md border border-border bg-muted/35 p-3">
             <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
@@ -8172,7 +10141,7 @@ function CodexConfigDialog({
           </div>
           </TabsContent>
 
-          <TabsContent value="files" className="min-h-0 overflow-hidden">
+          <TabsContent keepMounted value="files" className="settings-page min-h-0 overflow-hidden">
           <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-2">
           <div className="grid gap-1.5 rounded-md border border-border bg-card/70 p-3">
             <div className="text-sm font-semibold">{t('rawCodexEditor')}</div>
@@ -8288,6 +10257,7 @@ function CodexConfigDialog({
           </div>
           </div>
           </TabsContent>
+          </div>
         </Tabs>
 
         {activeSettingsTab === 'files' ? (
@@ -8377,13 +10347,21 @@ function CliProviderSelectField({
 }
 
 function NewSessionDialog({
+  activeCommandPresetId = '',
+  commandPresets = [],
+  commandPresetsLoading = false,
+  commandPresetsPath = '',
   defaultCwd,
   initialCliProviderId = defaultCliProviderId,
   language,
+  onCommandPresetDelete,
+  onCommandPresetSave,
+  onCommandPresetSelect,
   onOpenChange,
   onSelect,
   open,
   projects,
+  showToast,
   t
 }) {
   const selectableCliProviders = useMemo(() => getSelectableCliProviders(['project', 'directory']), []);
@@ -8392,8 +10370,12 @@ function NewSessionDialog({
   const [selectedCliProviderId, setSelectedCliProviderId] = useState(
     () => selectedInitialCliProviderId
   );
+  const [command, setCommand] = useState('');
+  const [selectedCommandPresetId, setSelectedCommandPresetId] = useState('');
+  const [commandPresetSaving, setCommandPresetSaving] = useState(false);
   const freeWindowDirectory = defaultCwd || t('defaultDirectory');
   const selectedCliProvider = resolveSelectableCliProvider(selectedCliProviderId, selectableCliProviders);
+  const commandPresetEnabled = selectedCliProvider?.id === 'shell';
   const providerDescription = getCliProviderDescription(selectedCliProvider, language);
   const launchCommand = selectedCliProvider
     ? (
@@ -8401,18 +10383,133 @@ function NewSessionDialog({
       || getCliLaunchCommand(selectedCliProvider, 'directory')
     )
     : '';
+  const normalizedCommand = normalizeCommandPresetCommandInput(command);
+  const activeCommandPreset = useMemo(() => (
+    commandPresets.find((preset) => preset.id === activeCommandPresetId) || null
+  ), [activeCommandPresetId, commandPresets]);
+  const selectedCommandPreset = useMemo(() => (
+    commandPresets.find((preset) => preset.id === selectedCommandPresetId) || null
+  ), [commandPresets, selectedCommandPresetId]);
 
   useEffect(() => {
     if (open) {
       setSelectedCliProviderId(selectedInitialCliProviderId);
+      setSelectedCommandPresetId(activeCommandPreset?.id || '');
+      setCommand(activeCommandPreset?.command || '');
     }
-  }, [open, selectedInitialCliProviderId]);
+  }, [activeCommandPreset, open, selectedInitialCliProviderId]);
+
+  useEffect(() => {
+    if (!open || !selectedCommandPresetId) {
+      return;
+    }
+
+    if (!commandPresets.some((preset) => preset.id === selectedCommandPresetId)) {
+      setSelectedCommandPresetId('');
+    }
+  }, [commandPresets, open, selectedCommandPresetId]);
 
   useEffect(() => {
     if (!selectedCliProvider || !getCliProviderById(selectedCliProviderId)) {
       setSelectedCliProviderId(selectedInitialCliProviderId);
     }
   }, [selectedCliProvider, selectedCliProviderId, selectedInitialCliProviderId]);
+
+  const selectCommandPreset = useCallback((presetId) => {
+    setSelectedCommandPresetId(presetId);
+    const preset = commandPresets.find((item) => item.id === presetId) || null;
+    setCommand(preset?.command || '');
+  }, [commandPresets]);
+
+  const saveCommandPreset = useCallback(async () => {
+    if (!normalizedCommand) {
+      showToast?.(t('commandPresetCommandRequired'));
+      return;
+    }
+
+    if (typeof onCommandPresetSave !== 'function') {
+      return;
+    }
+
+    const fallbackName = deriveCommandPresetTitle(normalizedCommand, t('commandPresetCommand'));
+    const name = selectedCommandPreset?.name || fallbackName;
+
+    setCommandPresetSaving(true);
+    try {
+      const store = await onCommandPresetSave({
+        id: selectedCommandPreset?.id || '',
+        name,
+        command: normalizedCommand
+      });
+      const savedPreset = store?.savedPreset
+        || (Array.isArray(store?.presets)
+          ? store.presets.find((preset) => (
+            preset.command === normalizedCommand && preset.name === name
+          ))
+          : null);
+      if (savedPreset?.id) {
+        setSelectedCommandPresetId(savedPreset.id);
+        setCommand(savedPreset.command || normalizedCommand);
+      }
+      showToast?.(t('commandPresetSaved', { name: savedPreset?.name || name }));
+    } catch (error) {
+      showToast?.(t('commandPresetSaveFailed', { message: error.message }));
+    } finally {
+      setCommandPresetSaving(false);
+    }
+  }, [normalizedCommand, onCommandPresetSave, selectedCommandPreset, showToast, t]);
+
+  const activateCommandPreset = useCallback(async () => {
+    if (!selectedCommandPreset || typeof onCommandPresetSelect !== 'function') {
+      return;
+    }
+
+    setCommandPresetSaving(true);
+    try {
+      await onCommandPresetSelect(selectedCommandPreset.id);
+      showToast?.(t('commandPresetSelected', { name: selectedCommandPreset.name }));
+    } catch (error) {
+      showToast?.(t('commandPresetSelectFailed', { message: error.message }));
+    } finally {
+      setCommandPresetSaving(false);
+    }
+  }, [onCommandPresetSelect, selectedCommandPreset, showToast, t]);
+
+  const deleteCommandPreset = useCallback(async () => {
+    if (!selectedCommandPreset || typeof onCommandPresetDelete !== 'function') {
+      return;
+    }
+
+    if (!window.confirm(t('commandPresetDeleteConfirm', { name: selectedCommandPreset.name }))) {
+      return;
+    }
+
+    setCommandPresetSaving(true);
+    try {
+      const deletedName = selectedCommandPreset.name;
+      await onCommandPresetDelete(selectedCommandPreset.id);
+      setSelectedCommandPresetId('');
+      setCommand('');
+      showToast?.(t('commandPresetDeleted', { name: deletedName }));
+    } catch (error) {
+      showToast?.(t('commandPresetDeleteFailed', { message: error.message }));
+    } finally {
+      setCommandPresetSaving(false);
+    }
+  }, [onCommandPresetDelete, selectedCommandPreset, showToast, t]);
+
+  const buildSelection = useCallback((selection) => {
+    const payload = {
+      ...selection,
+      cliProviderId: selectedCliProvider.id
+    };
+
+    if (commandPresetEnabled) {
+      payload.initialCommand = normalizedCommand;
+    }
+
+    return payload;
+  }, [commandPresetEnabled, normalizedCommand, selectedCliProvider]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -8454,6 +10551,75 @@ function NewSessionDialog({
             </div>
           )}
 
+          {commandPresetEnabled && (
+            <div className="grid gap-3 rounded-md border border-border bg-muted/35 p-3">
+              <div className="grid gap-2">
+                <Label htmlFor="newSessionCommandPresetSelect">{t('commandPreset')}</Label>
+                <Select
+                  id="newSessionCommandPresetSelect"
+                  title={commandPresetsPath}
+                  disabled={commandPresetsLoading || commandPresetSaving}
+                  onValueChange={selectCommandPreset}
+                  options={[
+                    { value: '', label: t('commandPresetNone') },
+                    ...commandPresets.map((preset) => ({
+                      value: preset.id,
+                      label: `${preset.name}${preset.id === activeCommandPresetId ? ` (${t('commandPresetDefaultBadge')})` : ''}`
+                    }))
+                  ]}
+                  value={selectedCommandPresetId}
+                />
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="newSessionCommandPresetCommandInput">{t('commandPresetCommand')}</Label>
+                <Textarea
+                  id="newSessionCommandPresetCommandInput"
+                  className="min-h-[84px] resize-y font-mono text-xs leading-5"
+                  spellCheck={false}
+                  value={command}
+                  placeholder={t('commandPresetPlaceholder')}
+                  onChange={(event) => setCommand(event.target.value)}
+                />
+                <div className="text-xs text-muted-foreground">
+                  {t('commandPresetHint')}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!normalizedCommand || commandPresetsLoading || commandPresetSaving}
+                    onClick={saveCommandPreset}
+                  >
+                    <Save className="h-4 w-4" />
+                    {t('commandPresetSave')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={selectedCommandPreset?.id === activeCommandPresetId ? 'primary' : 'outline'}
+                    size="sm"
+                    disabled={!selectedCommandPreset || commandPresetsLoading || commandPresetSaving}
+                    onClick={activateCommandPreset}
+                  >
+                    <Check className="h-4 w-4" />
+                    {t('commandPresetSetDefault')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={!selectedCommandPreset || commandPresetsLoading || commandPresetSaving}
+                    onClick={deleteCommandPreset}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    {t('commandPresetDelete')}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="grid gap-2">
             <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
               {t('cliTarget')}
@@ -8464,10 +10630,9 @@ function NewSessionDialog({
                 type="button"
                 variant="outline"
                 className="h-auto w-full justify-start whitespace-normal px-3 py-2 text-left"
-                onClick={() => onSelect({
-                  cliProviderId: selectedCliProvider.id,
+                onClick={() => onSelect(buildSelection({
                   targetType: 'directory'
-                })}
+                }))}
               >
                 <SquareTerminal className="h-4 w-4 shrink-0" />
                 <span className="grid min-w-0 flex-1 gap-1">
@@ -8487,11 +10652,10 @@ function NewSessionDialog({
                     type="button"
                     variant="ghost"
                     className="h-auto w-full justify-start whitespace-normal px-3 py-2 text-left"
-                    onClick={() => onSelect({
-                      cliProviderId: selectedCliProvider.id,
+                    onClick={() => onSelect(buildSelection({
                       targetType: 'project',
                       projectId: project.id
-                    })}
+                    }))}
                   >
                     <FolderOpen className="h-4 w-4 shrink-0" />
                     <span className="grid min-w-0 flex-1 gap-1">
@@ -8550,29 +10714,49 @@ function AgentsDialog({
   onOpenChange,
   onRunAgent,
   open,
+  skillsState,
   showToast,
   t
 }) {
   const selectableCliProviders = useMemo(() => getSelectableCliProviders(['project', 'directory']), []);
   const initialProviderId = getInitialCliProviderId(initialCliProviderId, selectableCliProviders);
   const avatarInputRef = useRef(null);
+  const agentSkillOptions = useMemo(
+    () => getWorkspaceAgentSkillOptions(skillsState?.snapshot),
+    [skillsState?.snapshot]
+  );
   const [selectedAgentId, setSelectedAgentId] = useState('');
   const [draftName, setDraftName] = useState('');
   const [draftInstructions, setDraftInstructions] = useState('');
   const [draftCliProviderId, setDraftCliProviderId] = useState(initialProviderId);
   const [draftAvatarPath, setDraftAvatarPath] = useState('');
   const [draftAvatarName, setDraftAvatarName] = useState('');
+  const [draftSkills, setDraftSkills] = useState([]);
   const [taskDescription, setTaskDescription] = useState('');
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
+  const visibleAgentSkillOptions = useMemo(
+    () => mergeAgentSkillReferences(agentSkillOptions, draftSkills),
+    [agentSkillOptions, draftSkills]
+  );
+  const selectedAgentSkillKeys = useMemo(
+    () => new Set(draftSkills.map(getAgentSkillReferenceKey).filter(Boolean)),
+    [draftSkills]
+  );
+  const scannedAgentSkillKeys = useMemo(
+    () => new Set(agentSkillOptions.map(getAgentSkillReferenceKey).filter(Boolean)),
+    [agentSkillOptions]
+  );
   const draftAgentForAvatar = selectedAgent
     ? { ...selectedAgent, avatarPath: draftAvatarPath, avatarName: draftAvatarName }
     : null;
   const normalizedName = draftName.trim();
   const normalizedTask = trimTrailingLineBreaks(taskDescription).trim();
+  const agentSkillsLoading = skillsState?.status === 'loading';
   const dirty = Boolean(selectedAgent) && (
     normalizedName !== selectedAgent.name ||
     draftInstructions !== selectedAgent.instructions ||
     draftCliProviderId !== selectedAgent.cliProviderId ||
+    !areAgentSkillReferencesEqual(draftSkills, selectedAgent.skills) ||
     draftAvatarPath !== String(selectedAgent.avatarPath || '') ||
     draftAvatarName !== String(selectedAgent.avatarName || '')
   );
@@ -8594,6 +10778,7 @@ function AgentsDialog({
       setDraftCliProviderId(initialProviderId);
       setDraftAvatarPath('');
       setDraftAvatarName('');
+      setDraftSkills([]);
       return;
     }
 
@@ -8602,6 +10787,7 @@ function AgentsDialog({
     setDraftCliProviderId(getInitialCliProviderId(selectedAgent.cliProviderId, selectableCliProviders));
     setDraftAvatarPath(selectedAgent.avatarPath || '');
     setDraftAvatarName(selectedAgent.avatarName || '');
+    setDraftSkills(normalizeAgentSkillReferences(selectedAgent.skills));
   }, [initialProviderId, selectableCliProviders, selectedAgent]);
 
   const createAgent = useCallback(() => {
@@ -8626,6 +10812,7 @@ function AgentsDialog({
       name: normalizedName,
       instructions: draftInstructions,
       cliProviderId: getInitialCliProviderId(draftCliProviderId, selectableCliProviders),
+      skills: normalizeAgentSkillReferences(draftSkills),
       avatarPath: draftAvatarPath,
       avatarName: draftAvatarName,
       updatedAt: Date.now()
@@ -8642,6 +10829,7 @@ function AgentsDialog({
     draftAvatarName,
     draftAvatarPath,
     draftInstructions,
+    draftSkills,
     normalizedName,
     onAgentsChange,
     selectableCliProviders,
@@ -8694,6 +10882,22 @@ function AgentsDialog({
   const removeAgentAvatar = useCallback(() => {
     setDraftAvatarPath('');
     setDraftAvatarName('');
+  }, []);
+
+  const toggleAgentSkill = useCallback((skill) => {
+    const normalizedSkill = normalizeAgentSkillReference(skill);
+    const key = getAgentSkillReferenceKey(normalizedSkill);
+    if (!normalizedSkill || !key) {
+      return;
+    }
+
+    setDraftSkills((current) => {
+      if (current.some((item) => getAgentSkillReferenceKey(item) === key)) {
+        return current.filter((item) => getAgentSkillReferenceKey(item) !== key);
+      }
+
+      return normalizeAgentSkillReferences([...current, normalizedSkill]);
+    });
   }, []);
 
   const runAgent = useCallback(() => {
@@ -8847,6 +11051,85 @@ function AgentsDialog({
                 </div>
 
                 <div className="grid gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="grid min-w-0 gap-1">
+                      <Label>{t('agentSkills')}</Label>
+                      <div className="text-xs leading-5 text-muted-foreground">{t('agentSkillsHint')}</div>
+                    </div>
+                    <Badge variant="outline" className="shrink-0">
+                      {t('agentSkillsSelectedCount', { count: draftSkills.length })}
+                    </Badge>
+                  </div>
+
+                  {agentSkillsLoading && visibleAgentSkillOptions.length === 0 ? (
+                    <div className="flex min-h-16 items-center gap-2 rounded-md border border-dashed border-border px-3 text-xs text-muted-foreground">
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      {t('skillsLoading')}
+                    </div>
+                  ) : visibleAgentSkillOptions.length > 0 ? (
+                    <div className="grid max-h-56 gap-2 overflow-auto rounded-md border border-border bg-background/60 p-2">
+                      {visibleAgentSkillOptions.map((skill) => {
+                        const skillKey = getAgentSkillReferenceKey(skill);
+                        const selected = selectedAgentSkillKeys.has(skillKey);
+                        const directoryPath = getAgentSkillReferenceDirectoryPath(skill);
+                        const skillName = String(skill.name || skill.slashName || '').trim()
+                          || directoryPath.split('/').filter(Boolean).pop()
+                          || t('agentSkills');
+                        const description = String(skill.description || '').trim();
+                        const missing = selected && !scannedAgentSkillKeys.has(skillKey);
+
+                        return (
+                          <button
+                            key={skillKey || skill.id || skillName}
+                            type="button"
+                            aria-pressed={selected}
+                            className={cn(
+                              'flex min-h-16 w-full items-start gap-2 rounded-md border border-transparent px-2.5 py-2 text-left transition-colors hover:border-border hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                              selected && 'border-primary/50 bg-primary/5'
+                            )}
+                            title={directoryPath}
+                            onClick={() => toggleAgentSkill(skill)}
+                          >
+                            <Sparkles className={cn(
+                              'mt-0.5 h-4 w-4 shrink-0 text-muted-foreground',
+                              selected && 'text-primary'
+                            )} />
+                            <span className="grid min-w-0 flex-1 gap-1">
+                              <span className="flex min-w-0 flex-wrap items-center gap-1.5">
+                                <span className="truncate text-sm font-medium">{skillName}</span>
+                                {skill.slashName && (
+                                  <Badge variant="outline" className="px-1.5 py-0 font-mono text-[10px]">
+                                    /{skill.slashName}
+                                  </Badge>
+                                )}
+                                {missing && (
+                                  <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                                    {t('agentSkillMissing')}
+                                  </Badge>
+                                )}
+                              </span>
+                              <span className="truncate font-mono text-[11px] text-muted-foreground">
+                                {directoryPath}
+                              </span>
+                              {description && (
+                                <span className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+                                  {description}
+                                </span>
+                              )}
+                            </span>
+                            {selected && <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="flex min-h-16 items-center rounded-md border border-dashed border-border px-3 text-xs text-muted-foreground">
+                      {t('agentSkillsEmpty')}
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid gap-2">
                   <Label htmlFor="agentTask">{t('agentTask')}</Label>
                   <Textarea
                     id="agentTask"
@@ -8884,6 +11167,431 @@ function AgentsDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function AutopilotDialog({
+  agents,
+  autopilots,
+  language,
+  onAutopilotsChange,
+  onOpenChange,
+  onRunAutopilot,
+  open,
+  showToast,
+  t
+}) {
+  const [selectedAutopilotId, setSelectedAutopilotId] = useState('');
+  const [draftName, setDraftName] = useState('');
+  const [draftAgentId, setDraftAgentId] = useState('');
+  const [draftRunbook, setDraftRunbook] = useState('');
+  const [draftEnabled, setDraftEnabled] = useState(false);
+  const [draftScheduleType, setDraftScheduleType] = useState('daily');
+  const [draftTime, setDraftTime] = useState(autopilotDefaultTime);
+  const [draftWeekday, setDraftWeekday] = useState('1');
+  const [draftCronExpression, setDraftCronExpression] = useState(autopilotDefaultCronExpression);
+  const selectedAutopilot = autopilots.find((autopilot) => autopilot.id === selectedAutopilotId) || null;
+  const scheduleOptions = useMemo(() => [
+    { value: 'daily', label: t('autopilotScheduleDaily') },
+    { value: 'weekday', label: t('autopilotScheduleWeekday') },
+    { value: 'weekly', label: t('autopilotScheduleWeekly') },
+    { value: 'cron', label: t('autopilotScheduleCron') }
+  ], [t]);
+  const weekdayOptions = useMemo(() => autopilotWeekdayIds.map((weekday) => ({
+    value: weekday,
+    label: getAutopilotWeekdayLabel(weekday, t)
+  })), [t]);
+  const agentOptions = useMemo(() => agents.map((agent) => ({
+    value: agent.id,
+    label: agent.name
+  })), [agents]);
+  const selectedAgent = agents.find((agent) => agent.id === draftAgentId) || null;
+  const draftSchedule = {
+    ...selectedAutopilot,
+    name: draftName,
+    agentId: draftAgentId,
+    runbook: draftRunbook,
+    enabled: draftEnabled,
+    scheduleType: draftScheduleType,
+    time: draftTime,
+    weekday: draftWeekday,
+    cronExpression: draftCronExpression
+  };
+  const nextRunAt = selectedAutopilot && draftEnabled
+    ? getAutopilotNextRunAt(draftSchedule, Date.now())
+    : null;
+  const dirty = Boolean(selectedAutopilot) && (
+    draftName.trim() !== selectedAutopilot.name ||
+    draftAgentId !== selectedAutopilot.agentId ||
+    draftRunbook !== selectedAutopilot.runbook ||
+    draftEnabled !== selectedAutopilot.enabled ||
+    draftScheduleType !== selectedAutopilot.scheduleType ||
+    normalizeAutopilotTime(draftTime) !== selectedAutopilot.time ||
+    normalizeAutopilotWeekday(draftWeekday) !== selectedAutopilot.weekday ||
+    normalizeAutopilotCronExpression(draftCronExpression) !== selectedAutopilot.cronExpression
+  );
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    if (!selectedAutopilotId || !autopilots.some((autopilot) => autopilot.id === selectedAutopilotId)) {
+      setSelectedAutopilotId(autopilots[0]?.id || '');
+    }
+  }, [autopilots, open, selectedAutopilotId]);
+
+  useEffect(() => {
+    if (!selectedAutopilot) {
+      setDraftName('');
+      setDraftAgentId(agents[0]?.id || '');
+      setDraftRunbook('');
+      setDraftEnabled(false);
+      setDraftScheduleType('daily');
+      setDraftTime(autopilotDefaultTime);
+      setDraftWeekday('1');
+      setDraftCronExpression(autopilotDefaultCronExpression);
+      return;
+    }
+
+    setDraftName(selectedAutopilot.name);
+    setDraftAgentId(selectedAutopilot.agentId || agents[0]?.id || '');
+    setDraftRunbook(selectedAutopilot.runbook);
+    setDraftEnabled(selectedAutopilot.enabled);
+    setDraftScheduleType(selectedAutopilot.scheduleType);
+    setDraftTime(selectedAutopilot.time);
+    setDraftWeekday(selectedAutopilot.weekday);
+    setDraftCronExpression(selectedAutopilot.cronExpression);
+  }, [agents, selectedAutopilot]);
+
+  const createAutopilot = useCallback(() => {
+    const autopilot = createAutopilotRecord(agents[0]?.id || '');
+    onAutopilotsChange([autopilot, ...autopilots]);
+    setSelectedAutopilotId(autopilot.id);
+  }, [agents, autopilots, onAutopilotsChange]);
+
+  const saveAutopilot = useCallback((options = {}) => {
+    if (!selectedAutopilot) {
+      showToast(t('autopilotRequired'));
+      return null;
+    }
+
+    const name = draftName.trim() || selectedAutopilot.name || 'Autopilot';
+    const runbook = trimTrailingLineBreaks(draftRunbook).trim();
+    const agentId = String(draftAgentId || '').trim();
+    const scheduleType = normalizeAutopilotScheduleType(draftScheduleType);
+    const cronExpression = normalizeAutopilotCronExpression(draftCronExpression);
+
+    if (!agentId || !agents.some((agent) => agent.id === agentId)) {
+      showToast(t('autopilotAgentRequired'));
+      return null;
+    }
+    if (!runbook) {
+      showToast(t('autopilotRunbookRequired'));
+      return null;
+    }
+    if (scheduleType === 'cron' && !parseCronExpression(cronExpression)) {
+      showToast(t('autopilotCronInvalid'));
+      return null;
+    }
+
+    const updatedAutopilot = normalizeAutopilotRecord({
+      ...selectedAutopilot,
+      name,
+      enabled: draftEnabled,
+      agentId,
+      runbook,
+      scheduleType,
+      time: normalizeAutopilotTime(draftTime),
+      weekday: normalizeAutopilotWeekday(draftWeekday),
+      cronExpression,
+      updatedAt: Date.now()
+    });
+
+    onAutopilotsChange(autopilots.map((autopilot) => (
+      autopilot.id === updatedAutopilot.id ? updatedAutopilot : autopilot
+    )));
+    if (!options.silent) {
+      showToast(t('autopilotSaved', { name: updatedAutopilot.name }));
+    }
+    return updatedAutopilot;
+  }, [
+    agents,
+    autopilots,
+    draftAgentId,
+    draftCronExpression,
+    draftEnabled,
+    draftName,
+    draftRunbook,
+    draftScheduleType,
+    draftTime,
+    draftWeekday,
+    onAutopilotsChange,
+    selectedAutopilot,
+    showToast,
+    t
+  ]);
+
+  const deleteAutopilot = useCallback(() => {
+    if (!selectedAutopilot) {
+      return;
+    }
+
+    if (!window.confirm(t('autopilotDeleteConfirm', { name: selectedAutopilot.name }))) {
+      return;
+    }
+
+    const nextAutopilots = autopilots.filter((autopilot) => autopilot.id !== selectedAutopilot.id);
+    onAutopilotsChange(nextAutopilots);
+    setSelectedAutopilotId(nextAutopilots[0]?.id || '');
+    showToast(t('autopilotDeleted', { name: selectedAutopilot.name }));
+  }, [autopilots, onAutopilotsChange, selectedAutopilot, showToast, t]);
+
+  const runAutopilotNow = useCallback(() => {
+    const autopilotToRun = dirty ? saveAutopilot({ silent: true }) : selectedAutopilot;
+    if (!autopilotToRun) {
+      return;
+    }
+
+    onRunAutopilot(autopilotToRun, { manual: true });
+  }, [dirty, onRunAutopilot, saveAutopilot, selectedAutopilot]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent id="autopilotDialog" className="grid h-[min(780px,calc(100vh-96px))] w-[min(1040px,calc(100vw-32px))] grid-rows-[auto_minmax(0,1fr)_auto] p-0">
+        <DialogHeader>
+          <DialogTitle>{t('autopilotDialogTitle')}</DialogTitle>
+          <DialogDescription>{t('autopilotDialogDescription')}</DialogDescription>
+        </DialogHeader>
+
+        <div className="grid min-h-0 grid-cols-[280px_minmax(0,1fr)]">
+          <aside className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] border-r border-border bg-muted/25">
+            <div className="border-b border-border p-3">
+              <Button type="button" className="w-full justify-start" size="sm" onClick={createAutopilot}>
+                <Plus className="h-4 w-4" />
+                {t('newAutopilot')}
+              </Button>
+            </div>
+            <div className="min-h-0 overflow-auto p-2">
+              {autopilots.length === 0 && (
+                <div className="p-3 text-xs leading-5 text-muted-foreground">{t('autopilotEmpty')}</div>
+              )}
+              {autopilots.map((autopilot) => {
+                const agent = agents.find((item) => item.id === autopilot.agentId);
+                const itemNextRunAt = autopilot.enabled ? getAutopilotNextRunAt(autopilot, Date.now()) : null;
+                return (
+                  <button
+                    key={autopilot.id}
+                    type="button"
+                    className={cn(
+                      'grid w-full gap-1 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                      selectedAutopilotId === autopilot.id && 'bg-accent text-accent-foreground'
+                    )}
+                    onClick={() => setSelectedAutopilotId(autopilot.id)}
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      <CalendarClock className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1 truncate text-sm font-semibold">{autopilot.name}</span>
+                      <Badge variant={autopilot.enabled ? 'secondary' : 'outline'} className="shrink-0">
+                        {autopilot.enabled ? t('taskRunning') : t('taskIdle')}
+                      </Badge>
+                    </span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {agent?.name || t('autopilotAgentRequired')}
+                    </span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {itemNextRunAt
+                        ? `${t('autopilotNextRun')} ${formatAutopilotDateTime(itemNextRunAt, language)}`
+                        : t('autopilotNotScheduled')}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
+
+          <div className="grid min-h-0 grid-rows-[minmax(0,1fr)] overflow-auto p-4">
+            {selectedAutopilot ? (
+              <div className="grid content-start gap-4">
+                <div className="flex flex-wrap items-start gap-3 rounded-md border border-border bg-card/70 p-3">
+                  <span className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-muted text-muted-foreground">
+                    <CalendarClock className="h-5 w-5" />
+                  </span>
+                  <div className="grid min-w-[220px] flex-1 gap-1">
+                    <div className="text-sm font-semibold">{describeAutopilotSchedule(draftSchedule, t)}</div>
+                    <div className="text-xs leading-5 text-muted-foreground">
+                      {selectedAgent?.name || t('autopilotAgentRequired')}
+                    </div>
+                  </div>
+                  <label className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-primary"
+                      checked={draftEnabled}
+                      onChange={(event) => setDraftEnabled(event.target.checked)}
+                    />
+                    {t('autopilotEnabled')}
+                  </label>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_240px]">
+                  <div className="grid gap-2">
+                    <Label htmlFor="autopilotName">{t('autopilotName')}</Label>
+                    <Input
+                      id="autopilotName"
+                      value={draftName}
+                      placeholder={t('autopilotNamePlaceholder')}
+                      onChange={(event) => setDraftName(event.target.value)}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="autopilotAgent">{t('autopilotAgent')}</Label>
+                    <Select
+                      id="autopilotAgent"
+                      disabled={agentOptions.length === 0}
+                      value={draftAgentId}
+                      options={agentOptions}
+                      placeholder={t('autopilotAgentRequired')}
+                      onValueChange={setDraftAgentId}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-[220px_160px_minmax(0,1fr)]">
+                  <div className="grid gap-2">
+                    <Label htmlFor="autopilotSchedule">{t('autopilotSchedule')}</Label>
+                    <Select
+                      id="autopilotSchedule"
+                      value={draftScheduleType}
+                      options={scheduleOptions}
+                      onValueChange={(value) => setDraftScheduleType(normalizeAutopilotScheduleType(value))}
+                    />
+                  </div>
+
+                  {draftScheduleType !== 'cron' && (
+                    <div className="grid gap-2">
+                      <Label htmlFor="autopilotTime">{t('autopilotTime')}</Label>
+                      <Input
+                        id="autopilotTime"
+                        type="time"
+                        value={draftTime}
+                        onChange={(event) => setDraftTime(normalizeAutopilotTime(event.target.value))}
+                      />
+                    </div>
+                  )}
+
+                  {draftScheduleType === 'weekly' && (
+                    <div className="grid gap-2">
+                      <Label htmlFor="autopilotWeekday">{t('autopilotWeekday')}</Label>
+                      <Select
+                        id="autopilotWeekday"
+                        value={draftWeekday}
+                        options={weekdayOptions}
+                        onValueChange={(value) => setDraftWeekday(normalizeAutopilotWeekday(value))}
+                      />
+                    </div>
+                  )}
+
+                  {draftScheduleType === 'weekday' && (
+                    <div className="grid content-end gap-2 text-xs leading-5 text-muted-foreground">
+                      {`${getAutopilotWeekdayLabel('1', t)} - ${getAutopilotWeekdayLabel('5', t)}`}
+                    </div>
+                  )}
+
+                  {draftScheduleType === 'daily' && (
+                    <div className="grid content-end gap-2 text-xs leading-5 text-muted-foreground">
+                      {t('autopilotScheduleDaily')}
+                    </div>
+                  )}
+
+                  {draftScheduleType === 'cron' && (
+                    <div className="grid gap-2 md:col-span-2">
+                      <Label htmlFor="autopilotCron">{t('autopilotCron')}</Label>
+                      <Input
+                        id="autopilotCron"
+                        className="font-mono"
+                        value={draftCronExpression}
+                        placeholder={t('autopilotCronPlaceholder')}
+                        onChange={(event) => setDraftCronExpression(event.target.value)}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="autopilotRunbook">{t('autopilotRunbook')}</Label>
+                  <Textarea
+                    id="autopilotRunbook"
+                    className="min-h-[260px] resize-y font-mono text-xs leading-5"
+                    value={draftRunbook}
+                    placeholder={t('autopilotRunbookPlaceholder')}
+                    onChange={(event) => setDraftRunbook(event.target.value)}
+                  />
+                </div>
+
+                <div className="grid gap-2 rounded-md border border-border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground sm:grid-cols-2">
+                  <div>
+                    <span className="font-medium text-foreground">{t('autopilotLastRun')}: </span>
+                    {selectedAutopilot.lastRunAt
+                      ? formatAutopilotDateTime(selectedAutopilot.lastRunAt, language)
+                      : t('autopilotNeverRun')}
+                  </div>
+                  <div>
+                    <span className="font-medium text-foreground">{t('autopilotNextRun')}: </span>
+                    {nextRunAt ? formatAutopilotDateTime(nextRunAt, language) : t('autopilotNotScheduled')}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="flex min-h-[280px] items-center justify-center rounded-md border border-dashed border-border text-sm text-muted-foreground">
+                {t('autopilotEmpty')}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            {t('close')}
+          </Button>
+          <Button type="button" variant="outline" onClick={deleteAutopilot} disabled={!selectedAutopilot}>
+            <Trash2 className="h-4 w-4" />
+            {t('deleteAutopilot')}
+          </Button>
+          <Button type="button" variant={dirty ? 'primary' : 'outline'} onClick={() => saveAutopilot()} disabled={!selectedAutopilot}>
+            <Save className="h-4 w-4" />
+            {t('saveAutopilot')}
+          </Button>
+          <Button type="button" variant="primary" onClick={runAutopilotNow} disabled={!selectedAutopilot}>
+            <Play className="h-4 w-4" />
+            {t('autopilotRunNow')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AnimatedTopbarNumber({ className, text }) {
+  const value = String(text ?? '');
+
+  return (
+    <span
+      key={value}
+      className={cn('t-digit-group is-animating', className)}
+      aria-label={value}
+    >
+      {[...value].map((character, index) => (
+        <span
+          key={`${character}-${index}`}
+          className="t-digit"
+          style={{ '--digit-stagger-index': index }}
+          aria-hidden="true"
+        >
+          {character}
+        </span>
+      ))}
+    </span>
   );
 }
 
@@ -8938,12 +11646,12 @@ function SystemStats({ t }) {
       <div className="flex min-w-[66px] items-center gap-1.5" title={`${t('cpuUsage')}: ${cpuText}`}>
         <Cpu className="h-3.5 w-3.5 text-primary" />
         <span className="font-medium">{t('cpuUsage')}</span>
-        <span className="font-mono tabular-nums text-foreground">{cpuText}</span>
+        <AnimatedTopbarNumber className="font-mono tabular-nums text-foreground" text={cpuText} />
       </div>
       <div className={memoryBlockClassName} title={memoryTitle}>
         <MemoryStick className={cn('h-3.5 w-3.5 text-primary', memoryTone === 'warning' && 'text-amber-700 dark:text-amber-300', memoryTone === 'critical' && 'text-red-700 dark:text-red-200')} />
         <span className="font-medium">{t('memoryUsage')}</span>
-        <span className={memoryValueClassName}>{memoryText}</span>
+        <AnimatedTopbarNumber className={memoryValueClassName} text={memoryText} />
       </div>
     </div>
   );
@@ -10064,16 +12772,16 @@ function WorkspaceSidebar({
   activeProject,
   activeSessionId,
   commandTargetId,
-  historyProject,
   language,
+  projectCompletedSessionCounts = new Map(),
   onAddProject,
   onFocusSession,
-  onAddCommandLine,
   onAddSession,
   onDeleteProject,
   onKillAll,
   onOpenCodexConfig,
   onOpenPath,
+  onOpenPromptManager,
   onRefreshSkills,
   onReorderProjects,
   onSelectNoProject,
@@ -10082,7 +12790,11 @@ function WorkspaceSidebar({
   onToggleProjectPinned,
   onToggleCollapsed,
   onToggleImageGeneration,
+  onTogglePromptMenuCollapsed,
   onToggleSkillsCollapsed,
+  promptManagerOpen,
+  quickPromptCount,
+  quickPromptsLoading,
   runtimeNow,
   sessions,
   skillsRootPath,
@@ -10093,6 +12805,7 @@ function WorkspaceSidebar({
   imageGenerationOpen
 }) {
   const collapsed = workspace.sidebarCollapsed;
+  const promptMenuCollapsed = Boolean(workspace.promptMenuCollapsed);
   const userProjects = workspace.projects;
   const [draggedProjectId, setDraggedProjectId] = useState(null);
   const [dragTarget, setDragTarget] = useState(null);
@@ -10146,75 +12859,72 @@ function WorkspaceSidebar({
     clearProjectDrag();
   }, [clearProjectDrag]);
 
-  if (collapsed) {
-    return (
-      <Sidebar collapsed>
-        <img className="brand-logo brand-logo-collapsed" src={appLogoUrl} alt="" aria-hidden="true" draggable="false" />
-        <IconButton label={t('expandSidebar')} onClick={onToggleCollapsed}>
-          <PanelLeftOpen className="h-4 w-4" />
-        </IconButton>
-        <IconButton label={t('addSession')} onClick={onAddSession}>
-          <MessageSquarePlus className="h-4 w-4" />
-        </IconButton>
-        <IconButton label={t('addCommandLine')} onClick={onAddCommandLine}>
-          <SquareTerminal className="h-4 w-4" />
-        </IconButton>
-        <IconButton label={t('addProject')} onClick={onAddProject}>
-          <FolderPlus className="h-4 w-4" />
-        </IconButton>
-        <IconButton
-          label={t('imageGeneration')}
-          variant={imageGenerationOpen ? 'primary' : 'default'}
-          onClick={onToggleImageGeneration}
-        >
-          <ImagePlus className="h-4 w-4" />
-        </IconButton>
-        <div className="sidebar-rail-spacer" />
-        {historyProject && (
-          <IconButton
-            label={t('historyFolder')}
-            variant={activeProject?.id === historyProject.id ? 'primary' : 'default'}
-            onClick={() => onSelectProject(historyProject.id)}
-          >
-            <FolderOpen className="h-4 w-4" />
-          </IconButton>
-        )}
-        <SidebarThemeControl compact theme={theme} onThemeChange={onThemeChange} t={t} />
-        <IconButton label={t('settings')} onClick={onOpenCodexConfig}>
-          <Settings2 className="h-4 w-4" />
-        </IconButton>
-        <ReleaseInfo
-          appVersion={appVersion}
-          t={t}
-          compact
-        />
-      </Sidebar>
-    );
-  }
-
   return (
-    <Sidebar>
-      <SidebarHeader>
-        <div className="flex min-w-0 items-center gap-2.5">
-          <img className="brand-logo" src={appLogoUrl} alt="" aria-hidden="true" draggable="false" />
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">CLI in One</div>
-            <div className="truncate text-xs text-muted-foreground">{t('appSubtitle')}</div>
-          </div>
+    <Sidebar collapsed={collapsed}>
+      <SidebarHeader className="workspace-sidebar-header">
+        <div className="workspace-sidebar-brand">
+          <img
+            className={cn('brand-logo', collapsed && 'brand-logo-collapsed')}
+            src={appLogoUrl}
+            alt=""
+            aria-hidden="true"
+            draggable="false"
+          />
+          {!collapsed && (
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold">CLI in One</div>
+              <div className="truncate text-xs text-muted-foreground">{t('appSubtitle')}</div>
+            </div>
+          )}
         </div>
-        <IconButton label={t('collapseSidebar')} onClick={onToggleCollapsed}>
-          <PanelLeftClose className="h-4 w-4" />
+        <IconButton
+          label={collapsed ? t('expandSidebar') : t('collapseSidebar')}
+          className="sidebar-collapse-button"
+          onClick={onToggleCollapsed}
+        >
+          <SidebarCollapseIcon collapsed={collapsed} />
         </IconButton>
       </SidebarHeader>
 
+      {collapsed ? (
+        <>
+          <IconButton label={t('addSession')} onClick={onAddSession}>
+            <MessageSquarePlus className="h-4 w-4" />
+          </IconButton>
+          <IconButton label={t('addProject')} onClick={onAddProject}>
+            <FolderPlus className="h-4 w-4" />
+          </IconButton>
+          <IconButton
+            label={t('imageGeneration')}
+            variant={imageGenerationOpen ? 'primary' : 'default'}
+            onClick={onToggleImageGeneration}
+        >
+          <ImagePlus className="h-4 w-4" />
+        </IconButton>
+        <IconButton
+          label={t('promptManagerTitle')}
+          variant={promptManagerOpen ? 'primary' : 'default'}
+          onClick={onOpenPromptManager}
+        >
+          <PencilLine className="h-4 w-4" />
+        </IconButton>
+        <div className="sidebar-rail-spacer" />
+        <SidebarThemeControl compact theme={theme} onThemeChange={onThemeChange} t={t} />
+        <IconButton label={t('settings')} onClick={onOpenCodexConfig}>
+          <Settings2 className="h-4 w-4" />
+          </IconButton>
+          <ReleaseInfo
+            appVersion={appVersion}
+            t={t}
+            compact
+          />
+        </>
+      ) : (
+        <>
       <div className="sidebar-actions">
         <Button className="w-full justify-start" variant="ghost" onClick={onAddSession}>
           <MessageSquarePlus className="h-4 w-4" />
           {t('addSession')}
-        </Button>
-        <Button className="w-full justify-start" variant="ghost" onClick={onAddCommandLine}>
-          <SquareTerminal className="h-4 w-4" />
-          {t('addCommandLine')}
         </Button>
         <Button className="w-full justify-start" variant="ghost" onClick={onAddProject}>
           <FolderPlus className="h-4 w-4" />
@@ -10255,64 +12965,80 @@ function WorkspaceSidebar({
               <span className="min-w-0 flex-1 truncate text-left">{t('noProject')}</span>
             </button>
 
-            {userProjects.map((project) => (
-              <div key={project.id} className="sidebar-project-group">
-                <div
-                  className={cn(
-                    'sidebar-project-row',
-                    draggedProjectId === project.id && 'is-dragging',
-                    dragTarget?.projectId === project.id && dragTarget.position === 'before' && 'drag-over-before',
-                    dragTarget?.projectId === project.id && dragTarget.position === 'after' && 'drag-over-after'
-                  )}
-                  title={project.path}
-                  onDragOver={(event) => handleProjectDragOver(event, project.id)}
-                  onDrop={(event) => handleProjectDrop(event, project.id)}
-                >
-                  <button
-                    type="button"
-                    className="sidebar-project-drag"
-                    aria-label={t('dragProject')}
-                    title={t('dragProject')}
-                    disabled={userProjects.length < 2}
-                    draggable={userProjects.length > 1}
-                    onDragStart={(event) => handleProjectDragStart(event, project.id)}
-                    onDragEnd={handleProjectDragEnd}
-                  >
-                    <GripVertical className="h-4 w-4" />
-                  </button>
-                  <button
-                    type="button"
-                    className={cn('sidebar-project', activeProject?.id === project.id && 'active')}
-                    onClick={() => onSelectProject(project.id)}
-                  >
-                    <FolderOpen className="h-4 w-4 shrink-0" />
-                    <span className="min-w-0 flex-1 truncate text-left">{project.name}</span>
-                  </button>
-                  <IconButton
-                    label={project.pinned ? t('unpinProject') : t('pinProject')}
-                    variant="ghost"
+            {userProjects.map((project) => {
+              const completedCount = projectCompletedSessionCounts.get(project.id) || 0;
+              const showCompletedBadge = completedCount > 0 && activeProject?.id !== project.id;
+              const completedBadgeLabel = t('completedProjectSessionsBadge', { count: completedCount });
+
+              return (
+                <div key={project.id} className="sidebar-project-group">
+                  <div
                     className={cn(
-                      'sidebar-project-pin h-8 w-8 text-muted-foreground hover:text-foreground',
-                      project.pinned && 'is-pinned text-primary'
+                      'sidebar-project-row',
+                      draggedProjectId === project.id && 'is-dragging',
+                      dragTarget?.projectId === project.id && dragTarget.position === 'before' && 'drag-over-before',
+                      dragTarget?.projectId === project.id && dragTarget.position === 'after' && 'drag-over-after'
                     )}
-                    onClick={() => onToggleProjectPinned(project.id)}
+                    title={project.path}
+                    onDragOver={(event) => handleProjectDragOver(event, project.id)}
+                    onDrop={(event) => handleProjectDrop(event, project.id)}
                   >
-                    <Pin className="h-4 w-4" />
-                  </IconButton>
-                  <IconButton
-                    label={t('deleteProject')}
-                    variant="ghost"
-                    className="sidebar-project-delete h-8 w-8 text-muted-foreground hover:text-destructive"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onDeleteProject(project.id);
-                    }}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </IconButton>
+                    <button
+                      type="button"
+                      className="sidebar-project-drag"
+                      aria-label={t('dragProject')}
+                      title={t('dragProject')}
+                      disabled={userProjects.length < 2}
+                      draggable={userProjects.length > 1}
+                      onDragStart={(event) => handleProjectDragStart(event, project.id)}
+                      onDragEnd={handleProjectDragEnd}
+                    >
+                      <GripVertical className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      className={cn('sidebar-project', activeProject?.id === project.id && 'active')}
+                      onClick={() => onSelectProject(project.id)}
+                    >
+                      <FolderOpen className="h-4 w-4 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate text-left">{project.name}</span>
+                      <span
+                        className="t-badge project-completed-badge"
+                        data-open={showCompletedBadge ? 'true' : 'false'}
+                        title={completedBadgeLabel}
+                        aria-hidden="true"
+                      >
+                        <span className="t-badge-dot project-completed-badge-dot">
+                          {completedCount > 9 ? '9+' : completedCount}
+                        </span>
+                      </span>
+                    </button>
+                    <IconButton
+                      label={project.pinned ? t('unpinProject') : t('pinProject')}
+                      variant="ghost"
+                      className={cn(
+                        'sidebar-project-pin h-8 w-8 text-muted-foreground hover:text-foreground',
+                        project.pinned && 'is-pinned text-primary'
+                      )}
+                      onClick={() => onToggleProjectPinned(project.id)}
+                    >
+                      <Pin className="h-4 w-4" />
+                    </IconButton>
+                    <IconButton
+                      label={t('deleteProject')}
+                      variant="ghost"
+                      className="sidebar-project-delete h-8 w-8 text-muted-foreground hover:text-destructive"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onDeleteProject(project.id);
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </IconButton>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </SidebarSection>
 
@@ -10362,6 +13088,47 @@ function WorkspaceSidebar({
           </div>
         </SidebarSection>
 
+        <SidebarSection>
+          <div className="sidebar-section-title">
+            <button
+              type="button"
+              className="sidebar-section-toggle"
+              title={t('promptMenu')}
+              aria-expanded={!promptMenuCollapsed}
+              aria-controls="sidebarPromptContent"
+              onClick={onTogglePromptMenuCollapsed}
+            >
+              {promptMenuCollapsed ? (
+                <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+              ) : (
+                <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+              )}
+              <span className="min-w-0 truncate">{t('promptMenu')}</span>
+              {quickPromptsLoading ? (
+                <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin" />
+              ) : quickPromptCount > 0 ? (
+                <Badge variant="outline" className="sidebar-section-count">
+                  {quickPromptCount}
+                </Badge>
+              ) : null}
+            </button>
+          </div>
+
+          {!promptMenuCollapsed && (
+            <div id="sidebarPromptContent" className="grid gap-2">
+              <Button
+                type="button"
+                className="w-full justify-start"
+                variant={promptManagerOpen ? 'primary' : 'ghost'}
+                onClick={onOpenPromptManager}
+              >
+                <PencilLine className="h-4 w-4" />
+                <span className="min-w-0 flex-1 truncate text-left">{t('promptManagerTitle')}</span>
+              </Button>
+            </div>
+          )}
+        </SidebarSection>
+
         <WorkspaceSkillsSection
           collapsed={Boolean(workspace.skillsCollapsed)}
           onOpenPath={onOpenPath}
@@ -10374,19 +13141,6 @@ function WorkspaceSidebar({
       </SidebarContent>
 
       <SidebarFooter>
-        {historyProject && (
-          <div className="sidebar-footer-history">
-            <button
-              type="button"
-              className={cn('sidebar-history top-level', activeProject?.id === historyProject.id && 'active')}
-              title={historyProject.path}
-              onClick={() => onSelectProject(historyProject.id)}
-            >
-              <FolderOpen className="h-4 w-4 shrink-0" />
-              <span className="min-w-0 flex-1 truncate text-left">{t('historyFolder')}</span>
-            </button>
-          </div>
-        )}
         <div className="sidebar-footer-version">
           <ReleaseInfo
             appVersion={appVersion}
@@ -10419,6 +13173,8 @@ function WorkspaceSidebar({
           </IconButton>
         </div>
       </SidebarFooter>
+        </>
+      )}
     </Sidebar>
   );
 }
@@ -10427,6 +13183,7 @@ export default function App() {
   const initialSettings = useMemo(loadSettings, []);
   const initialWorkspace = useMemo(loadWorkspace, []);
   const initialAgents = useMemo(loadAgents, []);
+  const initialAutopilots = useMemo(loadAutopilots, []);
   const initialView = useMemo(() => normalizeCanvasView(initialSettings.view), [initialSettings.view]);
   const [cwd, setCwd] = useState(initialSettings.cwd);
   const [theme, setTheme] = useState(initialSettings.theme);
@@ -10436,6 +13193,7 @@ export default function App() {
   const [view, setView] = useState(initialView);
   const [workspace, setWorkspace] = useState(initialWorkspace);
   const [agents, setAgents] = useState(initialAgents);
+  const [autopilots, setAutopilots] = useState(initialAutopilots);
   const [panels, setPanels] = useState([]);
   const [endpointGroups, setEndpointGroups] = useState([]);
   const [selectedEndpointIds, setSelectedEndpointIds] = useState(() => new Set());
@@ -10456,8 +13214,12 @@ export default function App() {
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [gridSessionOpen, setGridSessionOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
+  const [autopilotOpen, setAutopilotOpen] = useState(false);
   const [workspaceTreeOpen, setWorkspaceTreeOpen] = useState(false);
   const [sessionReviewOpen, setSessionReviewOpen] = useState(false);
+  const [diffReviewOpen, setDiffReviewOpen] = useState(false);
+  const [diffReviewCwd, setDiffReviewCwd] = useState('');
+  const [promptManagerOpen, setPromptManagerOpen] = useState(false);
   const [imageGenerationOpen, setImageGenerationOpen] = useState(false);
   const [imageGenerationPrompt, setImageGenerationPrompt] = useState('');
   const [imageGenerationResults, setImageGenerationResults] = useState([]);
@@ -10486,6 +13248,8 @@ export default function App() {
   const [panning, setPanning] = useState(false);
   const [toast, setToast] = useState('');
   const [commandDockValue, setCommandDockValue] = useState('');
+  const [commandDockContextItems, setCommandDockContextItems] = useState([]);
+  const [commandDockContextLoading, setCommandDockContextLoading] = useState(false);
   const [commandDockTargetId, setCommandDockTargetId] = useState('');
   const [commandDockCollapsed, setCommandDockCollapsed] = useState(false);
   const [commandDockPosition, setCommandDockPosition] = useState(initialSettings.commandDockPosition);
@@ -10494,6 +13258,7 @@ export default function App() {
   const [commandDockShortcuts, setCommandDockShortcuts] = useState(initialSettings.commandDockShortcuts);
   const [commandDockTaskDispatching, setCommandDockTaskDispatching] = useState(false);
   const [commandDockDispatchSparkles, setCommandDockDispatchSparkles] = useState({});
+  const [canvasStatusRefreshAt, setCanvasStatusRefreshAt] = useState(() => Date.now());
   const [canvasArrangeAnimations, setCanvasArrangeAnimations] = useState({});
   const [canvasArrangeActive, setCanvasArrangeActive] = useState(false);
   const [quickPrompts, setQuickPrompts] = useState([]);
@@ -10519,6 +13284,8 @@ export default function App() {
   const sessionReviewFlushTimer = useRef(null);
   const panelExecutionStatesRef = useRef(new Map());
   const terminalInstances = useRef(new Map());
+  const terminalInputCommandBuffersRef = useRef(new Map());
+  const canvasTodoOutputBuffersRef = useRef(new Map());
   const panelsRef = useRef([]);
   const endpointGroupsRef = useRef([]);
   const workspaceRef = useRef(workspace);
@@ -10531,6 +13298,10 @@ export default function App() {
   const activeCanvasConnectionIdRef = useRef(null);
   const connectionPortClickSuppressedRef = useRef(false);
   const cwdRef = useRef(cwd);
+  const agentsRef = useRef(agents);
+  const autopilotsRef = useRef(autopilots);
+  const autopilotRunningIdsRef = useRef(new Set());
+  const autopilotSchedulerStartedAtRef = useRef(Date.now());
   const activeCommandPresetRef = useRef(null);
   const workspaceTreeRequestIdRef = useRef(0);
   const workspaceSkillsRequestIdRef = useRef(0);
@@ -10661,6 +13432,20 @@ export default function App() {
     () => getSessionReviewStatusCounts(panels, runtimeNow, getPanelExecutionState),
     [panelStateRevision, panels]
   );
+  const projectCompletedSessionCounts = useMemo(() => {
+    const counts = new Map();
+
+    panels.forEach((panel) => {
+      const projectId = String(panel?.projectId || '').trim();
+      if (!projectId || getPanelExecutionState(panel, runtimeNow) !== 'completed') {
+        return;
+      }
+
+      counts.set(projectId, (counts.get(projectId) || 0) + 1);
+    });
+
+    return counts;
+  }, [panels]);
   const visibleCanvasFrames = useMemo(
     () => getWorkspaceCanvasFrames(workspace),
     [workspace]
@@ -10810,6 +13595,14 @@ export default function App() {
   useEffect(() => {
     panelsRef.current = panels;
   }, [panels]);
+
+  useEffect(() => {
+    agentsRef.current = agents;
+  }, [agents]);
+
+  useEffect(() => {
+    autopilotsRef.current = autopilots;
+  }, [autopilots]);
 
   useEffect(() => {
     if (panels.length === 0) {
@@ -11130,17 +13923,45 @@ export default function App() {
     }
   }, [showToast, t]);
 
+  const applyQuickPromptStore = useCallback((store = {}) => {
+    quickPromptsLoadStartedRef.current = true;
+    setQuickPrompts(Array.isArray(store.prompts) ? store.prompts : []);
+    setQuickPromptsPath(store.path || '');
+    return store;
+  }, []);
+
   const loadQuickPrompts = useCallback(async () => {
+    quickPromptsLoadStartedRef.current = true;
     setQuickPromptsLoading(true);
     try {
       const store = await bridge.listQuickPrompts();
-      setQuickPrompts(Array.isArray(store.prompts) ? store.prompts : []);
-      setQuickPromptsPath(store.path || '');
-      return store;
+      return applyQuickPromptStore(store);
     } finally {
       setQuickPromptsLoading(false);
     }
-  }, []);
+  }, [applyQuickPromptStore]);
+
+  const saveQuickPromptRecord = useCallback(async (payload = {}) => {
+    quickPromptsLoadStartedRef.current = true;
+    setQuickPromptsLoading(true);
+    try {
+      const store = await bridge.saveQuickPrompt(payload || {});
+      return applyQuickPromptStore(store);
+    } finally {
+      setQuickPromptsLoading(false);
+    }
+  }, [applyQuickPromptStore]);
+
+  const deleteQuickPromptRecord = useCallback(async (id) => {
+    quickPromptsLoadStartedRef.current = true;
+    setQuickPromptsLoading(true);
+    try {
+      const store = await bridge.deleteQuickPrompt(id);
+      return applyQuickPromptStore(store);
+    } finally {
+      setQuickPromptsLoading(false);
+    }
+  }, [applyQuickPromptStore]);
 
   const applyCommandPresetStore = useCallback((store = {}) => {
     setCommandPresets(Array.isArray(store.presets) ? store.presets : []);
@@ -11215,7 +14036,7 @@ export default function App() {
     }));
 
     try {
-      const snapshot = await bridge.readWorkspaceTree({ cwd: requestedPath });
+      const snapshot = await bridge.readWorkspaceTree({ cwd: requestedPath, lazy: true });
       if (workspaceTreeRequestIdRef.current !== requestId) {
         return null;
       }
@@ -11241,6 +14062,47 @@ export default function App() {
       });
       showToast(t('workspaceTreeFailed', { message }));
       return null;
+    }
+  }, [showToast, t]);
+
+  const loadWorkspaceTreeNodeChildren = useCallback(async (node) => {
+    const targetPath = String(node?.path || '').trim();
+    const targetNodeId = String(node?.id || targetPath).trim();
+
+    if (!targetPath || !targetNodeId || node?.type !== 'directory' || node?.ignored || node?.link) {
+      return null;
+    }
+
+    try {
+      const snapshot = await bridge.readWorkspaceTree({ cwd: targetPath, lazy: true });
+      const loadedRoot = rebaseWorkspaceTreeLoadedRoot(snapshot?.root || null, node?.relativePath || '');
+
+      setWorkspaceTreeState((current) => {
+        if (!current.snapshot?.root) {
+          return current;
+        }
+
+        const nextRoot = mergeWorkspaceTreeNodeChildren(current.snapshot.root, targetNodeId, loadedRoot);
+        if (nextRoot === current.snapshot.root) {
+          return current;
+        }
+
+        return {
+          ...current,
+          status: 'ready',
+          error: '',
+          snapshot: withWorkspaceTreeCounts({
+            ...current.snapshot,
+            root: nextRoot
+          })
+        };
+      });
+
+      return snapshot;
+    } catch (error) {
+      const message = error?.message || String(error);
+      showToast(t('workspaceTreeFailed', { message }));
+      throw error;
     }
   }, [showToast, t]);
 
@@ -11413,6 +14275,10 @@ export default function App() {
     setCodexOpen(true);
   }, []);
 
+  const openPromptManager = useCallback(() => {
+    setPromptManagerOpen(true);
+  }, []);
+
   useEffect(() => {
     void loadWorkspaceSkills(skillsRootPath, { quiet: true, deferred: true });
   }, [loadWorkspaceSkills, skillsRootPath]);
@@ -11466,6 +14332,62 @@ export default function App() {
       flushPanelActivity();
     }, panelActivityFlushMs);
   }, [flushPanelActivity]);
+
+  const refreshCanvasSessionStatusQueue = useCallback(() => {
+    flushPanelActivity();
+    setPanelStateRevision((current) => current + 1);
+    setCanvasStatusRefreshAt(Date.now());
+  }, [flushPanelActivity]);
+
+  const promotePanelToDetectedAgent = useCallback((id, command) => {
+    const provider = detectCliProviderByCommand(command);
+    if (!isAgentCliProvider(provider)) {
+      return false;
+    }
+
+    const targetPanel = panelsRef.current.find((panel) => panel.id === id);
+    const currentProvider = getPanelCliProvider(targetPanel);
+    if (!targetPanel || currentProvider?.id === provider.id || isAgentCliProvider(currentProvider)) {
+      return false;
+    }
+
+    setPanels((current) => current.map((panel) => (
+      panel.id === id
+        ? {
+            ...panel,
+            cliProviderId: provider.id,
+            initialCommand: panel.initialCommand || command
+          }
+        : panel
+    )));
+
+    if (typeof bridge.updateTerminalMeta === 'function') {
+      bridge.updateTerminalMeta(id, {
+        cliProviderId: provider.id,
+        initialCommand: command
+      }).catch(() => {});
+    }
+
+    return true;
+  }, []);
+
+  const handleTerminalInput = useCallback((id, data) => {
+    touchPanelActivity(id);
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      return;
+    }
+
+    const currentBuffer = terminalInputCommandBuffersRef.current.get(normalizedId) || '';
+    const { buffer, commands } = collectSubmittedTerminalCommands(currentBuffer, data);
+    if (buffer) {
+      terminalInputCommandBuffersRef.current.set(normalizedId, buffer);
+    } else {
+      terminalInputCommandBuffersRef.current.delete(normalizedId);
+    }
+
+    commands.forEach((command) => promotePanelToDetectedAgent(normalizedId, command));
+  }, [promotePanelToDetectedAgent, touchPanelActivity]);
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
   useEffect(() => () => window.clearTimeout(panelActivityFlushTimer.current), []);
@@ -11629,6 +14551,200 @@ export default function App() {
     });
   }, [closeCommandDockSkillMention, commandDockValue, resizeCommandDockInput]);
 
+  const addCommandDockContextItems = useCallback((items) => {
+    const normalizedItems = normalizeCommandDockContextItems(Array.isArray(items) ? items : [items]);
+    if (normalizedItems.length === 0) {
+      return false;
+    }
+
+    closeCommandDockSkillMention();
+    if (commandDockCollapsed) {
+      setCommandDockCollapsed(false);
+    }
+
+    setCommandDockContextItems((current) => (
+      normalizeCommandDockContextItems([...current, ...normalizedItems])
+    ));
+    window.requestAnimationFrame(() => {
+      resizeCommandDockInput();
+      commandDockInputRef.current?.focus();
+    });
+    return true;
+  }, [closeCommandDockSkillMention, commandDockCollapsed, resizeCommandDockInput]);
+
+  const removeCommandDockContextItem = useCallback((id) => {
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      return;
+    }
+
+    setCommandDockContextItems((current) => current.filter((item) => item.id !== normalizedId));
+    window.requestAnimationFrame(() => resizeCommandDockInput());
+  }, [resizeCommandDockInput]);
+
+  const clearCommandDockContextItems = useCallback(() => {
+    setCommandDockContextItems([]);
+    window.requestAnimationFrame(() => resizeCommandDockInput());
+  }, [resizeCommandDockInput]);
+
+  const getSelectedTerminalContext = useCallback(() => {
+    const prioritizedIds = [
+      activeIdRef.current,
+      commandDockTargetId,
+      ...panelsRef.current.map((panel) => panel.id)
+    ].filter(Boolean);
+    const seen = new Set();
+
+    for (const panelId of prioritizedIds) {
+      if (seen.has(panelId)) {
+        continue;
+      }
+      seen.add(panelId);
+
+      const instance = terminalInstances.current.get(panelId);
+      const selection = instance?.term?.hasSelection?.()
+        ? String(instance.term.getSelection?.() || '').trim()
+        : '';
+      if (!selection) {
+        continue;
+      }
+
+      const panel = panelsRef.current.find((item) => item.id === panelId) || null;
+      return {
+        panel,
+        text: selection
+      };
+    }
+
+    return null;
+  }, [commandDockTargetId]);
+
+  const addTerminalSelectionToCommandDockContext = useCallback(() => {
+    const selection = getSelectedTerminalContext();
+    if (!selection?.text) {
+      showToast(t('floatingComposerContextNoTerminalSelection'));
+      return false;
+    }
+
+    const panelTitle = selection.panel?.title || t('sessionFallbackTitle');
+    addCommandDockContextItems(createCommandDockContextItem('terminal-selection', {
+      content: selection.text,
+      maxChars: commandDockTerminalContextMaxChars,
+      panelId: selection.panel?.id,
+      panelTitle,
+      title: panelTitle
+    }));
+    showToast(t('floatingComposerContextAdded', { name: panelTitle }));
+    return true;
+  }, [addCommandDockContextItems, getSelectedTerminalContext, showToast, t]);
+
+  const addLatestOutputToCommandDockContext = useCallback(() => {
+    const targetPanel = commandDockPanels.find((panel) => panel.id === commandDockTargetId)
+      || commandDockPanels.find((panel) => panel.id === activeIdRef.current)
+      || commandDockPanels[0]
+      || null;
+
+    if (!targetPanel) {
+      showToast(t('floatingComposerUnavailable'));
+      return false;
+    }
+
+    const record = sessionReviewRecordsRef.current[targetPanel.id] || null;
+    const rawText = String(record?.text || '');
+    const latestText = rawText.length > commandDockTerminalContextMaxChars
+      ? rawText.slice(-commandDockTerminalContextMaxChars)
+      : rawText;
+    const previewText = getSessionReviewPreviewText({ text: latestText }, 80) || latestText.trim();
+    if (!previewText) {
+      showToast(t('sessionReviewNoOutput'));
+      return false;
+    }
+
+    addCommandDockContextItems(createCommandDockContextItem('terminal-output', {
+      content: previewText,
+      maxChars: commandDockTerminalContextMaxChars,
+      panelId: targetPanel.id,
+      panelTitle: targetPanel.title,
+      title: targetPanel.title,
+      truncated: rawText.length > commandDockTerminalContextMaxChars
+    }));
+    showToast(t('floatingComposerContextAdded', { name: targetPanel.title }));
+    return true;
+  }, [addCommandDockContextItems, commandDockPanels, commandDockTargetId, showToast, t]);
+
+  const addSelectedTextToCommandDockContext = useCallback(() => {
+    const activeElement = document.activeElement;
+    let text = '';
+
+    if (
+      (activeElement instanceof HTMLTextAreaElement || activeElement instanceof HTMLInputElement) &&
+      typeof activeElement.selectionStart === 'number' &&
+      typeof activeElement.selectionEnd === 'number' &&
+      activeElement.selectionStart !== activeElement.selectionEnd
+    ) {
+      text = String(activeElement.value || '').slice(activeElement.selectionStart, activeElement.selectionEnd);
+    }
+
+    if (!text.trim()) {
+      text = String(window.getSelection?.().toString() || '');
+    }
+
+    if (!text.trim()) {
+      text = readClipboardText();
+    }
+
+    const normalizedText = text.trim();
+    if (!normalizedText) {
+      showToast(t('floatingComposerContextNoSelectedText'));
+      return false;
+    }
+
+    addCommandDockContextItems(createCommandDockContextItem('text', {
+      content: normalizedText,
+      title: t('floatingComposerContextSelectedText')
+    }));
+    showToast(t('floatingComposerContextAdded', { name: t('floatingComposerContextSelectedText') }));
+    return true;
+  }, [addCommandDockContextItems, showToast, t]);
+
+  const addUrlToCommandDockContext = useCallback(() => {
+    if (commandDockContextLoading) {
+      return false;
+    }
+
+    const clipboardText = readClipboardText().trim();
+    const suggestedUrl = /^https?:\/\//i.test(clipboardText) ? clipboardText : '';
+    const requestedUrl = window.prompt(t('floatingComposerUrlPrompt'), suggestedUrl);
+    if (!requestedUrl || !requestedUrl.trim()) {
+      return false;
+    }
+
+    const run = async () => {
+      setCommandDockContextLoading(true);
+      try {
+        const context = await bridge.fetchAgentContextUrl({ url: requestedUrl.trim() });
+        const title = String(context.title || context.url || requestedUrl).trim();
+        addCommandDockContextItems(createCommandDockContextItem('url', {
+          content: context.content,
+          subtitle: context.contentType,
+          title,
+          truncated: context.truncated,
+          url: context.url || requestedUrl.trim()
+        }));
+        showToast(t('floatingComposerContextAdded', { name: title }));
+        return true;
+      } catch (error) {
+        showToast(t('floatingComposerContextAddFailed', { message: error.message }));
+        return false;
+      } finally {
+        setCommandDockContextLoading(false);
+      }
+    };
+
+    void run();
+    return true;
+  }, [addCommandDockContextItems, commandDockContextLoading, showToast, t]);
+
   const rememberCommandDockHistory = useCallback((value) => {
     setCommandDockHistory((current) => addCommandDockHistoryEntry(current, value));
   }, []);
@@ -11668,23 +14784,18 @@ export default function App() {
 
     const title = deriveQuickPromptTitle(prompt, t('quickPromptDefaultName'));
 
-    setQuickPromptsLoading(true);
     try {
-      const store = await bridge.saveQuickPrompt({ title, prompt });
+      const store = await saveQuickPromptRecord({ title, prompt });
       const prompts = Array.isArray(store.prompts) ? store.prompts : [];
       const savedPrompt = store.savedPrompt || prompts.find((record) => record.title === title);
 
-      setQuickPrompts(prompts);
-      setQuickPromptsPath((current) => store.path || current);
       showToast(t('quickPromptSaved', { name: savedPrompt?.title || title }));
       return true;
     } catch (error) {
       showToast(t('quickPromptSaveFailed', { message: error.message }));
       return false;
-    } finally {
-      setQuickPromptsLoading(false);
     }
-  }, [commandDockValue, quickPromptsLoading, showToast, t]);
+  }, [commandDockValue, quickPromptsLoading, saveQuickPromptRecord, showToast, t]);
 
   const insertQuickPromptIntoCommandDock = useCallback((record) => {
     const prompt = String(record?.prompt || '').trim();
@@ -11719,20 +14830,15 @@ export default function App() {
       return false;
     }
 
-    setQuickPromptsLoading(true);
     try {
-      const store = await bridge.deleteQuickPrompt(promptId);
-      setQuickPrompts(Array.isArray(store.prompts) ? store.prompts : []);
-      setQuickPromptsPath((current) => store.path || current);
+      const store = await deleteQuickPromptRecord(promptId);
       showToast(t('quickPromptDeleted', { name: store.deletedPrompt?.title || title }));
       return true;
     } catch (error) {
       showToast(t('quickPromptDeleteFailed', { message: error.message }));
       return false;
-    } finally {
-      setQuickPromptsLoading(false);
     }
-  }, [quickPromptsLoading, showToast, t]);
+  }, [deleteQuickPromptRecord, quickPromptsLoading, showToast, t]);
 
   const saveCommandPreset = useCallback(async (payload) => {
     setCommandPresetsLoading(true);
@@ -11809,20 +14915,55 @@ export default function App() {
     t
   ]);
 
+  const addWorkspaceFileContextFromPath = useCallback((targetPath) => {
+    const normalizedPath = String(targetPath || '').trim();
+    if (!normalizedPath || !currentWorkspacePath || commandDockContextLoading) {
+      return false;
+    }
+
+    const run = async () => {
+      setCommandDockContextLoading(true);
+      try {
+        const fileContext = await bridge.readAgentContextFile({
+          cwd: currentWorkspacePath,
+          path: normalizedPath
+        });
+        const contextPath = normalizePromptFilePath(fileContext.relativePath || normalizedPath);
+        const title = contextPath || fileContext.name || normalizedPath;
+        addCommandDockContextItems(createCommandDockContextItem('file', {
+          content: fileContext.content,
+          path: contextPath,
+          title,
+          truncated: fileContext.truncated
+        }));
+        showToast(t('floatingComposerContextAdded', { name: title }));
+        return true;
+      } catch (error) {
+        showToast(t('floatingComposerContextAddFailed', { message: error.message }));
+        return false;
+      } finally {
+        setCommandDockContextLoading(false);
+      }
+    };
+
+    void run();
+    return true;
+  }, [
+    addCommandDockContextItems,
+    commandDockContextLoading,
+    currentWorkspacePath,
+    showToast,
+    t
+  ]);
+
   const insertWorkspaceTreePathIntoCommandDock = useCallback((targetPath) => {
     const normalizedPath = String(targetPath || '').trim();
     if (!normalizedPath || !commandDockVisible) {
       return false;
     }
 
-    if (commandDockCollapsed) {
-      setCommandDockCollapsed(false);
-    }
-
-    insertTextIntoCommandDock(normalizedPath);
-    showToast(t('workspaceTreePathInserted', { path: normalizedPath }));
-    return true;
-  }, [commandDockCollapsed, commandDockVisible, insertTextIntoCommandDock, showToast, t]);
+    return addWorkspaceFileContextFromPath(normalizedPath);
+  }, [addWorkspaceFileContextFromPath, commandDockVisible]);
 
   const insertSelectedWorkspaceTreePath = useCallback(() => {
     insertWorkspaceTreePathIntoCommandDock(workspaceTreeSelectedNode?.path);
@@ -11845,7 +14986,7 @@ export default function App() {
     }
 
     try {
-      const references = [];
+      const contextItems = [];
       for (const file of imageFiles) {
         const arrayBuffer = await file.arrayBuffer();
         const savedImage = await bridge.saveCommandDockImage({
@@ -11853,19 +14994,21 @@ export default function App() {
           mimeType: file.type,
           bytes: new Uint8Array(arrayBuffer)
         });
-        references.push(t('floatingComposerImageReference', {
-          path: normalizePromptFilePath(savedImage.path)
+        const imagePath = normalizePromptFilePath(savedImage.path);
+        contextItems.push(createCommandDockContextItem('image', {
+          path: imagePath,
+          title: savedImage.name || getCommandDockContextPathName(imagePath, t('floatingComposerContextImage'))
         }));
       }
 
-      insertTextIntoCommandDock(references.join('\n'));
-      showToast(t('floatingComposerImagesAdded', { count: references.length }));
+      addCommandDockContextItems(contextItems);
+      showToast(t('floatingComposerImagesAdded', { count: contextItems.length }));
       return true;
     } catch (error) {
       showToast(t('floatingComposerImageSaveFailed', { message: error.message }));
       return false;
     }
-  }, [insertTextIntoCommandDock, showToast, t]);
+  }, [addCommandDockContextItems, showToast, t]);
 
   const saveImageGenerationReferenceImages = useCallback(async (files) => {
     const imageFiles = Array.isArray(files) ? files.filter((file) => isImageFile(file)) : [];
@@ -11951,6 +15094,12 @@ export default function App() {
     const referenceImageUrls = Array.isArray(options.referenceImageUrls)
       ? options.referenceImageUrls.map((url) => String(url || '').trim()).filter(Boolean)
       : [];
+    const requestParams = options.requestParams && typeof options.requestParams === 'object'
+      ? normalizeImageGenerationPayload(options.requestParams)
+      : null;
+    const requestBody = options.requestBody && typeof options.requestBody === 'object'
+      ? normalizeImageGenerationPayload(options.requestBody)
+      : null;
     const taskId = createLocalId('image-task');
     const pendingTask = createImageGenerationTaskItem({
       id: taskId,
@@ -11960,6 +15109,8 @@ export default function App() {
       size,
       upscale,
       referenceImageCount: referenceImageUrls.length,
+      requestParams,
+      requestBody,
       status: 'submitting',
       createdAt: Date.now()
     });
@@ -11974,7 +15125,9 @@ export default function App() {
         ...(size ? { size } : {}),
         ...(upscale ? { upscale } : {}),
         ...(n ? { n } : {}),
-        ...(referenceImageUrls.length > 0 ? { referenceImageUrls } : {})
+        ...(referenceImageUrls.length > 0 ? { referenceImageUrls } : {}),
+        ...(requestParams ? { requestParams } : {}),
+        ...(requestBody ? { requestBody } : {})
       });
       setImageGenerationResults((current) => current.map((item) => (
         item.id === taskId
@@ -12273,6 +15426,116 @@ export default function App() {
     return true;
   }, [getCommandDockTargetRect]);
 
+  const prepareAgentUtilityTarget = useCallback((panelId, options = {}) => {
+    const panel = panelsRef.current.find((item) => item.id === panelId);
+    if (!panel) {
+      showToast(t('agentUtilityPanelMissing'));
+      return null;
+    }
+
+    setCommandDockTargetId(panel.id);
+    if (commandDockCollapsed) {
+      setCommandDockCollapsed(false);
+    }
+    if (imageGenerationOpen) {
+      setImageGenerationOpen(false);
+    }
+    if (!options.quiet) {
+      showToast(t('agentUtilityTargetReady', { name: panel.title }));
+    }
+
+    window.requestAnimationFrame(() => {
+      resizeCommandDockInput();
+      if (options.focus !== false) {
+        commandDockInputRef.current?.focus();
+      }
+    });
+    return panel;
+  }, [commandDockCollapsed, imageGenerationOpen, resizeCommandDockInput, showToast, t]);
+
+  const attachAgentImagesToCommandDock = useCallback((panelId, files) => {
+    const panel = prepareAgentUtilityTarget(panelId, { quiet: true });
+    if (!panel) {
+      return false;
+    }
+
+    return saveCommandDockImages(files);
+  }, [prepareAgentUtilityTarget, saveCommandDockImages]);
+
+  const openAgentWorkspaceFiles = useCallback((panelId) => {
+    const panel = prepareAgentUtilityTarget(panelId, { quiet: true });
+    if (!panel) {
+      return false;
+    }
+
+    const targetPath = String(panel.cwd || currentWorkspacePath || '').trim();
+    setWorkspaceTreeOpen(true);
+    setSessionReviewOpen(false);
+    setImageGenerationOpen(false);
+    if (
+      targetPath
+      && targetPath !== cwdRef.current
+      && shouldPromoteWorkspacePath(targetPath, panel.projectId)
+    ) {
+      setCwd(targetPath);
+    }
+    void loadWorkspaceTree(targetPath);
+    return true;
+  }, [currentWorkspacePath, loadWorkspaceTree, prepareAgentUtilityTarget, shouldPromoteWorkspacePath]);
+
+  const insertAgentDiffContext = useCallback(async (panelId) => {
+    const panel = prepareAgentUtilityTarget(panelId, { quiet: true });
+    if (!panel) {
+      return false;
+    }
+
+    const targetPath = String(panel.cwd || currentWorkspacePath || '').trim();
+    try {
+      const snapshot = await bridge.readWorkspaceDiff({ cwd: targetPath });
+      const diffText = String(snapshot?.text || '').trim();
+      if (!diffText) {
+        showToast(t('agentUtilityDiffEmpty'));
+        return false;
+      }
+
+      const diffPath = normalizePromptFilePath(snapshot.repositoryRoot || targetPath);
+      const header = t('agentUtilityDiffContextHeader', { path: diffPath });
+      insertTextIntoCommandDock(`${header}\n\n\`\`\`\`diff\n${diffText}\n\`\`\`\``);
+      showToast(t('agentUtilityDiffInserted'));
+      return true;
+    } catch (error) {
+      showToast(t('agentUtilityDiffFailed', { message: error?.message || String(error) }));
+      return false;
+    }
+  }, [currentWorkspacePath, insertTextIntoCommandDock, prepareAgentUtilityTarget, showToast, t]);
+
+  const openDiffReviewForPath = useCallback((targetPath = '') => {
+    const normalizedPath = String(targetPath || currentWorkspacePath || '').trim();
+    if (!normalizedPath) {
+      showToast(t('diffReviewNoWorkspace'));
+      return false;
+    }
+
+    setDiffReviewCwd(normalizedPath);
+    setWorkspaceTreeOpen(false);
+    setSessionReviewOpen(false);
+    setPromptManagerOpen(false);
+    setImageGenerationOpen(false);
+    setDiffReviewOpen(true);
+    return true;
+  }, [currentWorkspacePath, showToast, t]);
+
+  const openAgentDiffReview = useCallback((panelId) => {
+    const panel = prepareAgentUtilityTarget(panelId, { focus: false, quiet: true });
+    if (!panel) {
+      return false;
+    }
+
+    const targetPath = String(panel.cwd || currentWorkspacePath || '').trim();
+    centerCanvasOnCommandDockTarget(panel);
+    return openDiffReviewForPath(targetPath);
+  }, [centerCanvasOnCommandDockTarget, currentWorkspacePath, openDiffReviewForPath, prepareAgentUtilityTarget]);
+
   const sendCommandDockInput = useCallback((options = {}) => {
     const targetPanel = commandDockPanels.find((panel) => panel.id === commandDockTargetId);
     if (!canPanelReceiveInput(targetPanel)) {
@@ -12288,16 +15551,23 @@ export default function App() {
       : commandDockInputRef.current?.value ?? commandDockValue;
     const shouldTrimTrailingBreaks = !options || options.trimTrailingLineBreaks !== false;
     const nextValue = shouldTrimTrailingBreaks ? trimTrailingLineBreaks(rawValue) : rawValue;
-    if (!String(nextValue || '').trim()) {
+    const contextItems = normalizeCommandDockContextItems(commandDockContextItems);
+    if (!String(nextValue || '').trim() && contextItems.length === 0) {
+      return false;
+    }
+
+    const payloadValue = buildCommandDockContextPayload(nextValue, contextItems);
+    if (!String(payloadValue || '').trim()) {
       return false;
     }
 
     touchPanelActivity(targetPanel.id);
-    submitCommandDockPayload(targetPanel.id, nextValue);
+    submitCommandDockPayload(targetPanel.id, payloadValue);
     flashCommandDockDispatchTargets(targetPanel.id);
     centerCanvasOnCommandDockTarget(targetPanel);
-    rememberCommandDockHistory(nextValue);
+    rememberCommandDockHistory(formatCommandDockContextHistoryEntry(nextValue, contextItems));
     setCommandDockValue('');
+    setCommandDockContextItems([]);
     closeCommandDockSkillMention();
     showToast(t('floatingComposerSent', { name: targetPanel.title }));
     window.requestAnimationFrame(() => {
@@ -12305,7 +15575,7 @@ export default function App() {
     });
     focusCommandDockTerminal(targetPanel);
     return true;
-  }, [centerCanvasOnCommandDockTarget, closeCommandDockSkillMention, commandDockPanels, commandDockTargetId, commandDockValue, flashCommandDockDispatchTargets, focusCommandDockTerminal, rememberCommandDockHistory, resizeCommandDockInput, showToast, submitCommandDockPayload, t, touchPanelActivity]);
+  }, [centerCanvasOnCommandDockTarget, closeCommandDockSkillMention, commandDockContextItems, commandDockPanels, commandDockTargetId, commandDockValue, flashCommandDockDispatchTargets, focusCommandDockTerminal, rememberCommandDockHistory, resizeCommandDockInput, showToast, submitCommandDockPayload, t, touchPanelActivity]);
 
   const handleCommandDockCompositionStart = useCallback(() => {
     commandDockComposingRef.current = true;
@@ -12445,6 +15715,37 @@ export default function App() {
     });
   }, [commitWorkspace]);
 
+  const updateCanvasTodosForLinkedPanel = useCallback((panelId, updater) => {
+    const normalizedPanelId = String(panelId || '').trim();
+    if (!normalizedPanelId || typeof updater !== 'function') {
+      return;
+    }
+
+    commitWorkspace((currentWorkspace) => {
+      const entries = Object.entries(currentWorkspace.canvasTodos || {});
+      if (entries.length === 0) {
+        return currentWorkspace;
+      }
+
+      let changed = false;
+      const nextCanvasTodos = { ...(currentWorkspace.canvasTodos || {}) };
+      entries.forEach(([canvasKey, todos]) => {
+        const currentTodos = Array.isArray(todos) ? todos : [];
+        const nextTodos = currentTodos.map((todo) => (
+          todo.linkedPanelId === normalizedPanelId
+            ? normalizeCanvasTodo(updater(todo) || todo)
+            : todo
+        ));
+        if (!sameCanvasTodoList(currentTodos, nextTodos)) {
+          changed = true;
+          nextCanvasTodos[canvasKey] = nextTodos;
+        }
+      });
+
+      return changed ? { ...currentWorkspace, canvasTodos: nextCanvasTodos } : currentWorkspace;
+    });
+  }, [commitWorkspace]);
+
   const updateCanvasConnectionsForKey = useCallback((canvasKey, updater) => {
     commitWorkspace((currentWorkspace) => {
       const currentConnections = getWorkspaceCanvasConnections(currentWorkspace, canvasKey);
@@ -12514,6 +15815,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(agentsKey, JSON.stringify(agents));
   }, [agents]);
+
+  useEffect(() => {
+    localStorage.setItem(autopilotKey, JSON.stringify(autopilots));
+  }, [autopilots]);
 
   useEffect(() => {
     window.clearTimeout(persistCanvasViewTimer.current);
@@ -12625,6 +15930,17 @@ export default function App() {
     const nextRecords = {};
     let changed = false;
 
+    terminalInputCommandBuffersRef.current.forEach((_value, id) => {
+      if (!panelIds.has(id)) {
+        terminalInputCommandBuffersRef.current.delete(id);
+      }
+    });
+    canvasTodoOutputBuffersRef.current.forEach((_value, id) => {
+      if (!panelIds.has(id)) {
+        canvasTodoOutputBuffersRef.current.delete(id);
+      }
+    });
+
     Object.entries(currentRecords).forEach(([id, record]) => {
       if (panelIds.has(id)) {
         nextRecords[id] = record;
@@ -12640,10 +15956,51 @@ export default function App() {
     }
   }, [panels]);
 
+  const syncCanvasTodoProgressFromOutput = useCallback((id, data) => {
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) {
+      return;
+    }
+
+    const normalizedData = normalizeCanvasTodoOutputText(data);
+    if (!normalizedData) {
+      return;
+    }
+
+    const previousBuffer = canvasTodoOutputBuffersRef.current.get(normalizedId) || '';
+    const combined = `${previousBuffer}${normalizedData}`;
+    const lastBreakIndex = combined.lastIndexOf('\n');
+    if (lastBreakIndex < 0) {
+      canvasTodoOutputBuffersRef.current.set(normalizedId, combined.slice(-canvasTodoOutputCarryMaxChars));
+      return;
+    }
+
+    const readyText = combined.slice(0, lastBreakIndex + 1);
+    const carry = combined.slice(lastBreakIndex + 1).slice(-canvasTodoOutputCarryMaxChars);
+    if (carry) {
+      canvasTodoOutputBuffersRef.current.set(normalizedId, carry);
+    } else {
+      canvasTodoOutputBuffersRef.current.delete(normalizedId);
+    }
+
+    const extracted = extractCanvasTodoProgressFromOutput(readyText);
+    if (extracted.tasks.length === 0 && !extracted.planText) {
+      return;
+    }
+
+    const timestamp = Date.now();
+    updateCanvasTodosForLinkedPanel(normalizedId, (todo) => (
+      todo.autoSync
+        ? mergeCanvasTodoExtractedProgress(todo, extracted, timestamp)
+        : todo
+    ));
+  }, [updateCanvasTodosForLinkedPanel]);
+
   useEffect(() => {
     const offData = bridge.onTerminalData(({ id, data }) => {
       touchPanelActivity(id);
       appendSessionReviewRecord(id, data);
+      syncCanvasTodoProgressFromOutput(id, data);
       terminalInstances.current.get(id)?.term.write(data);
     });
 
@@ -12671,7 +16028,7 @@ export default function App() {
       offData();
       offExit();
     };
-  }, [appendSessionReviewRecord, touchPanelActivity]);
+  }, [appendSessionReviewRecord, syncCanvasTodoProgressFromOutput, touchPanelActivity]);
 
   const getViewportRect = useCallback(() => viewportRef.current.getBoundingClientRect(), []);
 
@@ -12824,6 +16181,13 @@ export default function App() {
     )));
   }, [updateCanvasTodosForKey]);
 
+  const moveCanvasTodo = useCallback((id, patch) => {
+    updateCanvasTodo(id, {
+      ...patch,
+      followPanel: false
+    });
+  }, [updateCanvasTodo]);
+
   const updateCanvasTodoItems = useCallback((id, updater) => {
     const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
     setActiveCanvasTodoId(id);
@@ -12870,6 +16234,14 @@ export default function App() {
     updateCanvasTodo(id, { title: nextTitle });
   }, [t, updateCanvasTodo]);
 
+  const updateCanvasTodoPlanText = useCallback((id, planText) => {
+    updateCanvasTodo(id, { planText: normalizeCanvasTodoPlanText(planText) });
+  }, [updateCanvasTodo]);
+
+  const toggleCanvasTodoAutoSync = useCallback((id, autoSync) => {
+    updateCanvasTodo(id, { autoSync: Boolean(autoSync) });
+  }, [updateCanvasTodo]);
+
   const toggleCanvasTodoPinned = useCallback((id) => {
     const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
     setActiveCanvasTodoId(id);
@@ -12898,7 +16270,9 @@ export default function App() {
       {
         id: createLocalId('canvas-todo-item'),
         text: trimmedText,
+        status: 'todo',
         done: false,
+        source: 'manual',
         createdAt: now,
         updatedAt: now
       }
@@ -12907,9 +16281,10 @@ export default function App() {
 
   const updateCanvasTodoItemDone = useCallback((todoId, itemId, done) => {
     const now = Date.now();
+    const nextStatus = done ? 'done' : 'todo';
     updateCanvasTodoItems(todoId, (items) => items.map((item) => (
       item.id === itemId
-        ? { ...item, done: Boolean(done), updatedAt: now }
+        ? { ...item, status: nextStatus, done: Boolean(done), source: item.source || 'manual', updatedAt: now }
         : item
     )));
   }, [updateCanvasTodoItems]);
@@ -12918,7 +16293,7 @@ export default function App() {
     const now = Date.now();
     updateCanvasTodoItems(todoId, (items) => items.map((item) => (
       item.id === itemId
-        ? { ...item, text: String(text || ''), updatedAt: now }
+        ? { ...item, text: String(text || ''), source: item.source || 'manual', updatedAt: now }
         : item
     )));
   }, [updateCanvasTodoItems]);
@@ -13142,6 +16517,9 @@ export default function App() {
       contextWindowTokens: Number.isFinite(meta.contextWindowTokens) ? meta.contextWindowTokens : null,
       contextWindowLabel: meta.contextWindowLabel || '',
       initialCommand: meta.initialCommand,
+      agentId: String(slot.agentId || '').trim(),
+      agentName: String(slot.agentName || '').trim(),
+      agentTask: String(slot.agentTask || '').trim(),
       createdAt: Number.isFinite(meta.createdAt) ? meta.createdAt : Date.now(),
       lastActivityAt: Number.isFinite(meta.createdAt) ? meta.createdAt : Date.now(),
       x,
@@ -13164,6 +16542,38 @@ export default function App() {
     return panel;
   }, [focusTerminalInstance, getVisiblePanels, language, viewportCenterOnCanvas]);
 
+  const createAgentPlanTodoForPanel = useCallback((panel, agent, taskDescription) => {
+    if (!panel?.id) {
+      return null;
+    }
+
+    const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
+    const todoId = createLocalId('canvas-todo');
+    const agentName = String(agent?.name || panel.title || 'Agent').trim();
+    const task = String(taskDescription || '').trim();
+    const todo = normalizeCanvasTodo({
+      id: todoId,
+      title: t('agentPlanTodoTitle', { name: agentName }),
+      pinned: false,
+      linkedPanelId: panel.id,
+      linkedPanelTitle: panel.title || agentName,
+      source: 'agent',
+      agentId: String(agent?.id || '').trim(),
+      agentName,
+      autoSync: true,
+      followPanel: true,
+      x: Math.round((Number.isFinite(panel.x) ? panel.x : 0) + (Number.isFinite(panel.width) ? panel.width : 640) + agentPlanTodoGap),
+      y: Math.round(Number.isFinite(panel.y) ? panel.y : 0),
+      width: agentPlanTodoDefaultWidth,
+      height: agentPlanTodoDefaultHeight,
+      planText: task ? `Task:\n${task}` : '',
+      items: []
+    });
+
+    updateCanvasTodosForKey(canvasKey, (currentTodos) => [...currentTodos, todo]);
+    return todo;
+  }, [t, updateCanvasTodosForKey]);
+
   const getCurrentSessionLaunchContext = useCallback((requestedCwd = '') => {
     const fallbackCwd = String(cwdRef.current || '').trim()
       || defaultCwd
@@ -13172,22 +16582,22 @@ export default function App() {
     return resolveWorkspaceLaunchContext(activeProject, requestedCwd, fallbackCwd);
   }, [activeProject, defaultCwd]);
 
-  const runAgentTask = useCallback((agent, taskDescription) => {
+  const runAgentTask = useCallback((agent, taskDescription, options = {}) => {
     const normalizedAgent = normalizeAgentRecord(agent);
     const task = String(taskDescription || '').trim();
     if (!normalizedAgent) {
       showToast(t('agentRequired'));
-      return;
+      return Promise.resolve(false);
     }
     if (!task) {
       showToast(t('agentTaskRequired'));
-      return;
+      return Promise.resolve(false);
     }
 
     const run = async () => {
       const cliProvider = resolveCliProvider(normalizedAgent.cliProviderId || launchCliProviderId);
       const cliProviderId = cliProvider?.id || defaultCliProviderId;
-      const launchContext = getCurrentSessionLaunchContext();
+      const launchContext = getCurrentSessionLaunchContext(options.cwd);
       const prompt = buildAgentTaskPrompt(normalizedAgent, task);
 
       if (
@@ -13203,20 +16613,31 @@ export default function App() {
         ...getCenteredTerminalSlot(workspaceRef.current, 700, 420),
         ...launchContext,
         title: normalizedAgent.name,
-        cliProviderId
+        cliProviderId,
+        agentId: normalizedAgent.id,
+        agentName: normalizedAgent.name,
+        agentTask: task
       });
+      createAgentPlanTodoForPanel(panel, normalizedAgent, task);
 
       window.setTimeout(() => {
         touchPanelActivity(panel.id);
         submitTerminalTextPayload(panel.id, prompt);
       }, agentTaskSubmitDelayMs);
 
-      showToast(t('agentStarted', { name: normalizedAgent.name }));
+      if (options.showStartedToast !== false) {
+        showToast(t('agentStarted', { name: normalizedAgent.name }));
+      }
+      return true;
     };
 
-    run().catch((error) => showToast(error.message));
+    return run().catch((error) => {
+      showToast(error.message);
+      return false;
+    });
   }, [
     createTerminal,
+    createAgentPlanTodoForPanel,
     getCenteredTerminalSlot,
     getCurrentSessionLaunchContext,
     launchCliProviderId,
@@ -13226,6 +16647,91 @@ export default function App() {
     t,
     touchPanelActivity
   ]);
+
+  const submitDiffReview = useCallback(async ({ agent, comments, snapshot }) => {
+    const task = buildInteractiveCodeReviewTask({ comments, snapshot });
+    const reviewCwd = String(snapshot?.repositoryRoot || snapshot?.cwd || diffReviewCwd || currentWorkspacePath || '').trim();
+    setDiffReviewOpen(false);
+
+    const started = await runAgentTask(agent, task, {
+      cwd: reviewCwd,
+      showStartedToast: false
+    });
+
+    if (started) {
+      showToast(t('diffReviewQueued', { name: agent?.name || agent?.id || 'Agent' }));
+    }
+  }, [currentWorkspacePath, diffReviewCwd, runAgentTask, showToast, t]);
+
+  const runAutopilot = useCallback(async (autopilot, options = {}) => {
+    const normalizedAutopilot = normalizeAutopilotRecord(autopilot);
+    if (!normalizedAutopilot) {
+      showToast(t('autopilotRequired'));
+      return false;
+    }
+    if (autopilotRunningIdsRef.current.has(normalizedAutopilot.id)) {
+      return false;
+    }
+
+    const agent = agentsRef.current.find((item) => item.id === normalizedAutopilot.agentId) || null;
+    if (!agent) {
+      showToast(t('autopilotMissingAgent', { name: normalizedAutopilot.name }));
+      return false;
+    }
+    if (!String(normalizedAutopilot.runbook || '').trim()) {
+      showToast(t('autopilotRunbookRequired'));
+      return false;
+    }
+
+    autopilotRunningIdsRef.current.add(normalizedAutopilot.id);
+    try {
+      const started = await runAgentTask(agent, buildAutopilotRunbookTask(normalizedAutopilot), {
+        showStartedToast: false
+      });
+      if (!started) {
+        return false;
+      }
+
+      const now = Date.now();
+      setAutopilots((current) => current.map((record) => (
+        record.id === normalizedAutopilot.id
+          ? { ...record, lastRunAt: now }
+          : record
+      )));
+      showToast(t('autopilotStarted', { name: normalizedAutopilot.name }));
+      return true;
+    } finally {
+      autopilotRunningIdsRef.current.delete(normalizedAutopilot.id);
+    }
+  }, [runAgentTask, showToast, t]);
+
+  useEffect(() => {
+    const tick = () => {
+      const now = Date.now();
+      const schedulerStartedAt = autopilotSchedulerStartedAtRef.current;
+
+      for (const autopilot of autopilotsRef.current) {
+        const record = normalizeAutopilotRecord(autopilot);
+        if (!record?.enabled || autopilotRunningIdsRef.current.has(record.id)) {
+          continue;
+        }
+
+        const baseline = Math.max(
+          record.lastRunAt || 0,
+          record.createdAt || 0,
+          record.updatedAt || 0,
+          schedulerStartedAt
+        );
+        const nextRunAt = getAutopilotNextRunAt(record, baseline);
+        if (nextRunAt && nextRunAt <= now) {
+          void runAutopilot(record, { scheduled: true });
+        }
+      }
+    };
+
+    const timer = window.setInterval(tick, autopilotSchedulerIntervalMs);
+    return () => window.clearInterval(timer);
+  }, [runAutopilot]);
 
   const dispatchCommandDockTasks = useCallback((options = {}) => {
     if (commandDockTaskDispatching) {
@@ -13445,10 +16951,36 @@ export default function App() {
   }, [closeTerminal, createTerminal]);
 
   const updatePanel = useCallback((id, patch) => {
+    const previousPanel = panelsRef.current.find((panel) => panel.id === id);
+    const nextX = Number.isFinite(patch?.x) ? patch.x : previousPanel?.x;
+    const nextY = Number.isFinite(patch?.y) ? patch.y : previousPanel?.y;
+    const nextWidth = Number.isFinite(patch?.width) ? patch.width : previousPanel?.width;
+    const deltaTodoX = Number.isFinite(previousPanel?.x) && Number.isFinite(nextX)
+      ? nextX - previousPanel.x
+      : 0;
+    const deltaTodoY = Number.isFinite(previousPanel?.y) && Number.isFinite(nextY)
+      ? nextY - previousPanel.y
+      : 0;
+    const deltaWidth = Number.isFinite(previousPanel?.width) && Number.isFinite(nextWidth)
+      ? nextWidth - previousPanel.width
+      : 0;
+
+    if (deltaTodoX || deltaTodoY || deltaWidth) {
+      updateCanvasTodosForLinkedPanel(id, (todo) => (
+        todo.followPanel
+          ? normalizeCanvasTodo({
+              ...todo,
+              x: Math.round(todo.x + deltaTodoX + deltaWidth),
+              y: Math.round(todo.y + deltaTodoY)
+            })
+          : todo
+      ));
+    }
+
     setPanels((current) => current.map((panel) => (
       panel.id === id ? { ...panel, ...patch } : panel
     )));
-  }, []);
+  }, [updateCanvasTodosForLinkedPanel]);
 
   const updateTerminalMeta = useCallback((id, patch) => {
     if (typeof bridge.updateTerminalMeta !== 'function') {
@@ -14297,12 +17829,15 @@ export default function App() {
           }
         : getCenteredTerminalSlot(workspaceRef.current);
 
-      await createTerminal({
+      const panel = await createTerminal({
         ...terminalSlot,
         ...launchContext,
         cliProviderId,
         useCommandPreset: cliProviderId === 'shell'
       });
+      if (config.selectCommandTarget) {
+        setCommandDockTargetId(panel.id);
+      }
       setLaunchCliProviderId(cliProviderId);
     };
 
@@ -14315,6 +17850,13 @@ export default function App() {
     const run = async () => {
       const cliProvider = resolveCliProvider(selection?.cliProviderId);
       const cliProviderId = cliProvider?.id || defaultCliProviderId;
+      const hasExplicitInitialCommand = Object.prototype.hasOwnProperty.call(selection || {}, 'initialCommand');
+      const terminalPresetConfig = {
+        useCommandPreset: cliProviderId === 'shell'
+      };
+      if (cliProviderId === 'shell' && hasExplicitInitialCommand) {
+        terminalPresetConfig.initialCommand = normalizeCommandPresetCommandInput(selection.initialCommand);
+      }
       setLaunchCliProviderId(cliProviderId);
 
       if (selection?.targetType === 'project') {
@@ -14334,7 +17876,7 @@ export default function App() {
           cwd: project.path,
           cliProviderId,
           targetType: 'project',
-          useCommandPreset: cliProviderId === 'shell'
+          ...terminalPresetConfig
         });
         return;
       }
@@ -14353,7 +17895,7 @@ export default function App() {
         cwd: sessionCwd,
         cliProviderId,
         targetType: 'directory',
-        useCommandPreset: cliProviderId === 'shell'
+        ...terminalPresetConfig
       });
     };
 
@@ -14698,6 +18240,13 @@ export default function App() {
     }));
   }, [commitWorkspace]);
 
+  const togglePromptMenuCollapsed = useCallback(() => {
+    commitWorkspace((currentWorkspace) => ({
+      ...currentWorkspace,
+      promptMenuCollapsed: !currentWorkspace.promptMenuCollapsed
+    }));
+  }, [commitWorkspace]);
+
   useEffect(() => {
     const onKeyDown = (event) => {
       const editable = event.target instanceof HTMLElement && (
@@ -14819,25 +18368,29 @@ export default function App() {
           activeProject={activeProject}
           activeSessionId={activeId}
           commandTargetId={commandDockTargetId}
-          historyProject={historyProject}
           language={language}
+          projectCompletedSessionCounts={projectCompletedSessionCounts}
           onAddProject={openProjectDialog}
           onFocusSession={focusSessionFromReview}
           theme={theme}
-          onAddCommandLine={openCommandLineDialog}
           onAddSession={openNewSessionPicker}
           onDeleteProject={deleteProject}
           onKillAll={killAll}
           onToggleImageGeneration={toggleImageGeneration}
           onOpenPath={openWorkspacePath}
           onOpenCodexConfig={openCodexSettings}
+          onOpenPromptManager={openPromptManager}
           onRefreshSkills={refreshWorkspaceSkills}
           onReorderProjects={reorderProjects}
           onSelectNoProject={selectNoProject}
           onSelectProject={selectProject}
           onThemeChange={setTheme}
           onToggleProjectPinned={toggleProjectPinned}
+          onTogglePromptMenuCollapsed={togglePromptMenuCollapsed}
           onToggleSkillsCollapsed={toggleSkillsCollapsed}
+          promptManagerOpen={promptManagerOpen}
+          quickPromptCount={quickPrompts.length}
+          quickPromptsLoading={quickPromptsLoading}
           runtimeNow={runtimeNow}
           sessions={commandDockPanels}
           skillsRootPath={skillsRootPath}
@@ -14865,6 +18418,19 @@ export default function App() {
               <Button type="button" variant="outline" onClick={() => setAgentsOpen(true)}>
                 <Bot className="h-4 w-4" />
                 {t('agents')}
+              </Button>
+              <Button
+                type="button"
+                variant={diffReviewOpen ? 'primary' : 'outline'}
+                onClick={() => openDiffReviewForPath(currentWorkspacePath)}
+                disabled={!currentWorkspacePath}
+              >
+                <FileDiff className="h-4 w-4" />
+                {t('diffReview')}
+              </Button>
+              <Button type="button" variant="outline" onClick={() => setAutopilotOpen(true)}>
+                <CalendarClock className="h-4 w-4" />
+                {t('autopilot')}
               </Button>
             </div>
 
@@ -15009,7 +18575,11 @@ export default function App() {
               t={t}
               onAddFrame={createCanvasFrameAtPoint}
               onAddGrid={(canvasPoint) => addGrid({ canvasPoint })}
-              onAddProviderSession={(cliProviderId, canvasPoint) => createWorkspaceSession(null, { cliProviderId, canvasPoint })}
+              onAddProviderSession={(cliProviderId, canvasPoint) => createWorkspaceSession(null, {
+                cliProviderId,
+                canvasPoint,
+                selectCommandTarget: true
+              })}
               onArrange={arrangeGrid}
               onClose={closeCanvasContextMenu}
               onCollectIdleCommandLines={collectIdleCommandLines}
@@ -15052,8 +18622,10 @@ export default function App() {
                     onItemDoneChange={updateCanvasTodoItemDone}
                     onItemRemove={removeCanvasTodoItem}
                     onItemTextChange={updateCanvasTodoItemText}
-                    onMove={updateCanvasTodo}
+                    onMove={moveCanvasTodo}
+                    onPlanTextChange={updateCanvasTodoPlanText}
                     onResize={updateCanvasTodo}
+                    onAutoSyncChange={toggleCanvasTodoAutoSync}
                     onTitleChange={(id, title) => updateCanvasTodo(id, { title })}
                     onTitleCommit={commitCanvasTodoTitle}
                     onTogglePinned={toggleCanvasTodoPinned}
@@ -15100,6 +18672,7 @@ export default function App() {
                   key={panel.id}
                   panel={panel}
                   active={visible && panel.id === activeId}
+                  language={language}
                   runtimeNow={runtimeNow}
                   scale={view.scale}
                   sessionHeaderVisibility={sessionHeaderVisibility}
@@ -15118,6 +18691,11 @@ export default function App() {
                   onConnectionPortClick={handleSessionConnectionPortClick}
                   onConnectionPortPointerDown={handleSessionConnectionPortPointerDown}
                   onExpand={expandPanel}
+                  onAgentAttachImages={attachAgentImagesToCommandDock}
+                  onAgentInsertDiff={insertAgentDiffContext}
+                  onAgentOpenFiles={openAgentWorkspaceFiles}
+                  onAgentOpenReview={openAgentDiffReview}
+                  onAgentSetQuickTarget={prepareAgentUtilityTarget}
                   onMinimize={minimizePanel}
                   onMove={updatePanel}
                   onResize={updatePanel}
@@ -15125,7 +18703,7 @@ export default function App() {
                   onModelChange={switchPanelModel}
                   onSelectToggle={toggleEndpointSelection}
                   onTagChange={changePanelTag}
-                  onTerminalInput={touchPanelActivity}
+                  onTerminalInput={handleTerminalInput}
                   onTitleChange={(id, title) => updatePanel(id, { title })}
                   onTitleCommit={commitPanelTitle}
                   registerTerminal={registerTerminal}
@@ -15147,8 +18725,10 @@ export default function App() {
                     onItemDoneChange={updateCanvasTodoItemDone}
                     onItemRemove={removeCanvasTodoItem}
                     onItemTextChange={updateCanvasTodoItemText}
-                    onMove={updateCanvasTodo}
+                    onMove={moveCanvasTodo}
+                    onPlanTextChange={updateCanvasTodoPlanText}
                     onResize={updateCanvasTodo}
+                    onAutoSyncChange={toggleCanvasTodoAutoSync}
                     onTitleChange={(id, title) => updateCanvasTodo(id, { title })}
                     onTitleCommit={commitCanvasTodoTitle}
                     onTogglePinned={toggleCanvasTodoPinned}
@@ -15156,6 +18736,22 @@ export default function App() {
                 ))}
               </div>
             </div>
+
+            <CanvasSessionStatusQueue
+              activeId={activeId}
+              className={cn(
+                commandDockVisible && !commandDockPosition && (
+                  commandDockCollapsed ? 'is-above-collapsed-dock' : 'is-above-expanded-dock'
+                )
+              )}
+              commandTargetId={commandDockTargetId}
+              language={language}
+              onFocusSession={focusSessionFromReview}
+              onRefresh={refreshCanvasSessionStatusQueue}
+              panels={commandDockPanels}
+              refreshStamp={canvasStatusRefreshAt}
+              t={t}
+            />
 
             {visiblePanels.length === 0 && visibleCanvasFrames.length === 0 && visibleCanvasTodos.length === 0 && (
               <Card id="emptyState" className="pointer-events-none absolute left-1/2 top-1/2 w-[min(420px,calc(100%-48px))] -translate-x-1/2 -translate-y-1/2 border-border/70 bg-card/80 text-center shadow-2xl backdrop-blur">
@@ -15180,6 +18776,7 @@ export default function App() {
             onCopy={copyWorkspaceTree}
             onInsertNode={handleWorkspaceTreeNodeInsert}
             onInsertSelected={insertSelectedWorkspaceTreePath}
+            onLoadNodeChildren={loadWorkspaceTreeNodeChildren}
             onOpen={openWorkspaceTree}
             onRefresh={refreshWorkspaceTree}
             onSelectNode={selectWorkspaceTreeNode}
@@ -15220,6 +18817,19 @@ export default function App() {
             runtimeNow={runtimeNow}
             t={t}
           />
+          <DiffReviewModal
+            agents={agents}
+            cwd={diffReviewCwd || currentWorkspacePath}
+            language={language}
+            onClose={() => setDiffReviewOpen(false)}
+            onOpenAgents={() => {
+              setDiffReviewOpen(false);
+              setAgentsOpen(true);
+            }}
+            onSubmitReview={submitDiffReview}
+            open={diffReviewOpen}
+            t={t}
+          />
           {imageGenerationOpen && (
             <ImageGenerationCanvasPage
               config={imageGenerationConfig}
@@ -15247,6 +18857,8 @@ export default function App() {
           canPanelReceiveInput={canPanelReceiveInput}
           collapsed={commandDockCollapsed}
           commandHistory={commandDockHistory}
+          contextItems={commandDockContextItems}
+          contextLoading={commandDockContextLoading}
           dispatchMode={commandDockDispatchMode}
           dispatchShortcutLabel={commandDockShortcutLabels.dispatch}
           dispatchingTasks={commandDockTaskDispatching}
@@ -15277,6 +18889,11 @@ export default function App() {
           onExport={exportTerminal}
           onExportCustom={exportTerminalCustom}
           onHistorySelect={selectCommandDockHistory}
+          onAddLatestOutputContext={addLatestOutputToCommandDockContext}
+          onAddSelectedTextContext={addSelectedTextToCommandDockContext}
+          onAddTerminalSelectionContext={addTerminalSelectionToCommandDockContext}
+          onAddUrlContext={addUrlToCommandDockContext}
+          onClearContext={clearCommandDockContextItems}
           onInputChange={handleCommandDockInputChange}
           onInputCompositionEnd={handleCommandDockCompositionEnd}
           onInputCompositionStart={handleCommandDockCompositionStart}
@@ -15287,9 +18904,11 @@ export default function App() {
           onInputScroll={handleCommandDockInputScroll}
           onInputSelect={handleCommandDockInputSelect}
           onPositionChange={setCommandDockPosition}
+          onOpenWorkspaceTree={openWorkspaceTree}
           onQuickPromptDelete={deleteCommandDockPrompt}
           onQuickPromptSave={saveCommandDockPrompt}
           onQuickPromptSelect={insertQuickPromptIntoCommandDock}
+          onRemoveContextItem={removeCommandDockContextItem}
           onSend={sendCommandDockInput}
           onSkillMentionSelect={insertCommandDockSkillMention}
           onToggleCollapsed={toggleCommandDockCollapsed}
@@ -15306,15 +18925,30 @@ export default function App() {
         />
       )}
 
+      <PromptManagementDialog
+        loading={quickPromptsLoading}
+        onDelete={deleteQuickPromptRecord}
+        onOpenChange={setPromptManagerOpen}
+        onReload={loadQuickPrompts}
+        onSave={saveQuickPromptRecord}
+        open={promptManagerOpen}
+        prompts={quickPrompts}
+        promptsPath={quickPromptsPath}
+        showToast={showToast}
+        t={t}
+      />
+
       <CodexConfigDialog
         appZoomFactor={appZoomFactor}
         canvasMode={workspace.canvasMode}
         commandDockShortcuts={commandDockShortcuts}
+        historyProject={historyProject}
         initialSettingsTab={codexInitialTab}
         language={language}
         onAppZoomFactorChange={(factor) => setAppZoomFactor(normalizeAppZoomFactor(factor))}
         onCanvasModeChange={changeCanvasMode}
         onCommandDockShortcutChange={changeCommandDockShortcut}
+        onHistoryProjectOpen={() => selectProject(historyProjectId)}
         onLanguageChange={setLanguage}
         onOpenChange={setCodexOpen}
         onSessionHeaderVisibilityChange={changeSessionHeaderVisibility}
@@ -15325,13 +18959,21 @@ export default function App() {
       />
 
       <NewSessionDialog
+        activeCommandPresetId={activeCommandPresetId}
+        commandPresets={commandPresets}
+        commandPresetsLoading={commandPresetsLoading}
+        commandPresetsPath={commandPresetsPath}
         defaultCwd={sessionLaunchPath}
         initialCliProviderId={launchCliProviderId}
         language={language}
+        onCommandPresetDelete={deleteCommandPreset}
+        onCommandPresetSave={saveCommandPreset}
+        onCommandPresetSelect={selectCommandPreset}
         onOpenChange={setNewSessionOpen}
         onSelect={createSessionFromSelection}
         open={newSessionOpen}
         projects={projectsWithHistory}
+        showToast={showToast}
         t={t}
       />
 
@@ -15343,6 +18985,19 @@ export default function App() {
         onOpenChange={setAgentsOpen}
         onRunAgent={runAgentTask}
         open={agentsOpen}
+        showToast={showToast}
+        skillsState={workspaceSkillsState}
+        t={t}
+      />
+
+      <AutopilotDialog
+        agents={agents}
+        autopilots={autopilots}
+        language={language}
+        onAutopilotsChange={setAutopilots}
+        onOpenChange={setAutopilotOpen}
+        onRunAutopilot={runAutopilot}
+        open={autopilotOpen}
         showToast={showToast}
         t={t}
       />
