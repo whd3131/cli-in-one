@@ -1,5 +1,5 @@
 import React from 'react';
-import { PencilLine, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
+import { Copy, FileText, Image, PencilLine, Plus, RefreshCw, Save, Trash2, X } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -35,12 +35,74 @@ function createQuickPromptDraft(record, fallbackTitle = '') {
   return {
     id: String(record?.id || '').trim(),
     title,
-    prompt
+    prompt,
+    attachments: normalizeQuickPromptAttachments(record?.attachments)
   };
+}
+
+function createAttachmentId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  return `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function getAttachmentTitle(record) {
+  const path = String(record?.path || '').trim().replace(/\\/g, '/');
+  return String(record?.title || record?.name || '').trim()
+    || path.split('/').filter(Boolean).pop()
+    || '';
+}
+
+function normalizeQuickPromptAttachments(value) {
+  return (Array.isArray(value) ? value : [])
+    .map((record) => {
+      if (!record || typeof record !== 'object') {
+        return null;
+      }
+
+      const path = String(record.path || '').trim();
+      const content = String(record.content || '');
+      const title = getAttachmentTitle(record);
+      if (!path && !content.trim()) {
+        return null;
+      }
+
+      return {
+        id: String(record.id || '').trim() || createAttachmentId(),
+        kind: record.kind === 'image' ? 'image' : 'file',
+        title,
+        path,
+        content,
+        size: Number.isFinite(record.size) ? record.size : null,
+        mimeType: String(record.mimeType || '').trim(),
+        truncated: Boolean(record.truncated),
+        binary: Boolean(record.binary)
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function formatAttachmentSize(value) {
+  const size = Number(value);
+  if (!Number.isFinite(size) || size < 0) {
+    return '';
+  }
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KB`;
+  }
+  return `${(size / 1024 / 1024).toFixed(size < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
 export function PromptManagementDialog({
   loading = false,
+  onChooseAttachments,
+  onCopy,
   onDelete,
   onOpenChange,
   onReload,
@@ -60,10 +122,12 @@ export function PromptManagementDialog({
   const [selectedId, setSelectedId] = React.useState('');
   const [draft, setDraft] = React.useState(() => createQuickPromptDraft(null, fallbackTitle));
   const [dirty, setDirty] = React.useState(false);
+  const [creatingNew, setCreatingNew] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [status, setStatus] = React.useState('');
   const [statusTone, setStatusTone] = React.useState('');
   const busy = loading || saving;
+  const draftAttachments = normalizeQuickPromptAttachments(draft.attachments);
 
   const setStatusMessage = React.useCallback((message, tone = '') => {
     setStatus(message);
@@ -93,7 +157,7 @@ export function PromptManagementDialog({
   }, [onReload, open, setStatusMessage, showToast, t]);
 
   React.useEffect(() => {
-    if (!open || dirty) {
+    if (!open || dirty || creatingNew) {
       return;
     }
 
@@ -111,7 +175,7 @@ export function PromptManagementDialog({
 
     setSelectedId('');
     setDraft(createQuickPromptDraft(null, fallbackTitle));
-  }, [dirty, fallbackTitle, normalizedPrompts, open, selectedPrompt]);
+  }, [creatingNew, dirty, fallbackTitle, normalizedPrompts, open, selectedPrompt]);
 
   const confirmDiscardDirty = React.useCallback(() => (
     !dirty || window.confirm(t('promptManagerDiscardConfirm'))
@@ -124,6 +188,7 @@ export function PromptManagementDialog({
 
     if (!nextOpen) {
       setDirty(false);
+      setCreatingNew(false);
       setStatusMessage('');
     }
     onOpenChange?.(nextOpen);
@@ -136,6 +201,7 @@ export function PromptManagementDialog({
 
     setSelectedId(String(record.id || ''));
     setDraft(createQuickPromptDraft(record, fallbackTitle));
+    setCreatingNew(false);
     setDirty(false);
     setStatusMessage('');
   }, [confirmDiscardDirty, fallbackTitle, setStatusMessage]);
@@ -147,6 +213,7 @@ export function PromptManagementDialog({
 
     setSelectedId('');
     setDraft(createQuickPromptDraft(null, fallbackTitle));
+    setCreatingNew(true);
     setDirty(false);
     setStatusMessage('');
   }, [confirmDiscardDirty, fallbackTitle, setStatusMessage]);
@@ -159,6 +226,65 @@ export function PromptManagementDialog({
     setDirty(true);
     setStatusMessage('');
   }, [setStatusMessage]);
+
+  const addAttachments = React.useCallback(async (kind) => {
+    if (typeof onChooseAttachments !== 'function') {
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const attachments = normalizeQuickPromptAttachments(await onChooseAttachments({ kind }));
+      if (attachments.length === 0) {
+        return;
+      }
+
+      setDraft((current) => ({
+        ...current,
+        attachments: normalizeQuickPromptAttachments([
+          ...(Array.isArray(current.attachments) ? current.attachments : []),
+          ...attachments
+        ])
+      }));
+      setDirty(true);
+      setStatusMessage('');
+    } catch (error) {
+      const message = error?.message || String(error);
+      setStatusMessage(message, 'error');
+      showToast?.(t('promptManagerAttachmentAddFailed', { message }));
+    } finally {
+      setSaving(false);
+    }
+  }, [onChooseAttachments, setStatusMessage, showToast, t]);
+
+  const removeAttachment = React.useCallback((id) => {
+    const attachmentId = String(id || '').trim();
+    if (!attachmentId) {
+      return;
+    }
+
+    setDraft((current) => ({
+      ...current,
+      attachments: normalizeQuickPromptAttachments(current.attachments)
+        .filter((attachment) => attachment.id !== attachmentId)
+    }));
+    setDirty(true);
+    setStatusMessage('');
+  }, [setStatusMessage]);
+
+  const copyPrompt = React.useCallback(() => {
+    const prompt = trimTrailingLineBreaks(draft.prompt);
+    if (!prompt.trim()) {
+      setStatusMessage(t('quickPromptContentRequired'), 'error');
+      showToast?.(t('quickPromptContentRequired'));
+      return;
+    }
+
+    if (onCopy?.(prompt)) {
+      setStatusMessage(t('quickPromptCopied'), 'ok');
+      showToast?.(t('quickPromptCopied'));
+    }
+  }, [draft.prompt, onCopy, setStatusMessage, showToast, t]);
 
   const reloadPrompts = React.useCallback(async () => {
     if (!confirmDiscardDirty()) {
@@ -191,7 +317,8 @@ export function PromptManagementDialog({
       const store = await onSave?.({
         ...(draft.id ? { id: draft.id } : {}),
         title,
-        prompt
+        prompt,
+        attachments: normalizeQuickPromptAttachments(draft.attachments)
       });
       const savedPrompt = store?.savedPrompt
         || (Array.isArray(store?.prompts) ? store.prompts.find((record) => record.id === draft.id) : null)
@@ -203,6 +330,7 @@ export function PromptManagementDialog({
 
       setSelectedId(String(savedPrompt.id || ''));
       setDraft(createQuickPromptDraft(savedPrompt, fallbackTitle));
+      setCreatingNew(false);
       setDirty(false);
       setStatusMessage(t('promptManagerSaved', { name: savedTitle }), 'ok');
       showToast?.(t('quickPromptSaved', { name: savedTitle }));
@@ -213,7 +341,7 @@ export function PromptManagementDialog({
     } finally {
       setSaving(false);
     }
-  }, [draft.id, draft.prompt, draft.title, fallbackTitle, getPromptTitle, onSave, setStatusMessage, showToast, t]);
+  }, [draft.attachments, draft.id, draft.prompt, draft.title, fallbackTitle, getPromptTitle, onSave, setStatusMessage, showToast, t]);
 
   const deletePrompt = React.useCallback(async () => {
     const promptId = String(draft.id || '').trim();
@@ -311,7 +439,7 @@ export function PromptManagementDialog({
             </div>
           </div>
 
-          <div className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3 rounded-md border border-border bg-card/70 p-3">
+          <div className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto_auto] gap-3 rounded-md border border-border bg-card/70 p-3">
             <div className="flex min-w-0 items-center justify-between gap-2">
               <div className="min-w-0 truncate text-sm font-semibold">
                 {draft.id ? getPromptTitle(draft) : t('promptManagerNew')}
@@ -356,9 +484,75 @@ export function PromptManagementDialog({
               />
             </div>
 
+            <div className="grid min-w-0 gap-2 rounded-md border border-border bg-background/60 p-2">
+              <div className="flex min-w-0 items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium text-muted-foreground">{t('promptManagerAttachments')}</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {t('promptManagerAttachmentCount', { count: draftAttachments.length })}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <Button type="button" size="sm" variant="outline" onClick={() => addAttachments('image')} disabled={busy}>
+                    <Image className="h-3.5 w-3.5" />
+                    {t('promptManagerAddImage')}
+                  </Button>
+                  <Button type="button" size="sm" variant="outline" onClick={() => addAttachments('file')} disabled={busy}>
+                    <FileText className="h-3.5 w-3.5" />
+                    {t('promptManagerAddDocument')}
+                  </Button>
+                </div>
+              </div>
+
+              {draftAttachments.length === 0 ? (
+                <div className="rounded-md border border-dashed border-border px-2.5 py-3 text-xs text-muted-foreground">
+                  {t('promptManagerAttachmentEmpty')}
+                </div>
+              ) : (
+                <div className="grid max-h-28 gap-1 overflow-y-auto pr-1">
+                  {draftAttachments.map((attachment) => {
+                    const title = getAttachmentTitle(attachment) || t('floatingComposerContextAttachment');
+                    const Icon = attachment.kind === 'image' ? Image : FileText;
+                    const meta = [
+                      attachment.kind === 'image' ? t('floatingComposerContextImage') : t('floatingComposerContextFile'),
+                      formatAttachmentSize(attachment.size),
+                      attachment.truncated ? t('promptManagerAttachmentTruncated') : '',
+                      !attachment.content && attachment.path ? t('promptManagerAttachmentBinary') : ''
+                    ].filter(Boolean).join(' · ');
+
+                    return (
+                      <div
+                        key={attachment.id}
+                        className="flex min-w-0 items-center gap-2 rounded-md border border-border bg-card/70 px-2 py-1.5 text-xs"
+                        title={[title, attachment.path, meta].filter(Boolean).join('\n')}
+                      >
+                        <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="min-w-0 flex-1 truncate">{title}</span>
+                        <span className="hidden max-w-[180px] shrink-0 truncate text-[11px] text-muted-foreground sm:block">{meta}</span>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7 shrink-0"
+                          title={t('promptManagerRemoveAttachment')}
+                          onClick={() => removeAttachment(attachment.id)}
+                          disabled={busy}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             <div className="flex min-w-0 items-center justify-between gap-2 text-xs text-muted-foreground">
               <span className="truncate">{selectedId ? selectedId : t('promptManagerNew')}</span>
-              <span className="shrink-0 tabular-nums">{draft.prompt.length}</span>
+              <span className="shrink-0 tabular-nums">
+                {draft.prompt.length}
+                {draftAttachments.length > 0 ? ` / ${draftAttachments.length}` : ''}
+              </span>
             </div>
           </div>
         </div>
@@ -371,6 +565,10 @@ export function PromptManagementDialog({
           <Button type="button" onClick={startNewPrompt} disabled={busy}>
             <Plus className="h-4 w-4" />
             {t('promptManagerNew')}
+          </Button>
+          <Button type="button" onClick={copyPrompt} disabled={busy || !String(draft.prompt || '').trim()}>
+            <Copy className="h-4 w-4" />
+            {t('copy')}
           </Button>
           <Button type="button" variant="destructive" onClick={deletePrompt} disabled={busy || !draft.id}>
             <Trash2 className="h-4 w-4" />

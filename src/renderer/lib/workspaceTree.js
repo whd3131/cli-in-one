@@ -1,5 +1,16 @@
+export const workspaceTreeFileDragType = 'application/x-cli-in-one-workspace-file';
+
 export function getWorkspaceTreeInsertPath(node, normalizePath) {
   if (!node || (node.type !== 'file' && node.type !== 'link')) {
+    return '';
+  }
+
+  const rawPath = node.relativePath || node.path || '';
+  return normalizePath ? normalizePath(rawPath) : String(rawPath || '').replace(/\\/g, '/');
+}
+
+export function getWorkspaceTreeDragPath(node, normalizePath) {
+  if (!node || (node.type !== 'file' && node.type !== 'link' && node.type !== 'directory')) {
     return '';
   }
 

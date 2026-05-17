@@ -14,6 +14,7 @@ import {
   ClipboardCopy,
   ClipboardPaste,
   Cpu,
+  Ellipsis,
   ExternalLink,
   FileDiff,
   FolderOpen,
@@ -85,7 +86,10 @@ import {
   getSessionReviewPreviewText,
   getSessionReviewStatusCounts
 } from '@/lib/sessionReview';
-import { getWorkspaceTreeInsertPath } from '@/lib/workspaceTree';
+import {
+  getWorkspaceTreeInsertPath,
+  workspaceTreeFileDragType
+} from '@/lib/workspaceTree';
 import cliProviderRegistry from '../shared/cli-providers.json';
 import claudeIconSvg from '../../static/claude.svg?raw';
 import codexIconSvg from '../../static/codex-color.svg?raw';
@@ -116,6 +120,16 @@ const idleCommandLineGroupKind = 'idle-command-line';
 const endpointWidth = 300;
 const endpointHeight = 44;
 const idleCommandLineGroupWidth = 380;
+const terminalPanelDefaultWidth = 760;
+const terminalPanelDefaultHeight = 420;
+const terminalPanelMinWidth = 360;
+const terminalPanelMaxWidth = 1800;
+const terminalPanelMinHeight = 220;
+const terminalPanelMaxHeight = 1200;
+const terminalPanelAutoCompactWidth = 320;
+const terminalPanelAutoCompactHeight = 54;
+const terminalScrollBottomToleranceRows = 1;
+const terminalWheelFallbackPixelsPerRow = 34;
 const canvasFrameMinWidth = 220;
 const canvasFrameMinHeight = 140;
 const canvasFrameDefaultWidth = 360;
@@ -218,6 +232,33 @@ function normalizeAppZoomFactor(value) {
 
   const clamped = clamp(parsed, appZoomMinFactor, appZoomMaxFactor);
   return Math.round(clamped * 100) / 100;
+}
+
+function normalizeTerminalPanelDefaultDimension(value, fallback, min, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.round(clamp(parsed, min, max));
+}
+
+function normalizeTerminalPanelDefaultSize(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  return {
+    width: normalizeTerminalPanelDefaultDimension(
+      source.width,
+      terminalPanelDefaultWidth,
+      terminalPanelMinWidth,
+      terminalPanelMaxWidth
+    ),
+    height: normalizeTerminalPanelDefaultDimension(
+      source.height,
+      terminalPanelDefaultHeight,
+      terminalPanelMinHeight,
+      terminalPanelMaxHeight
+    )
+  };
 }
 
 function formatAppZoomPercent(value) {
@@ -593,6 +634,25 @@ function isAgentCliProvider(provider) {
   return Boolean(providerId && providerId !== shellCliProviderId);
 }
 
+const commandSessionTitleMaxLength = 72;
+
+function formatShellCommandSessionTitle(command) {
+  const normalizedCommand = String(command || '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!normalizedCommand) {
+    return '';
+  }
+
+  if (normalizedCommand.length <= commandSessionTitleMaxLength) {
+    return normalizedCommand;
+  }
+
+  return `${normalizedCommand.slice(0, commandSessionTitleMaxLength - 3).trimEnd()}...`;
+}
+
 function collectSubmittedTerminalCommands(buffer, data) {
   const commands = [];
   let nextBuffer = String(buffer || '').slice(-500);
@@ -820,8 +880,6 @@ const messages = {
     workspace: '工作区',
     noProject: '不绑定项目',
     addSession: '新增会话',
-    sessionList: '当前会话',
-    sessionListEmpty: '当前视图还没有会话，点击上方新增会话。',
     canvasSessionStatusQueue: '会话状态',
     canvasSessionStatusRefresh: '刷新会话状态',
     canvasSessionStatusUpdatedAt: '更新 {time}',
@@ -999,16 +1057,20 @@ const messages = {
     minimizeSession: '缩成端点',
     expandSession: '展开会话',
     renameSession: '修改会话名称',
+    renameSessionShortcut: '修改会话名称 (F2)',
     renameSessionPrompt: '输入新的会话名称',
     sessionContextMenu: '会话菜单',
     copySelection: '复制选区',
     pasteClipboard: '粘贴剪贴板',
+    terminalImagesPasted: '已保存 {count} 张图片并粘贴到 {name}',
     switchSessionModel: '切换模型',
     customModel: '自定义模型...',
     modelPrompt: '输入模型名称',
     modelRequired: '模型名称不能为空。',
     modelSwitchUnavailable: '这个会话当前不支持模型切换。',
     canvasContextMenu: '画布菜单',
+    canvasTools: '画布工具',
+    workspaceTools: '工作区工具',
     addCliSession: '新增会话',
     addProviderSession: '新增 {provider}',
     addCanvasFrame: '说明框',
@@ -1096,6 +1158,7 @@ const messages = {
     floatingComposerHistory: '发送历史',
     floatingComposerHistoryEmpty: '暂无发送历史',
     floatingComposerHistoryUntitled: '空内容',
+    floatingComposerMoreActions: '更多快捷发送操作',
     floatingComposerImageReference: '图片({path})',
     floatingComposerImagesAdded: '已添加 {count} 张图片',
     floatingComposerImageMissingDir: '未找到可保存图片的目录。',
@@ -1117,6 +1180,7 @@ const messages = {
     floatingComposerContextSelectedText: '选中文本',
     floatingComposerContextFile: '文件',
     floatingComposerContextImage: '图片',
+    floatingComposerContextAttachment: '附件',
     floatingComposerContextUrl: 'URL',
     floatingComposerContextTerminalSelection: '终端选区',
     floatingComposerContextTerminalOutput: '终端输出',
@@ -1225,6 +1289,7 @@ const messages = {
     quickPromptDeleted: '已删除常用 prompt：{name}',
     quickPromptInserted: '已插入常用 prompt：{name}',
     quickPromptDeleteConfirm: '确认删除常用 prompt「{name}」？',
+    quickPromptCopied: 'Prompt 已复制。',
     quickPromptLoadFailed: '读取常用 prompt 失败：{message}',
     quickPromptSaveFailed: '保存常用 prompt 失败：{message}',
     quickPromptDeleteFailed: '删除常用 prompt 失败：{message}',
@@ -1237,6 +1302,15 @@ const messages = {
     promptManagerTitlePlaceholder: '给这个 prompt 起个名字',
     promptManagerContentLabel: 'Prompt 内容',
     promptManagerContentPlaceholder: '输入常用 prompt 内容',
+    promptManagerAttachments: '图片和文档',
+    promptManagerAttachmentCount: '{count} 个附件',
+    promptManagerAttachmentEmpty: '暂无图片或文档。',
+    promptManagerAddImage: '添加图片',
+    promptManagerAddDocument: '添加文档',
+    promptManagerRemoveAttachment: '移除附件',
+    promptManagerAttachmentBinary: '已记录文件路径',
+    promptManagerAttachmentTruncated: '内容已截断',
+    promptManagerAttachmentAddFailed: '添加附件失败：{message}',
     promptManagerDiscardConfirm: '当前 prompt 有未保存更改，确认丢弃？',
     promptManagerSaved: '已保存：{name}',
     promptManagerDeleted: '已删除：{name}',
@@ -1261,6 +1335,13 @@ const messages = {
     appZoomPreset: '应用缩放 {percent}%',
     appZoomReset: '重置为 100%',
     appZoomApplyFailed: '应用缩放失败：{message}',
+    terminalAutoCompact: '鼠标悬停展开 CMD 会话',
+    terminalAutoCompactHint: '关闭后 CMD 会话默认保持完整大小，不会因为鼠标移出而自动收缩。',
+    terminalPanelDefaultSize: '新建 CMD 默认大小',
+    terminalPanelDefaultSizeHint: '用于新增 CMD、右键画布新增会话和从会话选择器新建的默认窗口尺寸。已存在会话不会被修改。',
+    terminalPanelDefaultWidth: '宽度',
+    terminalPanelDefaultHeight: '高度',
+    terminalPanelDefaultSizeReset: '重置为 760 x 420',
     sessionHeaderDisplay: '会话 CMD 顶部',
     sessionHeaderDisplayHint: '未勾选的项目会收进会话顶部的信息下拉菜单，随时可以打开查看。',
     sessionHeaderMore: '会话信息',
@@ -1462,10 +1543,15 @@ const messages = {
     workspaceTreeUnavailable: '当前没有可查看的工作区目录。',
     workspaceTreeFailed: '读取文件树失败：{message}',
     workspaceTreeCopied: '文件树已复制到剪贴板。',
+    workspaceTreeContextMenu: '文件树菜单',
+    workspaceTreeCopyAbsolutePath: '复制绝对路径',
+    workspaceTreeOpenInVSCode: '用 VSCode 打开',
+    workspaceTreeOpenInVSCodeFailed: '用 VSCode 打开失败：{message}',
+    workspaceTreePathCopied: '已复制路径：{path}',
     workspaceTreeInsertToComposer: '加入上下文包',
     workspaceTreeSelectFileHint: '选中文件后，可加入快捷发送上下文包',
     workspaceTreeSelectedFile: '已选：{path}',
-    workspaceTreePathInserted: '已加入文件上下文：{path}',
+    workspaceTreePathInserted: '已加入路径：{path}',
     workspaceTreeNoData: '还没有读取文件树。',
     workspaceTreeEmpty: '这个目录目前是空的。',
     workspaceTreeIgnored: '已跳过',
@@ -1543,8 +1629,6 @@ const messages = {
     workspace: 'Workspace',
     noProject: 'No project',
     addSession: 'New session',
-    sessionList: 'Current sessions',
-    sessionListEmpty: 'No sessions in this view yet. Create one above.',
     canvasSessionStatusQueue: 'Session status',
     canvasSessionStatusRefresh: 'Refresh session status',
     canvasSessionStatusUpdatedAt: 'Updated {time}',
@@ -1722,16 +1806,20 @@ const messages = {
     minimizeSession: 'Minimize to endpoint',
     expandSession: 'Expand session',
     renameSession: 'Rename session',
+    renameSessionShortcut: 'Rename session (F2)',
     renameSessionPrompt: 'Enter the new session name',
     sessionContextMenu: 'Session menu',
     copySelection: 'Copy selection',
     pasteClipboard: 'Paste clipboard',
+    terminalImagesPasted: 'Saved and pasted {count} image(s) into {name}',
     switchSessionModel: 'Switch model',
     customModel: 'Custom model...',
     modelPrompt: 'Enter model name',
     modelRequired: 'Model name is required.',
     modelSwitchUnavailable: 'This session cannot switch models right now.',
     canvasContextMenu: 'Canvas menu',
+    canvasTools: 'Canvas tools',
+    workspaceTools: 'Workspace tools',
     addCliSession: 'New session',
     addProviderSession: 'New {provider}',
     addCanvasFrame: 'Frame',
@@ -1819,6 +1907,7 @@ const messages = {
     floatingComposerHistory: 'Sent history',
     floatingComposerHistoryEmpty: 'No sent history',
     floatingComposerHistoryUntitled: 'Empty content',
+    floatingComposerMoreActions: 'More quick send actions',
     floatingComposerImageReference: 'image({path})',
     floatingComposerImagesAdded: 'Added {count} image(s)',
     floatingComposerImageMissingDir: 'No directory is available for saving images.',
@@ -1840,6 +1929,7 @@ const messages = {
     floatingComposerContextSelectedText: 'Selected text',
     floatingComposerContextFile: 'File',
     floatingComposerContextImage: 'Image',
+    floatingComposerContextAttachment: 'Attachment',
     floatingComposerContextUrl: 'URL',
     floatingComposerContextTerminalSelection: 'Terminal selection',
     floatingComposerContextTerminalOutput: 'Terminal output',
@@ -1948,6 +2038,7 @@ const messages = {
     quickPromptDeleted: 'Deleted prompt: {name}',
     quickPromptInserted: 'Inserted prompt: {name}',
     quickPromptDeleteConfirm: 'Delete saved prompt "{name}"?',
+    quickPromptCopied: 'Prompt copied.',
     quickPromptLoadFailed: 'Failed to read saved prompts: {message}',
     quickPromptSaveFailed: 'Failed to save prompt: {message}',
     quickPromptDeleteFailed: 'Failed to delete prompt: {message}',
@@ -1960,6 +2051,15 @@ const messages = {
     promptManagerTitlePlaceholder: 'Name this prompt',
     promptManagerContentLabel: 'Prompt content',
     promptManagerContentPlaceholder: 'Type the saved prompt content',
+    promptManagerAttachments: 'Images and documents',
+    promptManagerAttachmentCount: '{count} attachment(s)',
+    promptManagerAttachmentEmpty: 'No images or documents yet.',
+    promptManagerAddImage: 'Add image',
+    promptManagerAddDocument: 'Add document',
+    promptManagerRemoveAttachment: 'Remove attachment',
+    promptManagerAttachmentBinary: 'File path is included',
+    promptManagerAttachmentTruncated: 'Content truncated',
+    promptManagerAttachmentAddFailed: 'Failed to add attachment: {message}',
     promptManagerDiscardConfirm: 'This prompt has unsaved changes. Discard them?',
     promptManagerSaved: 'Saved: {name}',
     promptManagerDeleted: 'Deleted: {name}',
@@ -1984,6 +2084,13 @@ const messages = {
     appZoomPreset: 'Set app zoom to {percent}%',
     appZoomReset: 'Reset to 100%',
     appZoomApplyFailed: 'Failed to apply app zoom: {message}',
+    terminalAutoCompact: 'Expand CMD sessions on hover',
+    terminalAutoCompactHint: 'When off, CMD sessions keep their full size by default and do not collapse when the pointer leaves.',
+    terminalPanelDefaultSize: 'New CMD default size',
+    terminalPanelDefaultSizeHint: 'Used for new CMD, canvas context-menu sessions, and sessions created from the launcher. Existing sessions are not changed.',
+    terminalPanelDefaultWidth: 'Width',
+    terminalPanelDefaultHeight: 'Height',
+    terminalPanelDefaultSizeReset: 'Reset to 760 x 420',
     sessionHeaderDisplay: 'Session CMD header',
     sessionHeaderDisplayHint: 'Unchecked items move into the session header info menu and remain available there.',
     sessionHeaderMore: 'Session info',
@@ -2185,10 +2292,15 @@ const messages = {
     workspaceTreeUnavailable: 'There is no workspace directory to inspect.',
     workspaceTreeFailed: 'Failed to read file tree: {message}',
     workspaceTreeCopied: 'File tree copied to clipboard.',
+    workspaceTreeContextMenu: 'File tree menu',
+    workspaceTreeCopyAbsolutePath: 'Copy absolute path',
+    workspaceTreeOpenInVSCode: 'Open in VSCode',
+    workspaceTreeOpenInVSCodeFailed: 'Open in VSCode failed: {message}',
+    workspaceTreePathCopied: 'Copied path: {path}',
     workspaceTreeInsertToComposer: 'Add to context pack',
     workspaceTreeSelectFileHint: 'Select a file to add it to the quick send context pack.',
     workspaceTreeSelectedFile: 'Selected: {path}',
-    workspaceTreePathInserted: 'Added file context: {path}',
+    workspaceTreePathInserted: 'Added path: {path}',
     workspaceTreeNoData: 'File tree has not been loaded yet.',
     workspaceTreeEmpty: 'This directory is currently empty.',
     workspaceTreeIgnored: 'Skipped',
@@ -3443,6 +3555,15 @@ function readClipboardText() {
   }
 }
 
+function readClipboardFilePaths() {
+  try {
+    const paths = bridge.readClipboardFilePaths?.();
+    return Array.isArray(paths) ? paths.filter((filePath) => typeof filePath === 'string' && filePath.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
 function writeClipboardText(text) {
   if (typeof text !== 'string' || text.length === 0) {
     return false;
@@ -3467,7 +3588,19 @@ function copyTerminalSelection(term, clearSelection = false) {
   return true;
 }
 
-function pasteClipboardIntoTerminal(term, text = readClipboardText()) {
+function getTerminalClipboardText() {
+  const imageFilePaths = readClipboardFilePaths().filter(isImageFilePath);
+  if (imageFilePaths.length > 0) {
+    return imageFilePaths
+      .map((filePath) => quoteTerminalFilePath(localFilePathToUrl(filePath)))
+      .filter(Boolean)
+      .join(' ');
+  }
+
+  return readClipboardText();
+}
+
+function pasteClipboardIntoTerminal(term, text = getTerminalClipboardText()) {
   if (typeof text !== 'string' || text.length === 0) {
     return false;
   }
@@ -3475,6 +3608,76 @@ function pasteClipboardIntoTerminal(term, text = readClipboardText()) {
   term.paste(text);
   focusTerminalForTextInput(term);
   return true;
+}
+
+function getTerminalImageReferenceText(savedImages) {
+  return (Array.isArray(savedImages) ? savedImages : [])
+    .map((image) => localFilePathToUrl(image?.path))
+    .filter(Boolean)
+    .map(quoteTerminalFilePath)
+    .join(' ');
+}
+
+function getLocalPathForFile(file) {
+  if (!file) {
+    return '';
+  }
+
+  try {
+    const bridgedPath = bridge.getPathForFile?.(file);
+    if (typeof bridgedPath === 'string' && bridgedPath.trim()) {
+      return bridgedPath.trim();
+    }
+  } catch {
+    // Fall back to Electron's legacy File.path when available.
+  }
+
+  return typeof file.path === 'string' ? file.path.trim() : '';
+}
+
+function quoteTerminalFilePath(filePath) {
+  const pathValue = String(filePath || '').trim();
+  if (!pathValue) {
+    return '';
+  }
+
+  if (/^(?:[a-zA-Z]:[\\/]|\\\\)/.test(pathValue)) {
+    return `"${pathValue.replace(/"/g, '""')}"`;
+  }
+
+  return `'${pathValue.replace(/'/g, "'\\''")}'`;
+}
+
+function extractImageFilePathsFromDataTransfer(dataTransfer) {
+  const seen = new Set();
+  const paths = [];
+
+  extractImageFilesFromDataTransfer(dataTransfer).forEach((file) => {
+    const filePath = getLocalPathForFile(file);
+    const key = filePath.toLowerCase();
+    if (!filePath || seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    paths.push(filePath);
+  });
+
+  return paths;
+}
+
+function pasteDataTransferIntoTerminal(term, dataTransfer) {
+  const imageFilePaths = extractImageFilePathsFromDataTransfer(dataTransfer);
+  if (imageFilePaths.length > 0) {
+    const text = imageFilePaths
+      .map((filePath) => quoteTerminalFilePath(localFilePathToUrl(filePath)))
+      .filter(Boolean)
+      .join(' ');
+    return pasteClipboardIntoTerminal(term, text);
+  }
+
+  const text = dataTransfer?.getData?.('text/plain') || readClipboardText();
+  return pasteClipboardIntoTerminal(term, text);
 }
 
 function normalizeTerminalInputPayload(value, options = {}) {
@@ -3543,6 +3746,39 @@ function createCommandDockContextItem(kind, options = {}) {
     truncated: Boolean(options.truncated || normalizedContent.truncated),
     createdAt: Date.now()
   };
+}
+
+function createPromptAttachmentContextItem(attachment, t) {
+  if (!attachment || typeof attachment !== 'object') {
+    return null;
+  }
+
+  const kind = attachment.kind === 'image' ? 'image' : 'attachment';
+  const pathValue = String(attachment.path || '').trim();
+  const content = String(attachment.content || '');
+  const title = String(
+    attachment.title
+    || getCommandDockContextPathName(pathValue)
+    || (kind === 'image' ? t('floatingComposerContextImage') : t('floatingComposerContextAttachment'))
+  ).trim();
+
+  if (!pathValue && !content.trim()) {
+    return null;
+  }
+
+  return createCommandDockContextItem(kind, {
+    content,
+    path: pathValue,
+    subtitle: String(attachment.mimeType || '').trim(),
+    title,
+    truncated: Boolean(attachment.truncated)
+  });
+}
+
+function createPromptAttachmentContextItems(attachments, t) {
+  return (Array.isArray(attachments) ? attachments : [])
+    .map((attachment) => createPromptAttachmentContextItem(attachment, t))
+    .filter(Boolean);
 }
 
 function getCommandDockContextItemKey(item) {
@@ -3619,6 +3855,8 @@ function getCommandDockContextPromptKind(item) {
       return 'File';
     case 'image':
       return 'Image';
+    case 'attachment':
+      return 'Attachment';
     case 'url':
       return 'URL';
     case 'terminal-selection':
@@ -3672,6 +3910,11 @@ function serializeCommandDockContextItem(item, index) {
   const content = String(item.content || '').trimEnd();
   if (item.kind === 'image') {
     lines.push('', 'Image file path is included above. Use the local file if your CLI can read images.');
+    return lines.join('\n');
+  }
+
+  if (item.kind === 'attachment' && !content) {
+    lines.push('', 'File path is included above. Read the local file if your CLI can access it.');
     return lines.join('\n');
   }
 
@@ -3748,6 +3991,24 @@ function isCommandDockShortcutMatch(event, shortcut) {
 
 function normalizePromptFilePath(filePath) {
   return String(filePath || '').replace(/\\/g, '/');
+}
+
+function hasWorkspaceTreePathInDataTransfer(dataTransfer) {
+  return Boolean(dataTransfer?.types && Array.from(dataTransfer.types).includes(workspaceTreeFileDragType));
+}
+
+function getWorkspaceTreePathFromDataTransfer(dataTransfer) {
+  if (!hasWorkspaceTreePathInDataTransfer(dataTransfer)) {
+    return '';
+  }
+
+  const rawPayload = dataTransfer.getData(workspaceTreeFileDragType);
+  try {
+    const payload = JSON.parse(rawPayload);
+    return normalizePromptFilePath(payload?.path || '');
+  } catch {
+    return normalizePromptFilePath(rawPayload);
+  }
 }
 
 function createClosedCommandDockSkillMention() {
@@ -4049,6 +4310,10 @@ function isImageFile(file) {
   return /\.(apng|avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(String(file.name || '').trim());
 }
 
+function isImageFilePath(filePath) {
+  return /\.(apng|avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(String(filePath || '').trim());
+}
+
 function extractImageFilesFromDataTransfer(dataTransfer) {
   if (!dataTransfer) {
     return [];
@@ -4102,12 +4367,154 @@ function syncTerminalImeAnchor(term) {
   const cursorTop = (absoluteCursorY - viewportTop) * cellHeight;
   const cursorLeft = cursorX * cellWidth;
 
-  textarea.style.left = `${cursorLeft}px`;
-  textarea.style.top = `${cursorTop}px`;
-  textarea.style.width = `${Math.max(cellWidth * width, 1)}px`;
-  textarea.style.height = `${Math.max(cellHeight, 1)}px`;
-  textarea.style.lineHeight = `${Math.max(cellHeight, 1)}px`;
+  const nextStyles = {
+    left: `${cursorLeft}px`,
+    top: `${cursorTop}px`,
+    width: `${Math.max(cellWidth * width, 1)}px`,
+    height: `${Math.max(cellHeight, 1)}px`,
+    lineHeight: `${Math.max(cellHeight, 1)}px`,
+    zIndex: '-5'
+  };
+
+  Object.entries(nextStyles).forEach(([property, value]) => {
+    if (textarea.style[property] !== value) {
+      textarea.style[property] = value;
+    }
+  });
+}
+
+function resetTerminalImeAnchor(term) {
+  const textarea = term?.textarea;
+  if (!(textarea instanceof HTMLTextAreaElement)) {
+    return;
+  }
+
+  textarea.style.left = '-9999em';
+  textarea.style.top = '0';
+  textarea.style.width = '0';
+  textarea.style.height = '0';
+  textarea.style.lineHeight = 'normal';
   textarea.style.zIndex = '-5';
+}
+
+let imeRecoveryTextarea = null;
+let imeRecoveryBlurTimer = null;
+
+function getImeRecoveryTextarea() {
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  if (imeRecoveryTextarea instanceof HTMLTextAreaElement && document.body.contains(imeRecoveryTextarea)) {
+    return imeRecoveryTextarea;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.className = 'ime-focus-recovery-textarea';
+  textarea.setAttribute('aria-hidden', 'true');
+  textarea.setAttribute('autocomplete', 'off');
+  textarea.setAttribute('autocapitalize', 'off');
+  textarea.setAttribute('spellcheck', 'false');
+  textarea.tabIndex = -1;
+  Object.assign(textarea.style, {
+    position: 'fixed',
+    left: '0',
+    top: '0',
+    width: '1px',
+    height: '1px',
+    minWidth: '1px',
+    minHeight: '1px',
+    opacity: '0',
+    pointerEvents: 'none',
+    zIndex: '-1',
+    border: '0',
+    padding: '0',
+    margin: '0',
+    resize: 'none',
+    outline: 'none',
+    overflow: 'hidden',
+    background: 'transparent',
+    color: 'transparent',
+    caretColor: 'transparent'
+  });
+
+  document.body.appendChild(textarea);
+  imeRecoveryTextarea = textarea;
+  return textarea;
+}
+
+function focusImeRecoveryTextarea(releaseDelayMs = 160) {
+  const textarea = getImeRecoveryTextarea();
+  if (!(textarea instanceof HTMLTextAreaElement)) {
+    return false;
+  }
+
+  if (imeRecoveryBlurTimer !== null) {
+    window.clearTimeout(imeRecoveryBlurTimer);
+    imeRecoveryBlurTimer = null;
+  }
+
+  textarea.value = '';
+  try {
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(0, 0);
+  } catch {
+    return false;
+  }
+
+  imeRecoveryBlurTimer = window.setTimeout(() => {
+    imeRecoveryBlurTimer = null;
+    if (document.activeElement === textarea) {
+      textarea.blur();
+    }
+    textarea.value = '';
+  }, releaseDelayMs);
+
+  return true;
+}
+
+function releaseTerminalTextInput(term, options = {}) {
+  if (!term) {
+    return false;
+  }
+
+  const textarea = term.textarea;
+  const recoverIme = Boolean(options.recoverIme);
+  const releaseDelayMs = Number.isFinite(options.releaseDelayMs)
+    ? Math.max(options.releaseDelayMs, 0)
+    : (recoverIme ? 260 : 160);
+  const activeElement = document.activeElement;
+  const terminalHadFocus = (
+    activeElement === textarea ||
+    (term.element instanceof HTMLElement && activeElement instanceof Node && term.element.contains(activeElement))
+  );
+
+  if (recoverIme || terminalHadFocus) {
+    focusImeRecoveryTextarea(releaseDelayMs);
+  }
+
+  try {
+    term.blur?.();
+  } catch {
+    // xterm can already be halfway through disposal.
+  }
+
+  if (textarea instanceof HTMLTextAreaElement) {
+    if (document.activeElement === textarea) {
+      textarea.blur();
+    }
+    textarea.value = '';
+  }
+
+  term.element?.classList?.remove('focus');
+  term.element?.querySelector?.('.composition-view.active')?.classList?.remove('active');
+  resetTerminalImeAnchor(term);
+
+  if (terminalHadFocus && document.activeElement === textarea) {
+    textarea.blur();
+  }
+
+  return terminalHadFocus;
 }
 
 function normalizeTerminalCanvasScale(scale) {
@@ -4199,6 +4606,33 @@ function focusTerminalForTextInput(term) {
 
   term.focus();
   window.requestAnimationFrame(() => syncTerminalImeAnchor(term));
+}
+
+function getTerminalScrollSnapshot(term) {
+  const buffer = term?.buffer?.active;
+  const baseY = Math.max(buffer?.baseY || 0, 0);
+  const viewportY = Math.max(buffer?.viewportY || 0, 0);
+  const rows = Math.max(term?.rows || 0, 0);
+
+  return {
+    baseY,
+    rows,
+    viewportY
+  };
+}
+
+function isTerminalScrolledNearBottom(term, toleranceRows = terminalScrollBottomToleranceRows) {
+  const { baseY, viewportY } = getTerminalScrollSnapshot(term);
+  return baseY <= 0 || viewportY >= Math.max(baseY - toleranceRows, 0);
+}
+
+function getTerminalScrollbarTrackHeight(trackNode, scale = 1) {
+  if (!(trackNode instanceof HTMLElement)) {
+    return 0;
+  }
+
+  const normalizedScale = normalizeTerminalCanvasScale(scale);
+  return trackNode.getBoundingClientRect().height / normalizedScale;
 }
 
 function normalizeVersionText(value) {
@@ -4564,6 +4998,7 @@ function CanvasSessionStatusQueue({
   commandTargetId,
   language,
   onFocusSession,
+  onRenameSession,
   onRefresh,
   panels,
   refreshStamp,
@@ -4633,17 +5068,24 @@ function CanvasSessionStatusQueue({
           const commandTargeted = panel.id === commandTargetId;
 
           return (
-            <button
+            <div
               key={panel.id}
-              type="button"
               className={cn(
                 'canvas-session-status-row',
                 activeId === panel.id && 'is-active',
                 commandTargeted && 'is-command-target',
                 panel.minimized && 'is-minimized'
               )}
+              role="button"
+              tabIndex={0}
               title={`${t('canvasSessionStatusFocus')}: ${title}\n${pathLabel}`}
               onClick={() => onFocusSession?.(panel.id)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onFocusSession?.(panel.id);
+                }
+              }}
             >
               <span className={cn('terminal-endpoint-dot', `is-${state}`)} aria-hidden="true" />
               <span className="canvas-session-status-copy">
@@ -4673,7 +5115,22 @@ function CanvasSessionStatusQueue({
                   {runtime}
                 </span>
               </span>
-            </button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="canvas-session-status-rename h-7 w-7"
+                title={t('renameSessionShortcut')}
+                aria-label={t('renameSessionShortcut')}
+                onKeyDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onRenameSession?.(panel.id);
+                }}
+              >
+                <PencilLine className="h-3.5 w-3.5" />
+              </Button>
+            </div>
           );
         })}
       </div>
@@ -4987,10 +5444,12 @@ function loadSettings() {
       language: saved.language === 'en' ? 'en' : 'zh',
       view: normalizeCanvasView(saved.view),
       appZoomFactor: normalizeAppZoomFactor(saved.appZoomFactor),
+      terminalPanelDefaultSize: normalizeTerminalPanelDefaultSize(saved.terminalPanelDefaultSize),
+      terminalAutoCompact: saved.terminalAutoCompact === true,
       sessionHeaderVisibility: normalizeLoadedSessionHeaderVisibility(saved.sessionHeaderVisibility),
       commandDockDispatchMode: normalizeCommandDockDispatchMode(saved.commandDockDispatchMode),
       commandDockShortcuts: normalizeCommandDockShortcutSettings(saved.commandDockShortcuts),
-      commandDockPosition: normalizeCommandDockPosition(saved.commandDockPosition),
+      commandDockPosition: null,
       commandDockHistory: normalizeCommandDockHistory(saved.commandDockHistory)
     };
   } catch {
@@ -5001,6 +5460,8 @@ function loadSettings() {
       language: 'zh',
       view: createDefaultView(),
       appZoomFactor: appZoomDefaultFactor,
+      terminalPanelDefaultSize: normalizeTerminalPanelDefaultSize(),
+      terminalAutoCompact: false,
       sessionHeaderVisibility: normalizeSessionHeaderVisibility(),
       commandDockDispatchMode: 'reuse',
       commandDockShortcuts: normalizeCommandDockShortcutSettings(commandDockDefaultShortcuts),
@@ -5008,17 +5469,6 @@ function loadSettings() {
       commandDockHistory: []
     };
   }
-}
-
-function normalizeCommandDockPosition(value) {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-
-  const left = Number(value.left);
-  const top = Number(value.top);
-
-  return Number.isFinite(left) && Number.isFinite(top) ? { left, top } : null;
 }
 
 function formatTime(ms) {
@@ -6342,6 +6792,28 @@ function IconButton({ label, children, ...props }) {
   );
 }
 
+function CompactMenuItem({
+  active = false,
+  children,
+  className,
+  Icon,
+  onClick,
+  ...props
+}) {
+  return (
+    <button
+      type="button"
+      className={cn('compact-menu-item', active && 'is-active', className)}
+      onClick={onClick}
+      {...props}
+    >
+      {Icon ? <Icon className="compact-menu-icon" aria-hidden="true" /> : <span aria-hidden="true" />}
+      <span>{children}</span>
+      {active ? <Check className="compact-menu-check" aria-hidden="true" /> : <span aria-hidden="true" />}
+    </button>
+  );
+}
+
 function SidebarCollapseIcon({ collapsed }) {
   return (
     <span className="t-icon-swap sidebar-collapse-icon" data-state={collapsed ? 'b' : 'a'} aria-hidden="true">
@@ -7068,6 +7540,7 @@ function EndpointGroup({
   onConnectionPortPointerDown,
   onExpandPanel,
   onMove,
+  onPanelRename,
   onPanelTitleChange,
   onPanelTitleCommit,
   onSelectToggle,
@@ -7234,6 +7707,22 @@ function EndpointGroup({
                 onBlur={(event) => onPanelTitleCommit(panel.id, event.target.value)}
                 onKeyDown={(event) => handleTitleKeyDown(event, panel.id)}
               />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="endpoint-group-rename h-7 w-7"
+                title={t('renameSessionShortcut')}
+                aria-label={t('renameSessionShortcut')}
+                onPointerDown={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onPanelRename?.(panel.id);
+                }}
+              >
+                <PencilLine className="h-3.5 w-3.5" />
+              </Button>
               <span className="endpoint-group-tag-slot">
                 <SessionTagBadge tag={getPanelSessionTag(panel)} t={t} />
               </span>
@@ -7265,6 +7754,7 @@ function EndpointGroup({
 function TerminalPanel({
   panel,
   active,
+  autoCompactEnabled = false,
   language,
   runtimeNow,
   scale,
@@ -7274,6 +7764,7 @@ function TerminalPanel({
   availableSessionTags,
   visible = true,
   selected = false,
+  temporaryInput = false,
   commandTargeted = false,
   connectionMode = false,
   pendingConnectionSourceId = '',
@@ -7289,12 +7780,16 @@ function TerminalPanel({
   onConnectionPortClick,
   onConnectionPortPointerDown,
   onExpand,
+  onPasteImages,
   onMinimize,
   onMove,
   onResize,
   onRestart,
+  onRename,
   onModelChange,
   onSelectToggle,
+  onTemporaryInputEnd,
+  onTemporaryInputStart,
   onTagChange,
   onTerminalInput,
   onTitleChange,
@@ -7306,12 +7801,18 @@ function TerminalPanel({
   const fitAddonRef = useRef(null);
   const scrollbarTrackRef = useRef(null);
   const terminalScaleRef = useRef(normalizeTerminalCanvasScale(scale));
+  const terminalImeComposingRef = useRef(false);
+  const terminalImeAnchorFrameRef = useRef(null);
+  const terminalOutputPendingRef = useRef(false);
+  const terminalShouldStickToBottomRef = useRef(true);
+  const scrollbarSyncFrameRef = useRef(null);
   const agentImageInputRef = useRef(null);
   const [openMotionState, setOpenMotionState] = useState('opening');
   const [agentDiffLoading, setAgentDiffLoading] = useState(false);
   const [scrollbarTrackHeight, setScrollbarTrackHeight] = useState(0);
   const [scrollbarState, setScrollbarState] = useState({ baseY: 0, rows: 0, viewportY: 0 });
   const [contextMenu, setContextMenu] = useState(null);
+  const [panelFocusWithin, setPanelFocusWithin] = useState(false);
   const panelProvider = getPanelCliProvider(panel);
   const panelProviderLabel = getCliProviderBadgeLabel(panelProvider, language);
   const sessionTag = getPanelSessionTag(panel);
@@ -7327,6 +7828,7 @@ function TerminalPanel({
     || showHeaderStatus
     || showHeaderRuntime;
   const showAgentUtilityBar = Boolean(String(panel.agentId || panel.agentTask || '').trim());
+  const autoCompact = autoCompactEnabled && visible && !panel.minimized && !temporaryInput && !panelFocusWithin && !contextMenu;
   const arrangeStyle = arrangeAnimation ? {
     '--canvas-arrange-delay': `${arrangeAnimation.delay || 0}ms`,
     '--canvas-arrange-duration': `${canvasArrangeDurationMs}ms`,
@@ -7337,10 +7839,40 @@ function TerminalPanel({
   } : null;
 
   const syncInputAnchor = useCallback(() => {
-    if (termRef.current) {
-      syncTerminalImeAnchor(termRef.current);
+    if (!termRef.current || terminalImeComposingRef.current) {
+      return;
     }
+
+    if (terminalImeAnchorFrameRef.current !== null) {
+      window.cancelAnimationFrame(terminalImeAnchorFrameRef.current);
+    }
+
+    terminalImeAnchorFrameRef.current = window.requestAnimationFrame(() => {
+      terminalImeAnchorFrameRef.current = null;
+      if (!terminalImeComposingRef.current) {
+        syncTerminalImeAnchor(termRef.current);
+      }
+    });
   }, []);
+
+  const commitScrollbarState = useCallback((snapshot = getTerminalScrollSnapshot(termRef.current)) => {
+    setScrollbarState((current) => (
+      current.baseY === snapshot.baseY &&
+      current.rows === snapshot.rows &&
+      current.viewportY === snapshot.viewportY
+    ) ? current : snapshot);
+  }, []);
+
+  const scheduleScrollbarStateSync = useCallback(() => {
+    if (scrollbarSyncFrameRef.current !== null) {
+      return;
+    }
+
+    scrollbarSyncFrameRef.current = window.requestAnimationFrame(() => {
+      scrollbarSyncFrameRef.current = null;
+      commitScrollbarState();
+    });
+  }, [commitScrollbarState]);
 
   const updateScrollbarTrackHeight = useCallback(() => {
     const trackNode = scrollbarTrackRef.current;
@@ -7348,30 +7880,17 @@ function TerminalPanel({
       return;
     }
 
-    setScrollbarTrackHeight(trackNode.getBoundingClientRect().height);
+    setScrollbarTrackHeight(getTerminalScrollbarTrackHeight(trackNode, terminalScaleRef.current));
   }, []);
 
   const syncScrollbarState = useCallback(() => {
-    const term = termRef.current;
-    if (!term) {
-      return;
-    }
-
-    const nextState = {
-      baseY: Math.max(term.buffer.active.baseY || 0, 0),
-      rows: Math.max(term.rows || 0, 0),
-      viewportY: Math.max(term.buffer.active.viewportY || 0, 0)
-    };
-    setScrollbarState((current) => (
-      current.baseY === nextState.baseY &&
-      current.rows === nextState.rows &&
-      current.viewportY === nextState.viewportY
-    ) ? current : nextState);
-  }, []);
+    commitScrollbarState();
+  }, [commitScrollbarState]);
 
   useEffect(() => {
     terminalScaleRef.current = normalizeTerminalCanvasScale(scale);
-  }, [scale]);
+    updateScrollbarTrackHeight();
+  }, [scale, updateScrollbarTrackHeight]);
 
   useEffect(() => {
     setOpenMotionState('opening');
@@ -7561,7 +8080,11 @@ function TerminalPanel({
       if (pasteShortcut) {
         event.preventDefault();
         event.stopPropagation();
-        pasteClipboardIntoTerminal(term);
+        void Promise.resolve(onPasteImages?.(panel.id, { term })).then((handled) => {
+          if (!handled) {
+            pasteClipboardIntoTerminal(term);
+          }
+        });
         return false;
       }
 
@@ -7577,28 +8100,83 @@ function TerminalPanel({
       }
     };
     const handlePaste = (event) => {
-      const text = event.clipboardData?.getData('text/plain') || readClipboardText();
-      if (pasteClipboardIntoTerminal(term, text)) {
+      const imageFiles = extractImageFilesFromDataTransfer(event.clipboardData);
+      const plainText = event.clipboardData?.getData?.('text/plain') || '';
+      if (imageFiles.length > 0 || (!plainText && typeof bridge.readClipboardImage === 'function')) {
+        event.preventDefault();
+        event.stopPropagation();
+        void Promise.resolve(onPasteImages?.(panel.id, {
+          files: imageFiles,
+          term
+        })).then((handled) => {
+          if (!handled && pasteDataTransferIntoTerminal(term, event.clipboardData)) {
+            return;
+          }
+          if (!handled && imageFiles.length === 0) {
+            pasteClipboardIntoTerminal(term);
+          }
+        });
+        return;
+      }
+
+      if (pasteDataTransferIntoTerminal(term, event.clipboardData)) {
         event.preventDefault();
         event.stopPropagation();
       }
     };
     const handleTextAreaFocus = () => {
-      window.requestAnimationFrame(() => syncTerminalImeAnchor(term));
+      syncInputAnchor();
+    };
+    const handleCompositionStart = () => {
+      terminalImeComposingRef.current = true;
+    };
+    const handleCompositionEnd = () => {
+      terminalImeComposingRef.current = false;
+      syncInputAnchor();
+    };
+    const handleTerminalOutputParsed = () => {
+      if (terminalShouldStickToBottomRef.current || terminalOutputPendingRef.current) {
+        term.scrollToBottom();
+      }
+      terminalOutputPendingRef.current = false;
+      scheduleScrollbarStateSync();
+      if (!terminalImeComposingRef.current && document.activeElement === term.textarea) {
+        syncInputAnchor();
+      }
     };
 
     terminalElement?.addEventListener('copy', handleCopy);
     terminalElement?.addEventListener('paste', handlePaste);
     terminalTextarea?.addEventListener('focus', handleTextAreaFocus);
+    terminalTextarea?.addEventListener('compositionstart', handleCompositionStart);
+    terminalTextarea?.addEventListener('compositionend', handleCompositionEnd);
 
     const dataDisposable = term.onData((data) => {
       onTerminalInput(panel.id, data);
       bridge.writeTerminal(panel.id, data);
     });
     const resizeDisposable = term.onResize(({ cols, rows }) => bridge.resizeTerminal(panel.id, cols, rows));
-    const scrollDisposable = term.onScroll(() => syncScrollbarState());
-    const writeParsedDisposable = term.onWriteParsed(() => syncScrollbarState());
-    const unregister = registerTerminal(panel.id, { term, fitAddon, fit: fitTerminal });
+    const scrollDisposable = term.onScroll(() => {
+      terminalShouldStickToBottomRef.current = isTerminalScrolledNearBottom(term);
+      scheduleScrollbarStateSync();
+    });
+    const writeParsedDisposable = term.onWriteParsed(handleTerminalOutputParsed);
+    const unregister = registerTerminal(panel.id, {
+      term,
+      fitAddon,
+      fit: fitTerminal,
+      isNearBottom: () => isTerminalScrolledNearBottom(term, terminalScrollBottomToleranceRows + 1),
+      stickToBottom: () => {
+        terminalShouldStickToBottomRef.current = true;
+        terminalOutputPendingRef.current = false;
+        term.scrollToBottom();
+        syncScrollbarState();
+      },
+      willReceiveOutput: () => {
+        terminalShouldStickToBottomRef.current = isTerminalScrolledNearBottom(term, terminalScrollBottomToleranceRows + 1);
+        terminalOutputPendingRef.current = terminalShouldStickToBottomRef.current;
+      }
+    });
 
     term.write(`\x1b[38;5;246m${panel.cwd}\x1b[0m\r\n`);
     fitTerminal();
@@ -7608,10 +8186,21 @@ function TerminalPanel({
     });
 
     return () => {
+      releaseTerminalTextInput(term, { recoverIme: true });
       unpatchTerminalMouseInteractions();
       terminalElement?.removeEventListener('copy', handleCopy);
       terminalElement?.removeEventListener('paste', handlePaste);
       terminalTextarea?.removeEventListener('focus', handleTextAreaFocus);
+      terminalTextarea?.removeEventListener('compositionstart', handleCompositionStart);
+      terminalTextarea?.removeEventListener('compositionend', handleCompositionEnd);
+      if (terminalImeAnchorFrameRef.current !== null) {
+        window.cancelAnimationFrame(terminalImeAnchorFrameRef.current);
+        terminalImeAnchorFrameRef.current = null;
+      }
+      if (scrollbarSyncFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollbarSyncFrameRef.current);
+        scrollbarSyncFrameRef.current = null;
+      }
       dataDisposable.dispose();
       resizeDisposable.dispose();
       scrollDisposable.dispose();
@@ -7621,13 +8210,17 @@ function TerminalPanel({
       termRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [fitTerminal, onTerminalInput, panel.cwd, panel.id, registerTerminal, syncScrollbarState]);
+  }, [fitTerminal, onPasteImages, onTerminalInput, panel.cwd, panel.id, registerTerminal, scheduleScrollbarStateSync, syncInputAnchor, syncScrollbarState]);
 
   useEffect(() => {
-    if (visible && !panel.minimized) {
-      fitTerminal();
+    if (!visible || panel.minimized || autoCompact) {
+      return undefined;
     }
-  }, [fitTerminal, panel.height, panel.minimized, panel.width, visible]);
+
+    fitTerminal();
+    const timerId = window.setTimeout(() => fitTerminal(), 340);
+    return () => window.clearTimeout(timerId);
+  }, [autoCompact, fitTerminal, panel.height, panel.minimized, panel.width, visible]);
 
   useEffect(() => {
     if (termRef.current) {
@@ -7692,8 +8285,41 @@ function TerminalPanel({
     }
 
     term.scrollToLine(Math.round(clamp(ratio, 0, 1) * maxViewportY));
+    terminalShouldStickToBottomRef.current = isTerminalScrolledNearBottom(term);
     syncScrollbarState();
   }, [syncScrollbarState]);
+
+  const handleTerminalWheel = useCallback((event) => {
+    event.stopPropagation();
+
+    const term = termRef.current;
+    if (!term) {
+      return;
+    }
+
+    const snapshot = getTerminalScrollSnapshot(term);
+    if (snapshot.baseY <= 0 || event.deltaY <= 0) {
+      terminalShouldStickToBottomRef.current = isTerminalScrolledNearBottom(term);
+      scheduleScrollbarStateSync();
+      return;
+    }
+
+    const screenElement = term.element?.querySelector?.('.xterm-screen');
+    const rowHeight = screenElement instanceof HTMLElement && term.rows > 0
+      ? screenElement.getBoundingClientRect().height / term.rows
+      : terminalWheelFallbackPixelsPerRow;
+    const deltaRows = Math.max(Math.ceil(Math.abs(event.deltaY) / Math.max(rowHeight || 0, 1)), 1);
+    if (snapshot.viewportY + deltaRows >= snapshot.baseY - terminalScrollBottomToleranceRows) {
+      term.scrollToBottom();
+      terminalShouldStickToBottomRef.current = true;
+      event.preventDefault();
+      syncScrollbarState();
+      return;
+    }
+
+    terminalShouldStickToBottomRef.current = false;
+    scheduleScrollbarStateSync();
+  }, [scheduleScrollbarStateSync, syncScrollbarState]);
 
   const startScrollbarDrag = useCallback((event, initialOffset) => {
     if (event.button !== 0 || !scrollbarMetrics.scrollable) {
@@ -7709,11 +8335,14 @@ function TerminalPanel({
       return;
     }
 
+    const normalizedScale = normalizeTerminalCanvasScale(terminalScaleRef.current);
+    const scaledInitialOffset = initialOffset * normalizedScale;
     const thumbHeight = Math.max(scrollbarMetrics.thumbHeight, 1);
-    const travel = Math.max(trackRect.height - thumbHeight, 0);
+    const trackHeight = getTerminalScrollbarTrackHeight(scrollbarTrackRef.current, terminalScaleRef.current);
+    const scaledTravel = Math.max((trackHeight - thumbHeight) * normalizedScale, 0);
     const applyPointer = (clientY) => {
-      const nextTop = clamp(clientY - trackRect.top - initialOffset, 0, travel);
-      scrollTerminalToRatio(travel > 0 ? nextTop / travel : 0);
+      const nextTop = clamp(clientY - trackRect.top - scaledInitialOffset, 0, scaledTravel);
+      scrollTerminalToRatio(scaledTravel > 0 ? nextTop / scaledTravel : 0);
     };
 
     applyPointer(event.clientY);
@@ -7731,7 +8360,7 @@ function TerminalPanel({
 
   const startScrollbarThumbDrag = useCallback((event) => {
     const thumbRect = event.currentTarget.getBoundingClientRect();
-    startScrollbarDrag(event, event.clientY - thumbRect.top);
+    startScrollbarDrag(event, (event.clientY - thumbRect.top) / normalizeTerminalCanvasScale(terminalScaleRef.current));
   }, [startScrollbarDrag]);
 
   const startDrag = (event) => {
@@ -7782,6 +8411,42 @@ function TerminalPanel({
     });
   };
 
+  const handlePanelPointerEnter = () => {
+    if (!autoCompact && !temporaryInput) {
+      return;
+    }
+
+    if (!temporaryInput) {
+      onTemporaryInputStart?.(panel.id);
+    }
+    window.requestAnimationFrame(() => {
+      fitTerminal();
+      focusTerminalForTextInput(termRef.current);
+    });
+  };
+
+  const handlePanelPointerLeave = () => {
+    if (!autoCompact && !temporaryInput) {
+      return;
+    }
+
+    releaseTerminalTextInput(termRef.current);
+    onTemporaryInputEnd?.(panel.id);
+  };
+
+  const handlePanelFocus = () => {
+    setPanelFocusWithin(true);
+  };
+
+  const handlePanelBlur = (event) => {
+    const nextFocusedElement = event.relatedTarget;
+    if (nextFocusedElement instanceof Node && event.currentTarget.contains(nextFocusedElement)) {
+      return;
+    }
+
+    setPanelFocusWithin(false);
+  };
+
   const handleTitleKeyDown = (event) => {
     event.stopPropagation();
     if (event.key === 'Enter') {
@@ -7801,17 +8466,18 @@ function TerminalPanel({
   const pasteFromContextMenu = () => {
     const term = termRef.current;
     if (term) {
-      pasteClipboardIntoTerminal(term);
+      void Promise.resolve(onPasteImages?.(panel.id, { term })).then((handled) => {
+        if (!handled) {
+          pasteClipboardIntoTerminal(term);
+        }
+      });
     }
     closeContextMenu();
   };
 
   const renameFromContextMenu = () => {
     closeContextMenu();
-    const value = window.prompt(t('renameSessionPrompt'), panel.title);
-    if (value !== null) {
-      onTitleCommit(panel.id, value);
-    }
+    onRename?.(panel.id);
   };
 
   const switchModelFromContextMenu = (model) => {
@@ -7931,6 +8597,7 @@ function TerminalPanel({
         'terminal-panel',
         active && !panel.minimized && 'active',
         showAgentUtilityBar && 'is-agent-session',
+        autoCompact && 'is-auto-compact',
         panel.minimized && 'is-minimized',
         panel.minimized && selected && 'is-selected',
         commandTargeted && 'is-command-target',
@@ -7947,16 +8614,26 @@ function TerminalPanel({
       style={{
         left: panel.x,
         top: panel.y,
-        width: panel.minimized ? endpointWidth : panel.width,
-        height: panel.minimized ? endpointHeight : panel.height,
+        width: panel.minimized
+          ? endpointWidth
+          : (autoCompact ? terminalPanelAutoCompactWidth : panel.width),
+        height: panel.minimized
+          ? endpointHeight
+          : (autoCompact ? terminalPanelAutoCompactHeight : panel.height),
+        '--terminal-expanded-width': `${panel.width}px`,
+        '--terminal-expanded-height': `${panel.height}px`,
         zIndex: panel.zIndex,
         ...arrangeStyle
       }}
+      onPointerEnter={handlePanelPointerEnter}
+      onPointerLeave={handlePanelPointerLeave}
       onPointerDown={() => {
-        if (visible) {
+        if (visible && !autoCompact && !temporaryInput) {
           onActivate(panel.id);
         }
       }}
+      onFocus={handlePanelFocus}
+      onBlur={handlePanelBlur}
       onContextMenu={openPanelContextMenu}
     >
       {contextMenuPortal}
@@ -8036,6 +8713,22 @@ function TerminalPanel({
             onBlur={(event) => onTitleCommit(panel.id, event.target.value)}
             onKeyDown={handleTitleKeyDown}
           />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="terminal-endpoint-rename h-7 w-7"
+            title={t('renameSessionShortcut')}
+            aria-label={t('renameSessionShortcut')}
+            onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              onRename?.(panel.id);
+            }}
+          >
+            <PencilLine className="h-3.5 w-3.5" />
+          </Button>
           <SessionStatusTag panel={panel} t={t} />
           <SessionRuntimeTag panel={panel} now={runtimeNow} t={t} />
           <Button
@@ -8097,6 +8790,19 @@ function TerminalPanel({
             </div>
           )}
           <div className="terminal-panel-actions">
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="h-6 w-6"
+              title={t('renameSessionShortcut')}
+              aria-label={t('renameSessionShortcut')}
+              onPointerDown={(event) => event.stopPropagation()}
+              onKeyDown={(event) => event.stopPropagation()}
+              onClick={() => onRename?.(panel.id)}
+            >
+              <PencilLine className="h-3.5 w-3.5" />
+            </Button>
             <SessionHeaderMetaMenu
               availableTags={availableSessionTags}
               onTagChange={onTagChange}
@@ -8249,7 +8955,11 @@ function TerminalPanel({
           </div>
         </div>
       )}
-      <CardContent className="terminal-host p-2" onWheel={(event) => event.stopPropagation()}>
+      <CardContent
+        className="terminal-host p-2"
+        onWheel={handleTerminalWheel}
+        onScroll={scheduleScrollbarStateSync}
+      >
         <div ref={hostRef} className="terminal-host-surface" />
         {!panel.minimized && scrollbarMetrics.scrollable && (
           <div
@@ -8513,10 +9223,14 @@ function CodexConfigDialog({
   onOpenChange,
   onProfileChanged,
   onSessionHeaderVisibilityChange,
+  onTerminalAutoCompactChange,
+  onTerminalPanelDefaultSizeChange,
   open,
   sessionHeaderVisibility,
   showToast,
-  t
+  t,
+  terminalAutoCompact,
+  terminalPanelDefaultSize
 }) {
   const [activeSettingsTab, setActiveSettingsTab] = useState(initialSettingsTab || 'preferences');
   const [activeFile, setActiveFile] = useState('config');
@@ -9466,6 +10180,39 @@ function CodexConfigDialog({
 
   const normalizedCommandDockShortcuts = normalizeCommandDockShortcutSettings(commandDockShortcuts);
   const normalizedSessionHeaderVisibility = normalizeSessionHeaderVisibility(sessionHeaderVisibility);
+  const normalizedTerminalPanelDefaultSize = normalizeTerminalPanelDefaultSize(terminalPanelDefaultSize);
+  const [terminalPanelDefaultSizeDraft, setTerminalPanelDefaultSizeDraft] = useState(() => ({
+    width: String(normalizedTerminalPanelDefaultSize.width),
+    height: String(normalizedTerminalPanelDefaultSize.height)
+  }));
+
+  useEffect(() => {
+    setTerminalPanelDefaultSizeDraft({
+      width: String(normalizedTerminalPanelDefaultSize.width),
+      height: String(normalizedTerminalPanelDefaultSize.height)
+    });
+  }, [normalizedTerminalPanelDefaultSize.height, normalizedTerminalPanelDefaultSize.width, open]);
+
+  const commitTerminalPanelDefaultSizeDraft = useCallback(() => {
+    const nextSize = normalizeTerminalPanelDefaultSize(terminalPanelDefaultSizeDraft);
+    setTerminalPanelDefaultSizeDraft({
+      width: String(nextSize.width),
+      height: String(nextSize.height)
+    });
+    onTerminalPanelDefaultSizeChange?.(nextSize);
+  }, [onTerminalPanelDefaultSizeChange, terminalPanelDefaultSizeDraft]);
+
+  const resetTerminalPanelDefaultSize = useCallback(() => {
+    const nextSize = {
+      width: terminalPanelDefaultWidth,
+      height: terminalPanelDefaultHeight
+    };
+    setTerminalPanelDefaultSizeDraft({
+      width: String(nextSize.width),
+      height: String(nextSize.height)
+    });
+    onTerminalPanelDefaultSizeChange?.(nextSize);
+  }, [onTerminalPanelDefaultSizeChange]);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -9606,6 +10353,96 @@ function CodexConfigDialog({
                     );
                   })}
                 </div>
+              </div>
+              <div className="grid gap-2 border-t border-border/70 pt-3">
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <Label className="flex min-w-0 items-center gap-2 text-sm font-medium">
+                    <Maximize2 className="h-4 w-4 shrink-0" />
+                    <span className="truncate">{t('terminalPanelDefaultSize')}</span>
+                  </Label>
+                  <Badge variant="outline" className="font-mono text-xs">
+                    {normalizedTerminalPanelDefaultSize.width} x {normalizedTerminalPanelDefaultSize.height}
+                  </Badge>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="terminalPanelDefaultWidthInput" className="text-xs text-muted-foreground">
+                      {t('terminalPanelDefaultWidth')}
+                    </Label>
+                    <Input
+                      id="terminalPanelDefaultWidthInput"
+                      type="number"
+                      min={terminalPanelMinWidth}
+                      max={terminalPanelMaxWidth}
+                      step={10}
+                      value={terminalPanelDefaultSizeDraft.width}
+                      onBlur={commitTerminalPanelDefaultSizeDraft}
+                      onChange={(event) => setTerminalPanelDefaultSizeDraft((current) => ({
+                        ...current,
+                        width: event.target.value
+                      }))}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          commitTerminalPanelDefaultSizeDraft();
+                          event.currentTarget.blur();
+                        }
+                      }}
+                    />
+                  </div>
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="terminalPanelDefaultHeightInput" className="text-xs text-muted-foreground">
+                      {t('terminalPanelDefaultHeight')}
+                    </Label>
+                    <Input
+                      id="terminalPanelDefaultHeightInput"
+                      type="number"
+                      min={terminalPanelMinHeight}
+                      max={terminalPanelMaxHeight}
+                      step={10}
+                      value={terminalPanelDefaultSizeDraft.height}
+                      onBlur={commitTerminalPanelDefaultSizeDraft}
+                      onChange={(event) => setTerminalPanelDefaultSizeDraft((current) => ({
+                        ...current,
+                        height: event.target.value
+                      }))}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          commitTerminalPanelDefaultSizeDraft();
+                          event.currentTarget.blur();
+                        }
+                      }}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="self-end"
+                    onClick={resetTerminalPanelDefaultSize}
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    {t('terminalPanelDefaultSizeReset')}
+                  </Button>
+                </div>
+                <div className="text-xs leading-5 text-muted-foreground">
+                  {t('terminalPanelDefaultSizeHint')}
+                </div>
+              </div>
+              <div className="grid gap-2 border-t border-border/70 pt-3">
+                <Label className="inline-flex min-h-9 items-start gap-2 rounded-md border border-border bg-background/70 px-3 py-2 text-sm text-foreground">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
+                    checked={Boolean(terminalAutoCompact)}
+                    onChange={(event) => onTerminalAutoCompactChange?.(event.target.checked)}
+                  />
+                  <span className="grid min-w-0 gap-1">
+                    <span className="font-medium">{t('terminalAutoCompact')}</span>
+                    <span className="text-xs leading-5 text-muted-foreground">{t('terminalAutoCompactHint')}</span>
+                  </span>
+                </Label>
               </div>
               <div className="grid gap-2 border-t border-border/70 pt-3">
                 <Label className="flex items-center gap-2 text-sm font-medium">
@@ -12770,12 +13607,9 @@ function WorkspaceSkillsSection({
 function WorkspaceSidebar({
   appVersion,
   activeProject,
-  activeSessionId,
-  commandTargetId,
   language,
   projectCompletedSessionCounts = new Map(),
   onAddProject,
-  onFocusSession,
   onAddSession,
   onDeleteProject,
   onKillAll,
@@ -12795,8 +13629,6 @@ function WorkspaceSidebar({
   promptManagerOpen,
   quickPromptCount,
   quickPromptsLoading,
-  runtimeNow,
-  sessions,
   skillsRootPath,
   skillsState,
   t,
@@ -13044,52 +13876,6 @@ function WorkspaceSidebar({
 
         <SidebarSection>
           <div className="sidebar-section-title">
-            <span>{t('sessionList')}</span>
-          </div>
-
-          {sessions.length === 0 && (
-            <div className="sidebar-empty">{t('sessionListEmpty')}</div>
-          )}
-
-          <div className="sidebar-session-list">
-            {sessions.map((panel) => {
-              const provider = getPanelCliProvider(panel);
-              const state = getPanelExecutionState(panel, runtimeNow);
-              const title = panel.title || getPanelFallbackTitle(panel, language);
-              return (
-                <button
-                  key={panel.id}
-                  type="button"
-                  className={cn(
-                    'sidebar-session',
-                    activeSessionId === panel.id && 'active',
-                    commandTargetId === panel.id && 'is-command-target'
-                  )}
-                  title={panel.cwd || title}
-                  onClick={() => onFocusSession(panel.id)}
-                >
-                  <div className="sidebar-session-title">
-                    <span className={cn('terminal-endpoint-dot', `is-${state}`)} aria-hidden="true" />
-                    <span className="truncate font-medium">{title}</span>
-                  </div>
-                  <div className="sidebar-session-badges">
-                    <CliProviderBadge language={language} provider={provider} variant="outline" />
-                    <SessionStatusTag state={state} t={t} />
-                    {commandTargetId === panel.id && (
-                      <Badge variant="secondary">{t('floatingComposerCurrent')}</Badge>
-                    )}
-                  </div>
-                  <div className="sidebar-session-path" title={panel.cwd || t('defaultDirectory')}>
-                    {panel.cwd || t('defaultDirectory')}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </SidebarSection>
-
-        <SidebarSection>
-          <div className="sidebar-section-title">
             <button
               type="button"
               className="sidebar-section-toggle"
@@ -13189,6 +13975,8 @@ export default function App() {
   const [theme, setTheme] = useState(initialSettings.theme);
   const [language, setLanguage] = useState(initialSettings.language);
   const [appZoomFactor, setAppZoomFactor] = useState(initialSettings.appZoomFactor);
+  const [terminalPanelDefaultSize, setTerminalPanelDefaultSize] = useState(initialSettings.terminalPanelDefaultSize);
+  const [terminalAutoCompact, setTerminalAutoCompact] = useState(initialSettings.terminalAutoCompact);
   const [sessionHeaderVisibility, setSessionHeaderVisibility] = useState(initialSettings.sessionHeaderVisibility);
   const [view, setView] = useState(initialView);
   const [workspace, setWorkspace] = useState(initialWorkspace);
@@ -13198,6 +13986,7 @@ export default function App() {
   const [endpointGroups, setEndpointGroups] = useState([]);
   const [selectedEndpointIds, setSelectedEndpointIds] = useState(() => new Set());
   const [activeId, setActiveId] = useState(null);
+  const [temporaryInputPanelId, setTemporaryInputPanelId] = useState('');
   const [activeCanvasFrameId, setActiveCanvasFrameId] = useState(null);
   const [activeCanvasTodoId, setActiveCanvasTodoId] = useState(null);
   const [pendingCanvasFrame, setPendingCanvasFrame] = useState(false);
@@ -13219,6 +14008,8 @@ export default function App() {
   const [sessionReviewOpen, setSessionReviewOpen] = useState(false);
   const [diffReviewOpen, setDiffReviewOpen] = useState(false);
   const [diffReviewCwd, setDiffReviewCwd] = useState('');
+  const [topbarToolsOpen, setTopbarToolsOpen] = useState(false);
+  const [canvasToolsOpen, setCanvasToolsOpen] = useState(false);
   const [promptManagerOpen, setPromptManagerOpen] = useState(false);
   const [imageGenerationOpen, setImageGenerationOpen] = useState(false);
   const [imageGenerationPrompt, setImageGenerationPrompt] = useState('');
@@ -13251,8 +14042,6 @@ export default function App() {
   const [commandDockContextItems, setCommandDockContextItems] = useState([]);
   const [commandDockContextLoading, setCommandDockContextLoading] = useState(false);
   const [commandDockTargetId, setCommandDockTargetId] = useState('');
-  const [commandDockCollapsed, setCommandDockCollapsed] = useState(false);
-  const [commandDockPosition, setCommandDockPosition] = useState(initialSettings.commandDockPosition);
   const [commandDockHistory, setCommandDockHistory] = useState(initialSettings.commandDockHistory);
   const [commandDockDispatchMode, setCommandDockDispatchMode] = useState(initialSettings.commandDockDispatchMode);
   const [commandDockShortcuts, setCommandDockShortcuts] = useState(initialSettings.commandDockShortcuts);
@@ -13288,6 +14077,7 @@ export default function App() {
   const canvasTodoOutputBuffersRef = useRef(new Map());
   const panelsRef = useRef([]);
   const endpointGroupsRef = useRef([]);
+  const terminalPanelDefaultSizeRef = useRef(terminalPanelDefaultSize);
   const workspaceRef = useRef(workspace);
   const historyProjectRef = useRef(historyProject);
   const viewRef = useRef(view);
@@ -13316,6 +14106,8 @@ export default function App() {
   const imageGenerationHistorySaveErrorShownRef = useRef(false);
   const runtimeNow = Date.now();
   const quickPromptsLoadStartedRef = useRef(false);
+  const topbarToolsRef = useRef(null);
+  const canvasToolsRef = useRef(null);
 
   const projectsWithHistory = useMemo(() => {
     if (!historyProject) {
@@ -13597,6 +14389,10 @@ export default function App() {
   }, [panels]);
 
   useEffect(() => {
+    terminalPanelDefaultSizeRef.current = normalizeTerminalPanelDefaultSize(terminalPanelDefaultSize);
+  }, [terminalPanelDefaultSize]);
+
+  useEffect(() => {
     agentsRef.current = agents;
   }, [agents]);
 
@@ -13814,14 +14610,14 @@ export default function App() {
   }, [commandDockSkillMentionItems.length]);
 
   useEffect(() => {
-    if (commandDockVisible && !commandDockCollapsed) {
+    if (commandDockVisible) {
       return;
     }
 
     setCommandDockSkillMention((current) => (
       current.open ? createClosedCommandDockSkillMention() : current
     ));
-  }, [commandDockCollapsed, commandDockVisible]);
+  }, [commandDockVisible]);
 
   useEffect(() => {
     setCommandDockSkillMention((current) => (
@@ -14170,6 +14966,31 @@ export default function App() {
     workspaceTreeState.status
   ]);
 
+  const copyWorkspaceTreeNodePath = useCallback((node) => {
+    const nodePath = String(node?.path || '').trim();
+    if (!nodePath) {
+      return false;
+    }
+
+    if (writeClipboardText(nodePath)) {
+      showToast(t('workspaceTreePathCopied', { path: nodePath }));
+      return true;
+    }
+
+    return false;
+  }, [showToast, t]);
+
+  const openWorkspaceTreeNodeInVSCode = useCallback((node) => {
+    const nodePath = String(node?.path || '').trim();
+    if (!nodePath) {
+      return;
+    }
+
+    bridge.openWorkspacePathInVSCode(nodePath).catch((error) => {
+      showToast(t('workspaceTreeOpenInVSCodeFailed', { message: error.message }));
+    });
+  }, [showToast, t]);
+
   const selectWorkspaceTreeNode = useCallback((node) => {
     const nextPath = getWorkspaceTreeInsertPath(node, normalizePromptFilePath);
     if (!nextPath) {
@@ -14371,6 +15192,45 @@ export default function App() {
     return true;
   }, []);
 
+  const autoNameShellPanelFromCommand = useCallback((id, command) => {
+    const nextTitle = formatShellCommandSessionTitle(command);
+    if (!nextTitle) {
+      return false;
+    }
+
+    const targetPanel = panelsRef.current.find((panel) => panel.id === id);
+    const currentProvider = getPanelCliProvider(targetPanel);
+    if (!targetPanel || targetPanel.titleEdited || currentProvider?.id !== shellCliProviderId) {
+      return false;
+    }
+
+    if (String(targetPanel.title || '').trim() === nextTitle) {
+      return true;
+    }
+
+    setPanels((current) => current.map((panel) => {
+      if (panel.id !== id) {
+        return panel;
+      }
+
+      const panelProvider = getPanelCliProvider(panel);
+      if (panel.titleEdited || panelProvider?.id !== shellCliProviderId) {
+        return panel;
+      }
+
+      return {
+        ...panel,
+        title: nextTitle
+      };
+    }));
+
+    if (typeof bridge.updateTerminalMeta === 'function') {
+      bridge.updateTerminalMeta(id, { title: nextTitle }).catch(() => {});
+    }
+
+    return true;
+  }, []);
+
   const handleTerminalInput = useCallback((id, data) => {
     touchPanelActivity(id);
     const normalizedId = String(id || '').trim();
@@ -14386,8 +15246,13 @@ export default function App() {
       terminalInputCommandBuffersRef.current.delete(normalizedId);
     }
 
-    commands.forEach((command) => promotePanelToDetectedAgent(normalizedId, command));
-  }, [promotePanelToDetectedAgent, touchPanelActivity]);
+    commands.forEach((command) => {
+      const promoted = promotePanelToDetectedAgent(normalizedId, command);
+      if (!promoted) {
+        autoNameShellPanelFromCommand(normalizedId, command);
+      }
+    });
+  }, [autoNameShellPanelFromCommand, promotePanelToDetectedAgent, touchPanelActivity]);
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
   useEffect(() => () => window.clearTimeout(panelActivityFlushTimer.current), []);
@@ -14450,9 +15315,9 @@ export default function App() {
     }
 
     element.style.height = '0px';
-    const nextHeight = Math.min(Math.max(element.scrollHeight, 108), 260);
+    const nextHeight = Math.min(Math.max(element.scrollHeight, 42), 132);
     element.style.height = `${nextHeight}px`;
-    element.style.overflowY = element.scrollHeight > 260 ? 'auto' : 'hidden';
+    element.style.overflowY = element.scrollHeight > 132 ? 'auto' : 'hidden';
   }, []);
 
   useEffect(() => {
@@ -14460,12 +15325,12 @@ export default function App() {
   }, [commandDockValue, resizeCommandDockInput]);
 
   useEffect(() => {
-    if (!commandDockVisible || commandDockCollapsed) {
+    if (!commandDockVisible) {
       return;
     }
 
     window.requestAnimationFrame(() => resizeCommandDockInput());
-  }, [commandDockCollapsed, commandDockVisible, resizeCommandDockInput]);
+  }, [commandDockVisible, resizeCommandDockInput]);
 
   const handleCommandDockInputChange = useCallback((event) => {
     setCommandDockValue(event.target.value);
@@ -14503,27 +15368,6 @@ export default function App() {
     ));
   }, []);
 
-  const expandCommandDock = useCallback(() => {
-    if (!commandDockCollapsed) {
-      return;
-    }
-
-    setCommandDockCollapsed(false);
-    window.requestAnimationFrame(() => {
-      resizeCommandDockInput();
-      commandDockInputRef.current?.focus();
-    });
-  }, [commandDockCollapsed, resizeCommandDockInput]);
-
-  const toggleCommandDockCollapsed = useCallback(() => {
-    if (commandDockCollapsed) {
-      expandCommandDock();
-      return;
-    }
-
-    setCommandDockCollapsed(true);
-  }, [commandDockCollapsed, expandCommandDock]);
-
   const insertTextIntoCommandDock = useCallback((text) => {
     const normalizedText = String(text || '');
     if (!normalizedText) {
@@ -14558,9 +15402,6 @@ export default function App() {
     }
 
     closeCommandDockSkillMention();
-    if (commandDockCollapsed) {
-      setCommandDockCollapsed(false);
-    }
 
     setCommandDockContextItems((current) => (
       normalizeCommandDockContextItems([...current, ...normalizedItems])
@@ -14570,7 +15411,7 @@ export default function App() {
       commandDockInputRef.current?.focus();
     });
     return true;
-  }, [closeCommandDockSkillMention, commandDockCollapsed, resizeCommandDockInput]);
+  }, [closeCommandDockSkillMention, resizeCommandDockInput]);
 
   const removeCommandDockContextItem = useCallback((id) => {
     const normalizedId = String(id || '').trim();
@@ -14756,9 +15597,6 @@ export default function App() {
     }
 
     closeCommandDockSkillMention();
-    if (commandDockCollapsed) {
-      setCommandDockCollapsed(false);
-    }
 
     setCommandDockValue(nextValue);
     window.requestAnimationFrame(() => {
@@ -14769,7 +15607,7 @@ export default function App() {
       input?.setSelectionRange(caret, caret);
     });
     return true;
-  }, [closeCommandDockSkillMention, commandDockCollapsed, resizeCommandDockInput]);
+  }, [closeCommandDockSkillMention, resizeCommandDockInput]);
 
   const saveCommandDockPrompt = useCallback(async () => {
     if (quickPromptsLoading) {
@@ -14777,6 +15615,15 @@ export default function App() {
     }
 
     const prompt = trimTrailingLineBreaks(commandDockInputRef.current?.value ?? commandDockValue);
+    const attachments = normalizeCommandDockContextItems(commandDockContextItems)
+      .filter((item) => item.kind === 'image' || item.kind === 'file' || item.kind === 'attachment')
+      .map((item) => ({
+        kind: item.kind === 'image' ? 'image' : 'file',
+        title: item.title,
+        path: item.path,
+        content: item.kind === 'image' ? '' : item.content,
+        truncated: item.truncated
+      }));
     if (!String(prompt || '').trim()) {
       showToast(t('quickPromptContentRequired'));
       return false;
@@ -14785,7 +15632,7 @@ export default function App() {
     const title = deriveQuickPromptTitle(prompt, t('quickPromptDefaultName'));
 
     try {
-      const store = await saveQuickPromptRecord({ title, prompt });
+      const store = await saveQuickPromptRecord({ title, prompt, attachments });
       const prompts = Array.isArray(store.prompts) ? store.prompts : [];
       const savedPrompt = store.savedPrompt || prompts.find((record) => record.title === title);
 
@@ -14795,7 +15642,7 @@ export default function App() {
       showToast(t('quickPromptSaveFailed', { message: error.message }));
       return false;
     }
-  }, [commandDockValue, quickPromptsLoading, saveQuickPromptRecord, showToast, t]);
+  }, [commandDockContextItems, commandDockValue, quickPromptsLoading, saveQuickPromptRecord, showToast, t]);
 
   const insertQuickPromptIntoCommandDock = useCallback((record) => {
     const prompt = String(record?.prompt || '').trim();
@@ -14803,16 +15650,13 @@ export default function App() {
       return false;
     }
 
-    if (commandDockCollapsed) {
-      setCommandDockCollapsed(false);
-    }
-
     insertTextIntoCommandDock(prompt);
+    addCommandDockContextItems(createPromptAttachmentContextItems(record.attachments, t));
     const title = String(record?.title || '').trim()
       || deriveQuickPromptTitle(prompt, t('quickPromptDefaultName'));
     showToast(t('quickPromptInserted', { name: title }));
     return true;
-  }, [commandDockCollapsed, insertTextIntoCommandDock, showToast, t]);
+  }, [addCommandDockContextItems, insertTextIntoCommandDock, showToast, t]);
 
   const deleteCommandDockPrompt = useCallback(async (record) => {
     if (quickPromptsLoading) {
@@ -15053,7 +15897,10 @@ export default function App() {
   }, [saveCommandDockImages]);
 
   const handleCommandDockDragOver = useCallback((event) => {
-    if (!hasImageFilesInDataTransfer(event.dataTransfer)) {
+    if (
+      !hasWorkspaceTreePathInDataTransfer(event.dataTransfer)
+      && !hasImageFilesInDataTransfer(event.dataTransfer)
+    ) {
       return;
     }
 
@@ -15063,6 +15910,15 @@ export default function App() {
   }, []);
 
   const handleCommandDockDrop = useCallback((event) => {
+    const workspaceTreePath = getWorkspaceTreePathFromDataTransfer(event.dataTransfer);
+    if (workspaceTreePath) {
+      event.preventDefault();
+      event.stopPropagation();
+      insertTextIntoCommandDock(`@${workspaceTreePath}`);
+      showToast(t('workspaceTreePathInserted', { path: workspaceTreePath }));
+      return;
+    }
+
     const imageFiles = extractImageFilesFromDataTransfer(event.dataTransfer);
     if (imageFiles.length === 0) {
       return;
@@ -15071,7 +15927,7 @@ export default function App() {
     event.preventDefault();
     event.stopPropagation();
     void saveCommandDockImages(imageFiles);
-  }, [saveCommandDockImages]);
+  }, [insertTextIntoCommandDock, saveCommandDockImages, showToast, t]);
 
   const generateImageFromCanvas = useCallback(async (payload) => {
     if (imageGenerationSubmitting) {
@@ -15361,8 +16217,8 @@ export default function App() {
     return {
       x: Number.isFinite(panel.x) ? panel.x : 0,
       y: Number.isFinite(panel.y) ? panel.y : 0,
-      width: Number.isFinite(panel.width) ? panel.width : 640,
-      height: Number.isFinite(panel.height) ? panel.height : 380
+      width: Number.isFinite(panel.width) ? panel.width : terminalPanelDefaultWidth,
+      height: Number.isFinite(panel.height) ? panel.height : terminalPanelDefaultHeight
     };
   }, []);
 
@@ -15434,9 +16290,6 @@ export default function App() {
     }
 
     setCommandDockTargetId(panel.id);
-    if (commandDockCollapsed) {
-      setCommandDockCollapsed(false);
-    }
     if (imageGenerationOpen) {
       setImageGenerationOpen(false);
     }
@@ -15451,7 +16304,7 @@ export default function App() {
       }
     });
     return panel;
-  }, [commandDockCollapsed, imageGenerationOpen, resizeCommandDockInput, showToast, t]);
+  }, [imageGenerationOpen, resizeCommandDockInput, showToast, t]);
 
   const attachAgentImagesToCommandDock = useCallback((panelId, files) => {
     const panel = prepareAgentUtilityTarget(panelId, { quiet: true });
@@ -15461,6 +16314,68 @@ export default function App() {
 
     return saveCommandDockImages(files);
   }, [prepareAgentUtilityTarget, saveCommandDockImages]);
+
+  const pasteImagesIntoTerminal = useCallback(async (panelId, options = {}) => {
+    const panel = panelsRef.current.find((item) => item.id === panelId) || null;
+    const instance = terminalInstances.current.get(panelId);
+    const term = options.term || instance?.term || null;
+    const imageFiles = Array.isArray(options.files) ? options.files.filter((file) => file && isImageFile(file)) : [];
+    const imagePaths = options.files
+      ? []
+      : readClipboardFilePaths().filter(isImageFilePath);
+    const savedImages = [];
+
+    try {
+      for (const filePath of imagePaths) {
+        const savedImage = await bridge.saveCommandDockImagePath?.(filePath);
+        if (savedImage?.path) {
+          savedImages.push(savedImage);
+        }
+      }
+
+      if (imageFiles.length > 0) {
+        for (const file of imageFiles) {
+          const arrayBuffer = await file.arrayBuffer();
+          const savedImage = await bridge.saveCommandDockImage({
+            fileName: file.name,
+            mimeType: file.type,
+            bytes: new Uint8Array(arrayBuffer)
+          });
+          if (savedImage?.path) {
+            savedImages.push(savedImage);
+          }
+        }
+      } else if (imagePaths.length === 0) {
+        const clipboardImage = bridge.readClipboardImage?.();
+        if (clipboardImage?.bytes) {
+          const savedImage = await bridge.saveCommandDockImage(clipboardImage);
+          if (savedImage?.path) {
+            savedImages.push(savedImage);
+          }
+        }
+      }
+
+      const referenceText = getTerminalImageReferenceText(savedImages);
+      if (!referenceText) {
+        return false;
+      }
+
+      if (term) {
+        pasteClipboardIntoTerminal(term, referenceText);
+      } else {
+        submitTerminalTextPayload(panelId, referenceText);
+      }
+
+      showToast(t('terminalImagesPasted', {
+        count: savedImages.length,
+        name: panel?.title || t('sessionFallbackTitle')
+      }));
+      return true;
+    } catch (error) {
+      showToast(t('floatingComposerImageSaveFailed', { message: error.message }));
+      return false;
+    }
+  }, [showToast, submitTerminalTextPayload, t]);
 
   const openAgentWorkspaceFiles = useCallback((panelId) => {
     const panel = prepareAgentUtilityTarget(panelId, { quiet: true });
@@ -15791,15 +16706,17 @@ export default function App() {
         theme,
         language,
         appZoomFactor: normalizeAppZoomFactor(appZoomFactor),
+        terminalPanelDefaultSize: normalizeTerminalPanelDefaultSize(terminalPanelDefaultSize),
+        terminalAutoCompact: Boolean(terminalAutoCompact),
         sessionHeaderVisibility: normalizeSessionHeaderVisibility(sessionHeaderVisibility),
         view,
         commandDockDispatchMode,
         commandDockShortcuts: normalizeCommandDockShortcutSettings(commandDockShortcuts),
-        commandDockPosition,
+        commandDockPosition: null,
         commandDockHistory
       }));
     }, 180);
-  }, [appZoomFactor, commandDockDispatchMode, commandDockHistory, commandDockPosition, commandDockShortcuts, cwd, language, sessionHeaderVisibility, theme, view]);
+  }, [appZoomFactor, commandDockDispatchMode, commandDockHistory, commandDockShortcuts, cwd, language, sessionHeaderVisibility, terminalAutoCompact, terminalPanelDefaultSize, theme, view]);
 
   useEffect(() => () => window.clearTimeout(saveSettingsTimer.current), []);
 
@@ -15851,6 +16768,16 @@ export default function App() {
 
     focusTerminalForTextInput(instance.term);
   }, []);
+
+  useEffect(() => {
+    terminalInstances.current.forEach((instance, id) => {
+      if (id === activeId || id === temporaryInputPanelId) {
+        return;
+      }
+
+      releaseTerminalTextInput(instance?.term);
+    });
+  }, [activeId, temporaryInputPanelId]);
 
   const refitTerminalInstances = useCallback(() => {
     const fitAll = () => {
@@ -16001,7 +16928,9 @@ export default function App() {
       touchPanelActivity(id);
       appendSessionReviewRecord(id, data);
       syncCanvasTodoProgressFromOutput(id, data);
-      terminalInstances.current.get(id)?.term.write(data);
+      const instance = terminalInstances.current.get(id);
+      instance?.willReceiveOutput?.();
+      instance?.term.write(data);
     });
 
     const offExit = bridge.onTerminalExit(({ id, exitCode, signal }) => {
@@ -16009,6 +16938,7 @@ export default function App() {
       const label = exitCode === null || typeof exitCode === 'undefined'
         ? signal || 'closed'
         : `code ${exitCode}`;
+      instance?.willReceiveOutput?.();
       instance?.term.write(`\r\n\x1b[38;5;246m[process exited: ${label}]\x1b[0m\r\n`);
       appendSessionReviewRecord(id, `\n[process exited: ${label}]\n`);
       setPanels((current) => current.map((panel) => (
@@ -16061,14 +16991,17 @@ export default function App() {
     };
   }, []);
 
-  const getCenteredTerminalSlot = useCallback((targetWorkspace, width = 640, height = 380) => {
+  const getCenteredTerminalSlot = useCallback((targetWorkspace, width, height) => {
     const targetView = getWorkspaceCanvasView(targetWorkspace, viewRef.current);
     const rect = getViewportRect();
+    const defaultSize = terminalPanelDefaultSizeRef.current;
+    const resolvedWidth = Number.isFinite(width) ? width : defaultSize.width;
+    const resolvedHeight = Number.isFinite(height) ? height : defaultSize.height;
     return {
-      width,
-      height,
-      x: (rect.width / 2 - targetView.x) / targetView.scale - width / 2,
-      y: (rect.height / 2 - targetView.y) / targetView.scale - height / 2
+      width: resolvedWidth,
+      height: resolvedHeight,
+      x: (rect.width / 2 - targetView.x) / targetView.scale - resolvedWidth / 2,
+      y: (rect.height / 2 - targetView.y) / targetView.scale - resolvedHeight / 2
     };
   }, [getViewportRect]);
 
@@ -16080,6 +17013,7 @@ export default function App() {
   const activatePanel = useCallback((id) => {
     const panel = panelsRef.current.find((item) => item.id === id);
     nextZIndex.current += 1;
+    setTemporaryInputPanelId('');
     setActiveId(id);
     setActiveCanvasFrameId(null);
     setActiveCanvasTodoId(null);
@@ -16091,6 +17025,29 @@ export default function App() {
       window.requestAnimationFrame(() => focusTerminalInstance(id));
     }
   }, [focusTerminalInstance]);
+
+  const startTemporaryPanelInput = useCallback((id) => {
+    const panel = panelsRef.current.find((item) => item.id === id);
+    if (!panel || panel.minimized || activeIdRef.current === id) {
+      return;
+    }
+
+    nextZIndex.current += 1;
+    setTemporaryInputPanelId(id);
+    setPanels((current) => current.map((item) => (
+      item.id === id ? { ...item, zIndex: nextZIndex.current } : item
+    )));
+  }, []);
+
+  const endTemporaryPanelInput = useCallback((id) => {
+    setTemporaryInputPanelId((current) => (current === id ? '' : current));
+    if (activeIdRef.current === id) {
+      return;
+    }
+
+    const instance = terminalInstances.current.get(id);
+    releaseTerminalTextInput(instance?.term);
+  }, []);
 
   const activateCanvasFrame = useCallback((id) => {
     const canvasKey = getWorkspaceCanvasKey(workspaceRef.current);
@@ -16468,8 +17425,9 @@ export default function App() {
 
   const createTerminal = useCallback(async (slot = {}) => {
     const center = viewportCenterOnCanvas();
-    const width = Number.isFinite(slot.width) ? slot.width : 640;
-    const height = Number.isFinite(slot.height) ? slot.height : 380;
+    const defaultSize = terminalPanelDefaultSizeRef.current;
+    const width = Number.isFinite(slot.width) ? slot.width : defaultSize.width;
+    const height = Number.isFinite(slot.height) ? slot.height : defaultSize.height;
     const x = Number.isFinite(slot.x) ? slot.x : center.x - width / 2;
     const y = Number.isFinite(slot.y) ? slot.y : center.y - height / 2;
     const projectId = Object.prototype.hasOwnProperty.call(slot, 'projectId')
@@ -16508,6 +17466,7 @@ export default function App() {
       id: meta.id,
       projectId,
       title: meta.title,
+      titleEdited: Boolean(slot.titleEdited),
       cwd: meta.cwd,
       backend: meta.backend,
       cliProviderId: resolvedCliProvider?.id || cliProviderId,
@@ -16562,7 +17521,7 @@ export default function App() {
       agentName,
       autoSync: true,
       followPanel: true,
-      x: Math.round((Number.isFinite(panel.x) ? panel.x : 0) + (Number.isFinite(panel.width) ? panel.width : 640) + agentPlanTodoGap),
+      x: Math.round((Number.isFinite(panel.x) ? panel.x : 0) + (Number.isFinite(panel.width) ? panel.width : terminalPanelDefaultWidth) + agentPlanTodoGap),
       y: Math.round(Number.isFinite(panel.y) ? panel.y : 0),
       width: agentPlanTodoDefaultWidth,
       height: agentPlanTodoDefaultHeight,
@@ -16875,6 +17834,7 @@ export default function App() {
       const cliProviderId = cliProvider?.id || defaultCliProviderId;
       const hasExplicitInitialCommand = Object.prototype.hasOwnProperty.call(config, 'initialCommand');
       const terminalSlot = {
+        ...getCenteredTerminalSlot(workspaceRef.current),
         projectId: Object.prototype.hasOwnProperty.call(config, 'projectId')
           ? config.projectId
           : launchContext.projectId,
@@ -16894,7 +17854,7 @@ export default function App() {
     };
 
     run().catch((error) => showToast(error.message));
-  }, [createTerminal, getCurrentSessionLaunchContext, launchCliProviderId, showToast]);
+  }, [createTerminal, getCenteredTerminalSlot, getCurrentSessionLaunchContext, launchCliProviderId, showToast]);
 
   const createWorkspaceCommandLine = useCallback((cliProviderId) => {
     const nextCliProviderId = typeof cliProviderId === 'string' ? cliProviderId : 'shell';
@@ -16904,6 +17864,9 @@ export default function App() {
   }, [createWorkspaceCommandLineFromConfig]);
 
   const closeTerminal = useCallback(async (id) => {
+    const instance = terminalInstances.current.get(id);
+    const shouldRecoverFocus = releaseTerminalTextInput(instance?.term, { recoverIme: true }) || activeIdRef.current === id;
+
     try {
       await bridge.killTerminal(id);
     } catch {
@@ -16925,7 +17888,24 @@ export default function App() {
     }
     setPendingConnectionSourceId((current) => (current === id ? '' : current));
     setActiveCanvasConnectionId(null);
-  }, [commitWorkspace]);
+
+    if (shouldRecoverFocus) {
+      window.requestAnimationFrame(() => {
+        const nextPanel = panelsRef.current.find((panel) => (
+          panel.id !== id &&
+          !panel.minimized &&
+          isPanelVisibleInWorkspace(panel, workspaceRef.current)
+        ));
+
+        if (nextPanel) {
+          window.setTimeout(() => focusTerminalInstance(nextPanel.id), 120);
+          return;
+        }
+
+        focusImeRecoveryTextarea(260);
+      });
+    }
+  }, [commitWorkspace, focusTerminalInstance]);
 
   const restartTerminal = useCallback(async (id) => {
     const panel = panelsRef.current.find((item) => item.id === id);
@@ -16936,6 +17916,7 @@ export default function App() {
     await closeTerminal(id);
     await createTerminal({
       title: panel.title,
+      titleEdited: Boolean(panel.titleEdited),
       projectId: null,
       cwd: panel.cwd,
       cliProviderId: panel.cliProviderId,
@@ -17014,6 +17995,7 @@ export default function App() {
   }, []);
 
   const minimizePanel = useCallback((id) => {
+    releaseTerminalTextInput(terminalInstances.current.get(id)?.term);
     setPanels((current) => current.map((panel) => (
       panel.id === id ? { ...panel, minimized: true } : panel
     )));
@@ -17073,9 +18055,26 @@ export default function App() {
   const commitPanelTitle = useCallback((id, title) => {
     const panel = panelsRef.current.find((item) => item.id === id);
     const nextTitle = title.trim() || getPanelFallbackTitle(panel, language);
-    updatePanel(id, { title: nextTitle });
+    updatePanel(id, { title: nextTitle, titleEdited: true });
+    updateCanvasTodosForLinkedPanel(id, (todo) => ({
+      ...todo,
+      linkedPanelTitle: nextTitle
+    }));
     updateTerminalMeta(id, { title: nextTitle });
-  }, [language, updatePanel, updateTerminalMeta]);
+  }, [language, updateCanvasTodosForLinkedPanel, updatePanel, updateTerminalMeta]);
+
+  const renamePanel = useCallback((id) => {
+    const panel = panelsRef.current.find((item) => item.id === id);
+    if (!panel || !isPanelVisibleInWorkspace(panel, workspaceRef.current)) {
+      return;
+    }
+
+    const currentTitle = String(panel.title || getPanelFallbackTitle(panel, language)).trim();
+    const value = window.prompt(t('renameSessionPrompt'), currentTitle);
+    if (value !== null) {
+      commitPanelTitle(id, value);
+    }
+  }, [commitPanelTitle, language, t]);
 
   const switchPanelModel = useCallback((id, value) => {
     const model = String(value || '').trim();
@@ -17526,11 +18525,8 @@ export default function App() {
 
   const setCommandTargetFromReview = useCallback((id) => {
     setCommandDockTargetId(id);
-    if (commandDockCollapsed) {
-      setCommandDockCollapsed(false);
-    }
     window.requestAnimationFrame(() => commandDockInputRef.current?.focus());
-  }, [commandDockCollapsed]);
+  }, []);
 
   const copySessionReviewSummary = useCallback(() => {
     const summaryRuntimeNow = Date.now();
@@ -17803,6 +18799,7 @@ export default function App() {
       const launchContext = getCurrentSessionLaunchContext();
       const cliProvider = resolveCliProvider(config.cliProviderId || launchCliProviderId);
       const cliProviderId = cliProvider?.id || defaultCliProviderId;
+      const defaultSize = terminalPanelDefaultSizeRef.current;
 
       if (!launchContext.projectId && !launchContext.cwd) {
         openNewSessionPicker();
@@ -17822,8 +18819,8 @@ export default function App() {
         && Number.isFinite(canvasPoint.x)
         && Number.isFinite(canvasPoint.y)
         ? {
-            width: 640,
-            height: 380,
+            width: defaultSize.width,
+            height: defaultSize.height,
             x: Math.round(canvasPoint.x),
             y: Math.round(canvasPoint.y)
           }
@@ -17907,6 +18904,7 @@ export default function App() {
       return;
     }
 
+    terminalInstances.current.forEach((instance) => releaseTerminalTextInput(instance?.term, { recoverIme: true }));
     await bridge.killAllTerminals();
     setPanels([]);
     setEndpointGroups([]);
@@ -17915,6 +18913,7 @@ export default function App() {
     setPendingConnectionSourceId('');
     setActiveCanvasConnectionId(null);
     commitWorkspace((currentWorkspace) => ({ ...currentWorkspace, canvasConnections: {} }));
+    window.requestAnimationFrame(() => focusImeRecoveryTextarea(260));
   }, [commitWorkspace, t]);
 
   const createProjectFromDialog = useCallback(async (config = {}) => {
@@ -18108,7 +19107,6 @@ export default function App() {
       closestElement(event.target, '.canvas-frame-header') ||
       closestElement(event.target, '.canvas-todo-panel') ||
       closestElement(event.target, '.canvas-tools') ||
-      closestElement(event.target, '.canvas-arrange-tool') ||
       closestElement(event.target, '.canvas-context-menu')
     ) {
       return;
@@ -18147,6 +19145,7 @@ export default function App() {
 
     if (pendingCanvasFrame) {
       event.preventDefault();
+      releaseTerminalTextInput(terminalInstances.current.get(activeIdRef.current)?.term, { recoverIme: true });
       setActiveId(null);
       setActiveCanvasTodoId(null);
       setActiveCanvasConnectionId(null);
@@ -18180,6 +19179,8 @@ export default function App() {
     }
 
     event.preventDefault();
+    releaseTerminalTextInput(terminalInstances.current.get(activeIdRef.current)?.term, { recoverIme: true });
+    setActiveId(null);
     setPanning(true);
     setActiveCanvasFrameId(null);
     setActiveCanvasTodoId(null);
@@ -18247,6 +19248,68 @@ export default function App() {
     }));
   }, [commitWorkspace]);
 
+  const toggleCanvasFrameMode = useCallback(() => {
+    setPendingCanvasFrame((current) => {
+      const next = !current;
+      if (next) {
+        setConnectionMode(false);
+        setPendingConnectionSourceId('');
+        setCanvasConnectionPreview(null);
+        setActiveCanvasConnectionId(null);
+        showToast(t('canvasFrameHint'));
+      }
+      return next;
+    });
+  }, [showToast, t]);
+
+  useEffect(() => {
+    if (!topbarToolsOpen) {
+      return undefined;
+    }
+
+    const closeOnPointerDown = (event) => {
+      if (!topbarToolsRef.current?.contains(event.target)) {
+        setTopbarToolsOpen(false);
+      }
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') {
+        setTopbarToolsOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', closeOnPointerDown, true);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown, true);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [topbarToolsOpen]);
+
+  useEffect(() => {
+    if (!canvasToolsOpen) {
+      return undefined;
+    }
+
+    const closeOnPointerDown = (event) => {
+      if (!canvasToolsRef.current?.contains(event.target)) {
+        setCanvasToolsOpen(false);
+      }
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') {
+        setCanvasToolsOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', closeOnPointerDown, true);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown, true);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [canvasToolsOpen]);
+
   useEffect(() => {
     const onKeyDown = (event) => {
       const editable = event.target instanceof HTMLElement && (
@@ -18292,6 +19355,18 @@ export default function App() {
       }
 
       const activePanel = panelsRef.current.find((panel) => panel.id === activeIdRef.current);
+      if (
+        event.key === 'F2' &&
+        activeIdRef.current &&
+        activePanel &&
+        isPanelVisibleInWorkspace(activePanel, workspaceRef.current) &&
+        !editable
+      ) {
+        event.preventDefault();
+        renamePanel(activeIdRef.current);
+        return;
+      }
+
       if (
         event.key === 'Delete' &&
         activeCanvasConnectionIdRef.current &&
@@ -18348,7 +19423,8 @@ export default function App() {
     deleteCanvasTodo,
     openNewSessionPicker,
     pendingCanvasFrame,
-    pendingConnectionSourceId
+    pendingConnectionSourceId,
+    renamePanel
   ]);
 
   const minorGrid = 48 * view.scale;
@@ -18366,12 +19442,9 @@ export default function App() {
         <WorkspaceSidebar
           appVersion={appInfo.appVersion}
           activeProject={activeProject}
-          activeSessionId={activeId}
-          commandTargetId={commandDockTargetId}
           language={language}
           projectCompletedSessionCounts={projectCompletedSessionCounts}
           onAddProject={openProjectDialog}
-          onFocusSession={focusSessionFromReview}
           theme={theme}
           onAddSession={openNewSessionPicker}
           onDeleteProject={deleteProject}
@@ -18391,8 +19464,6 @@ export default function App() {
           promptManagerOpen={promptManagerOpen}
           quickPromptCount={quickPrompts.length}
           quickPromptsLoading={quickPromptsLoading}
-          runtimeNow={runtimeNow}
-          sessions={commandDockPanels}
           skillsRootPath={skillsRootPath}
           skillsState={workspaceSkillsState}
           t={t}
@@ -18414,24 +19485,54 @@ export default function App() {
 
             <TopbarSessionStats counts={crossProjectSessionCounts} t={t} />
 
-            <div className="flex shrink-0 items-center gap-2">
-              <Button type="button" variant="outline" onClick={() => setAgentsOpen(true)}>
-                <Bot className="h-4 w-4" />
-                {t('agents')}
-              </Button>
+            <div className="topbar-tools-menu" ref={topbarToolsRef}>
               <Button
                 type="button"
-                variant={diffReviewOpen ? 'primary' : 'outline'}
-                onClick={() => openDiffReviewForPath(currentWorkspacePath)}
-                disabled={!currentWorkspacePath}
+                variant={topbarToolsOpen || diffReviewOpen ? 'primary' : 'outline'}
+                aria-controls={topbarToolsOpen ? 'topbarToolsMenu' : undefined}
+                aria-expanded={topbarToolsOpen}
+                aria-haspopup="menu"
+                onClick={() => setTopbarToolsOpen((current) => !current)}
               >
-                <FileDiff className="h-4 w-4" />
-                {t('diffReview')}
+                <Ellipsis className="h-4 w-4" />
+                {t('workspaceTools')}
               </Button>
-              <Button type="button" variant="outline" onClick={() => setAutopilotOpen(true)}>
-                <CalendarClock className="h-4 w-4" />
-                {t('autopilot')}
-              </Button>
+              {topbarToolsOpen && (
+                <div id="topbarToolsMenu" className="compact-menu-panel topbar-tools-panel" role="menu" aria-label={t('workspaceTools')}>
+                  <CompactMenuItem
+                    Icon={Bot}
+                    role="menuitem"
+                    onClick={() => {
+                      setTopbarToolsOpen(false);
+                      setAgentsOpen(true);
+                    }}
+                  >
+                    {t('agents')}
+                  </CompactMenuItem>
+                  <CompactMenuItem
+                    active={diffReviewOpen}
+                    disabled={!currentWorkspacePath}
+                    Icon={FileDiff}
+                    role="menuitem"
+                    onClick={() => {
+                      setTopbarToolsOpen(false);
+                      openDiffReviewForPath(currentWorkspacePath);
+                    }}
+                  >
+                    {t('diffReview')}
+                  </CompactMenuItem>
+                  <CompactMenuItem
+                    Icon={CalendarClock}
+                    role="menuitem"
+                    onClick={() => {
+                      setTopbarToolsOpen(false);
+                      setAutopilotOpen(true);
+                    }}
+                  >
+                    {t('autopilot')}
+                  </CompactMenuItem>
+                </div>
+              )}
             </div>
 
             <Separator orientation="vertical" className="ml-auto h-8" />
@@ -18500,71 +19601,105 @@ export default function App() {
           >
             <div
               className="canvas-tools"
+              ref={canvasToolsRef}
               onPointerDown={(event) => {
                 event.stopPropagation();
                 closeCanvasContextMenu();
               }}
             >
               <Button
-                id="addCanvasFrame"
-                variant={pendingCanvasFrame ? 'default' : 'outline'}
-                onClick={() => {
-                  setPendingCanvasFrame((current) => {
-                    const next = !current;
-                    if (next) {
-                      setConnectionMode(false);
-                      setPendingConnectionSourceId('');
-                      setActiveCanvasConnectionId(null);
-                      showToast(t('canvasFrameHint'));
-                    }
-                    return next;
-                  });
-                }}
+                type="button"
+                id="canvasToolsMenuTrigger"
+                className={cn('canvas-tools-trigger', canvasToolsOpen && 'is-active')}
+                variant={canvasToolsOpen || pendingCanvasFrame || connectionMode ? 'primary' : 'outline'}
+                aria-controls={canvasToolsOpen ? 'canvasToolsMenu' : undefined}
+                aria-expanded={canvasToolsOpen}
+                aria-haspopup="menu"
+                onClick={() => setCanvasToolsOpen((current) => !current)}
               >
-                <Plus className="h-4 w-4" />
-                {pendingCanvasFrame ? t('addCanvasFrameArmed') : t('addCanvasFrame')}
+                <Ellipsis className="h-4 w-4" />
+                {t('canvasTools')}
               </Button>
-              <Button
-                id="connectCanvasSessions"
-                variant={connectionMode ? 'default' : 'outline'}
-                onClick={toggleCanvasConnectionMode}
-              >
-                <GitBranch className="h-4 w-4" />
-                {connectionMode ? t('canvasConnectArmed') : t('canvasConnect')}
-              </Button>
-              <Button id="addCanvasTodo" variant="outline" onClick={addCanvasTodo}>
-                <ListTodo className="h-4 w-4" />
-                {t('addCanvasTodo')}
-              </Button>
-              <Button id="groupEndpoints" onClick={groupEndpoints} disabled={groupableEndpointCount < 2}>
-                <Grid2X2 className="h-4 w-4" />
-                {groupableEndpointCount > 0 ? `${t('groupEndpoints')} ${groupableEndpointCount}` : t('groupEndpoints')}
-              </Button>
-              <Button
-                id="collectIdleCmd"
-                variant="outline"
-                onClick={collectIdleCommandLines}
-                disabled={idleCommandLineCount === 0}
-              >
-                <Archive className="h-4 w-4" />
-                {idleCommandLineCount > 0 ? `${t('collectIdleCmd')} ${idleCommandLineCount}` : t('collectIdleCmd')}
-              </Button>
-            </div>
-            <div
-              className="canvas-arrange-tool"
-              onPointerDown={(event) => {
-                event.stopPropagation();
-                closeCanvasContextMenu();
-              }}
-            >
-              <Button id="arrangeGrid" onClick={arrangeGrid}>
-                <LayoutGrid className="h-4 w-4" />
-                {t('arrange')}
-              </Button>
-              <Button id="arrangeByTag" variant="outline" onClick={arrangeByTag}>
-                <Tags className="h-4 w-4" />
-                {t('arrangeByTag')}
-              </Button>
+              {canvasToolsOpen && (
+                <div id="canvasToolsMenu" className="compact-menu-panel canvas-tools-menu-panel" role="menu" aria-label={t('canvasTools')}>
+                  <CompactMenuItem
+                    active={pendingCanvasFrame}
+                    Icon={Plus}
+                    role="menuitem"
+                    onClick={() => {
+                      setCanvasToolsOpen(false);
+                      toggleCanvasFrameMode();
+                    }}
+                  >
+                    {pendingCanvasFrame ? t('addCanvasFrameArmed') : t('addCanvasFrame')}
+                  </CompactMenuItem>
+                  <CompactMenuItem
+                    active={connectionMode}
+                    Icon={GitBranch}
+                    role="menuitem"
+                    onClick={() => {
+                      setCanvasToolsOpen(false);
+                      toggleCanvasConnectionMode();
+                    }}
+                  >
+                    {connectionMode ? t('canvasConnectArmed') : t('canvasConnect')}
+                  </CompactMenuItem>
+                  <CompactMenuItem
+                    Icon={ListTodo}
+                    role="menuitem"
+                    onClick={() => {
+                      setCanvasToolsOpen(false);
+                      addCanvasTodo();
+                    }}
+                  >
+                    {t('addCanvasTodo')}
+                  </CompactMenuItem>
+                  <div className="compact-menu-separator" />
+                  <CompactMenuItem
+                    disabled={groupableEndpointCount < 2}
+                    Icon={Grid2X2}
+                    role="menuitem"
+                    onClick={() => {
+                      setCanvasToolsOpen(false);
+                      groupEndpoints();
+                    }}
+                  >
+                    {groupableEndpointCount > 0 ? `${t('groupEndpoints')} ${groupableEndpointCount}` : t('groupEndpoints')}
+                  </CompactMenuItem>
+                  <CompactMenuItem
+                    disabled={idleCommandLineCount === 0}
+                    Icon={Archive}
+                    role="menuitem"
+                    onClick={() => {
+                      setCanvasToolsOpen(false);
+                      collectIdleCommandLines();
+                    }}
+                  >
+                    {idleCommandLineCount > 0 ? `${t('collectIdleCmd')} ${idleCommandLineCount}` : t('collectIdleCmd')}
+                  </CompactMenuItem>
+                  <div className="compact-menu-separator" />
+                  <CompactMenuItem
+                    Icon={LayoutGrid}
+                    role="menuitem"
+                    onClick={() => {
+                      setCanvasToolsOpen(false);
+                      arrangeGrid();
+                    }}
+                  >
+                    {t('arrange')}
+                  </CompactMenuItem>
+                  <CompactMenuItem
+                    Icon={Tags}
+                    role="menuitem"
+                    onClick={() => {
+                      setCanvasToolsOpen(false);
+                      arrangeByTag();
+                    }}
+                  >
+                    {t('arrangeByTag')}
+                  </CompactMenuItem>
+                </div>
+              )}
             </div>
             <CanvasContextMenu
               groupableEndpointCount={groupableEndpointCount}
@@ -18659,7 +19794,8 @@ export default function App() {
                   onConnectionPortPointerDown={handleSessionConnectionPortPointerDown}
                   onExpandPanel={expandPanel}
                   onMove={updateEndpointGroup}
-                  onPanelTitleChange={(id, title) => updatePanel(id, { title })}
+                  onPanelRename={renamePanel}
+                  onPanelTitleChange={(id, title) => updatePanel(id, { title, titleEdited: true })}
                   onPanelTitleCommit={commitPanelTitle}
                   onSelectToggle={toggleEndpointSelection}
                   onUngroup={ungroupEndpointGroup}
@@ -18672,6 +19808,7 @@ export default function App() {
                   key={panel.id}
                   panel={panel}
                   active={visible && panel.id === activeId}
+                  autoCompactEnabled={terminalAutoCompact}
                   language={language}
                   runtimeNow={runtimeNow}
                   scale={view.scale}
@@ -18680,6 +19817,7 @@ export default function App() {
                   theme={theme}
                   visible={visible}
                   selected={selectedEndpointIds.has(panel.id)}
+                  temporaryInput={temporaryInputPanelId === panel.id}
                   commandTargeted={panel.id === commandDockTargetId}
                   connectionMode={connectionMode}
                   pendingConnectionSourceId={pendingConnectionSourceId}
@@ -18696,15 +19834,19 @@ export default function App() {
                   onAgentOpenFiles={openAgentWorkspaceFiles}
                   onAgentOpenReview={openAgentDiffReview}
                   onAgentSetQuickTarget={prepareAgentUtilityTarget}
+                  onPasteImages={pasteImagesIntoTerminal}
                   onMinimize={minimizePanel}
                   onMove={updatePanel}
                   onResize={updatePanel}
                   onRestart={restartTerminal}
+                  onRename={renamePanel}
                   onModelChange={switchPanelModel}
                   onSelectToggle={toggleEndpointSelection}
+                  onTemporaryInputEnd={endTemporaryPanelInput}
+                  onTemporaryInputStart={startTemporaryPanelInput}
                   onTagChange={changePanelTag}
                   onTerminalInput={handleTerminalInput}
-                  onTitleChange={(id, title) => updatePanel(id, { title })}
+                  onTitleChange={(id, title) => updatePanel(id, { title, titleEdited: true })}
                   onTitleCommit={commitPanelTitle}
                   registerTerminal={registerTerminal}
                 />
@@ -18739,14 +19881,11 @@ export default function App() {
 
             <CanvasSessionStatusQueue
               activeId={activeId}
-              className={cn(
-                commandDockVisible && !commandDockPosition && (
-                  commandDockCollapsed ? 'is-above-collapsed-dock' : 'is-above-expanded-dock'
-                )
-              )}
+              className={cn(commandDockVisible && 'is-above-command-dock')}
               commandTargetId={commandDockTargetId}
               language={language}
               onFocusSession={focusSessionFromReview}
+              onRenameSession={renamePanel}
               onRefresh={refreshCanvasSessionStatusQueue}
               panels={commandDockPanels}
               refreshStamp={canvasStatusRefreshAt}
@@ -18774,10 +19913,12 @@ export default function App() {
             normalizeInsertPath={normalizePromptFilePath}
             onClose={() => setWorkspaceTreeOpen(false)}
             onCopy={copyWorkspaceTree}
+            onCopyNodePath={copyWorkspaceTreeNodePath}
             onInsertNode={handleWorkspaceTreeNodeInsert}
             onInsertSelected={insertSelectedWorkspaceTreePath}
             onLoadNodeChildren={loadWorkspaceTreeNodeChildren}
             onOpen={openWorkspaceTree}
+            onOpenNodeInVSCode={openWorkspaceTreeNodeInVSCode}
             onRefresh={refreshWorkspaceTree}
             onSelectNode={selectWorkspaceTreeNode}
             open={workspaceTreeOpen}
@@ -18855,7 +19996,6 @@ export default function App() {
         <FloatingCommandDock
           activeId={activeId}
           canPanelReceiveInput={canPanelReceiveInput}
-          collapsed={commandDockCollapsed}
           commandHistory={commandDockHistory}
           contextItems={commandDockContextItems}
           contextLoading={commandDockContextLoading}
@@ -18872,18 +20012,9 @@ export default function App() {
           )}
           inputRef={commandDockInputRef}
           message={commandDockValue}
-          position={commandDockPosition}
           quickPrompts={quickPrompts}
           quickPromptsLoading={quickPromptsLoading}
           quickPromptsPath={quickPromptsPath}
-          renderProviderBadge={(panel) => (
-            <CliProviderBadge
-              className="shrink-0 px-2 py-0 text-[11px]"
-              language={language}
-              provider={getPanelCliProvider(panel)}
-            />
-          )}
-          sendShortcutLabel={commandDockShortcutLabels.send}
           onDispatchTasks={dispatchCommandDockTasks}
           onDispatchModeChange={changeCommandDockDispatchMode}
           onExport={exportTerminal}
@@ -18903,7 +20034,6 @@ export default function App() {
           onInputPaste={handleCommandDockPaste}
           onInputScroll={handleCommandDockInputScroll}
           onInputSelect={handleCommandDockInputSelect}
-          onPositionChange={setCommandDockPosition}
           onOpenWorkspaceTree={openWorkspaceTree}
           onQuickPromptDelete={deleteCommandDockPrompt}
           onQuickPromptSave={saveCommandDockPrompt}
@@ -18911,7 +20041,6 @@ export default function App() {
           onRemoveContextItem={removeCommandDockContextItem}
           onSend={sendCommandDockInput}
           onSkillMentionSelect={insertCommandDockSkillMention}
-          onToggleCollapsed={toggleCommandDockCollapsed}
           onToggleSessionReview={toggleSessionReview}
           onTargetChange={selectCommandDockTarget}
           panels={commandDockPanels}
@@ -18928,9 +20057,11 @@ export default function App() {
       <PromptManagementDialog
         loading={quickPromptsLoading}
         onDelete={deleteQuickPromptRecord}
+        onChooseAttachments={bridge.chooseQuickPromptAttachments}
         onOpenChange={setPromptManagerOpen}
         onReload={loadQuickPrompts}
         onSave={saveQuickPromptRecord}
+        onCopy={(text) => writeClipboardText(text)}
         open={promptManagerOpen}
         prompts={quickPrompts}
         promptsPath={quickPromptsPath}
@@ -18952,10 +20083,14 @@ export default function App() {
         onLanguageChange={setLanguage}
         onOpenChange={setCodexOpen}
         onSessionHeaderVisibilityChange={changeSessionHeaderVisibility}
+        onTerminalAutoCompactChange={setTerminalAutoCompact}
+        onTerminalPanelDefaultSizeChange={(size) => setTerminalPanelDefaultSize(normalizeTerminalPanelDefaultSize(size))}
         open={codexOpen}
         sessionHeaderVisibility={sessionHeaderVisibility}
         showToast={showToast}
         t={t}
+        terminalAutoCompact={terminalAutoCompact}
+        terminalPanelDefaultSize={terminalPanelDefaultSize}
       />
 
       <NewSessionDialog
@@ -19041,7 +20176,7 @@ export default function App() {
           id="toast"
           className={cn(
             'toast',
-            commandDockVisible && (commandDockCollapsed ? 'is-lifted-compact' : 'is-lifted')
+            commandDockVisible && 'is-lifted-compact'
           )}
         >
           <CardContent className="p-0">{toast}</CardContent>

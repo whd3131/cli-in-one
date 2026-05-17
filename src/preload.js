@@ -1,9 +1,97 @@
-const { clipboard, contextBridge, ipcRenderer } = require('electron');
+const { clipboard, contextBridge, ipcRenderer, webUtils } = require('electron');
+const { fileURLToPath } = require('url');
 
 function subscribe(channel, callback) {
   const listener = (_event, payload) => callback(payload);
   ipcRenderer.on(channel, listener);
   return () => ipcRenderer.removeListener(channel, listener);
+}
+
+function normalizeClipboardFilePath(value) {
+  const text = String(value || '').replace(/\0+$/g, '').trim();
+  if (!text) {
+    return '';
+  }
+
+  if (/^file:/i.test(text)) {
+    try {
+      return fileURLToPath(text);
+    } catch {
+      return '';
+    }
+  }
+
+  return text.replace(/^"(.*)"$/s, '$1').trim();
+}
+
+function parseClipboardFilePathList(value) {
+  const text = String(value || '').replace(/^\uFEFF/, '');
+  return text
+    .split(/\0+|\r\n|\n|\r/g)
+    .map(normalizeClipboardFilePath)
+    .filter(Boolean);
+}
+
+function readClipboardFormatText(format, encoding = 'utf8') {
+  try {
+    const buffer = clipboard.readBuffer(format);
+    if (buffer && buffer.length > 0) {
+      return buffer.toString(encoding);
+    }
+  } catch {
+    // Some clipboard formats are exposed as strings only.
+  }
+
+  try {
+    return clipboard.read(format) || '';
+  } catch {
+    return '';
+  }
+}
+
+function readClipboardFilePaths() {
+  const paths = [];
+  const seen = new Set();
+  const appendPaths = (items) => {
+    for (const item of Array.isArray(items) ? items : []) {
+      const filePath = normalizeClipboardFilePath(item);
+      const key = process.platform === 'win32' ? filePath.toLowerCase() : filePath;
+      if (!filePath || seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      paths.push(filePath);
+    }
+  };
+
+  appendPaths(parseClipboardFilePathList(readClipboardFormatText('FileNameW', 'utf16le')));
+  appendPaths(parseClipboardFilePathList(readClipboardFormatText('FileName', 'utf8')));
+  appendPaths(parseClipboardFilePathList(readClipboardFormatText('text/uri-list', 'utf8')));
+
+  return paths;
+}
+
+function readClipboardImage() {
+  try {
+    const image = clipboard.readImage();
+    if (!image || image.isEmpty()) {
+      return null;
+    }
+
+    const bytes = image.toPNG();
+    if (!bytes || bytes.length === 0) {
+      return null;
+    }
+
+    return {
+      fileName: `clipboard-image-${Date.now()}.png`,
+      mimeType: 'image/png',
+      bytes: new Uint8Array(bytes)
+    };
+  } catch {
+    return null;
+  }
 }
 
 contextBridge.exposeInMainWorld('cliBridge', {
@@ -17,6 +105,7 @@ contextBridge.exposeInMainWorld('cliBridge', {
   writeUsageRates: (rates) => ipcRenderer.invoke('usage:write-rates', rates),
   clearUsageRecords: () => ipcRenderer.invoke('usage:clear-records'),
   openWorkspacePath: (targetPath) => ipcRenderer.invoke('workspace:open-path', targetPath),
+  openWorkspacePathInVSCode: (targetPath) => ipcRenderer.invoke('workspace:open-path-vscode', targetPath),
   openExternalUrl: (targetUrl) => ipcRenderer.invoke('workspace:open-url', targetUrl),
   openImageToolsPage: () => ipcRenderer.invoke('image-tools:open'),
   readWorkspaceTree: (options) => ipcRenderer.invoke('workspace:read-tree', options),
@@ -53,7 +142,18 @@ contextBridge.exposeInMainWorld('cliBridge', {
     clipboard.writeText(typeof text === 'string' ? text : '');
     return true;
   },
+  readClipboardFilePaths,
+  readClipboardImage,
+  getPathForFile: (file) => {
+    try {
+      return webUtils?.getPathForFile?.(file) || '';
+    } catch {
+      return '';
+    }
+  },
   saveCommandDockImage: (payload) => ipcRenderer.invoke('command-dock:save-image', payload),
+  saveCommandDockImagePath: (filePath) => ipcRenderer.invoke('command-dock:save-image-path', filePath),
+  chooseQuickPromptAttachments: (options) => ipcRenderer.invoke('quick-prompts:choose-attachments', options),
   listQuickPrompts: () => ipcRenderer.invoke('quick-prompts:list'),
   saveQuickPrompt: (payload) => ipcRenderer.invoke('quick-prompts:save', payload),
   deleteQuickPrompt: (id) => ipcRenderer.invoke('quick-prompts:delete', id),

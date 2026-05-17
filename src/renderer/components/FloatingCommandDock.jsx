@@ -1,19 +1,15 @@
 import React from 'react';
 import {
   Check,
-  ChevronDown,
   Clipboard,
   Download,
   File,
   FolderOpen,
-  GripHorizontal,
-  History,
   Image,
   Link2,
-  Maximize2,
   MessageSquarePlus,
-  Minimize2,
   Play,
+  Plus,
   RefreshCw,
   Save,
   Search,
@@ -24,8 +20,7 @@ import {
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
-import { Select } from '@/components/ui/select';
+import { Card } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
@@ -44,50 +39,18 @@ function CommandDockIconButton({ label, children, ...props }) {
   );
 }
 
-function CommandDockTooltipButton({ children, tooltip, tooltipClassName, ...props }) {
+function CommandDockMenuButton({ active = false, children, className, Icon, ...props }) {
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button title={tooltip} {...props}>
-          {children}
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent className={cn('max-w-[260px] whitespace-normal leading-5', tooltipClassName)}>
-        {tooltip}
-      </TooltipContent>
-    </Tooltip>
+    <button
+      type="button"
+      className={cn('command-dock-menu-item', active && 'is-active', className)}
+      {...props}
+    >
+      {Icon && <Icon className="command-dock-menu-icon" />}
+      <span>{children}</span>
+      {active && <Check className="command-dock-menu-check" />}
+    </button>
   );
-}
-
-const commandDockViewportMargin = 10;
-
-function isCommandDockPosition(position) {
-  return Number.isFinite(position?.left) && Number.isFinite(position?.top);
-}
-
-function areCommandDockPositionsEqual(a, b) {
-  return isCommandDockPosition(a)
-    && isCommandDockPosition(b)
-    && Math.abs(a.left - b.left) < 0.5
-    && Math.abs(a.top - b.top) < 0.5;
-}
-
-function clampCommandDockPosition(position, rect) {
-  if (!isCommandDockPosition(position) || typeof window === 'undefined') {
-    return null;
-  }
-
-  const width = Number.isFinite(rect?.width)
-    ? rect.width
-    : Math.min(980, Math.max(0, window.innerWidth - 20));
-  const height = Number.isFinite(rect?.height) ? rect.height : 72;
-  const maxLeft = Math.max(commandDockViewportMargin, window.innerWidth - width - commandDockViewportMargin);
-  const maxTop = Math.max(commandDockViewportMargin, window.innerHeight - height - commandDockViewportMargin);
-
-  return {
-    left: Math.min(Math.max(position.left, commandDockViewportMargin), maxLeft),
-    top: Math.min(Math.max(position.top, commandDockViewportMargin), maxTop)
-  };
 }
 
 function CommandDockSkillMentionMenu({
@@ -180,6 +143,7 @@ function formatCommandDockHistoryPreview(value) {
 function getCommandDockContextIcon(kind) {
   switch (kind) {
     case 'file':
+    case 'attachment':
       return File;
     case 'image':
       return Image;
@@ -197,6 +161,8 @@ function getCommandDockContextLabel(kind, t) {
   switch (kind) {
     case 'file':
       return t('floatingComposerContextFile');
+    case 'attachment':
+      return t('floatingComposerContextAttachment');
     case 'image':
       return t('floatingComposerContextImage');
     case 'url':
@@ -222,7 +188,6 @@ function getCommandDockContextTitle(item, t) {
 export function FloatingCommandDock({
   activeId,
   canPanelReceiveInput,
-  collapsed,
   commandHistory = [],
   contextItems = [],
   contextLoading = false,
@@ -235,7 +200,6 @@ export function FloatingCommandDock({
   getQuickPromptTitle,
   inputRef,
   message,
-  position,
   onDispatchModeChange,
   onDispatchTasks,
   onExport,
@@ -259,19 +223,15 @@ export function FloatingCommandDock({
   onQuickPromptSave,
   onQuickPromptSelect,
   onOpenWorkspaceTree,
-  onPositionChange,
   onRemoveContextItem,
   onSend,
   onSkillMentionSelect,
   onTargetChange,
-  onToggleCollapsed,
   onToggleSessionReview,
   panels,
   quickPrompts = [],
   quickPromptsLoading = false,
   quickPromptsPath = '',
-  renderProviderBadge,
-  sendShortcutLabel = 'Enter',
   skillMention,
   skillMentionHasAnyItems,
   skillMentionItems,
@@ -281,19 +241,12 @@ export function FloatingCommandDock({
   t
 }) {
   const dockRef = React.useRef(null);
-  const dragCleanupRef = React.useRef(null);
+  const dockActionsRootRef = React.useRef(null);
   const historyRootRef = React.useRef(null);
-  const targetMenuRootRef = React.useRef(null);
-  const [dragging, setDragging] = React.useState(false);
+  const [actionsMenuOpen, setActionsMenuOpen] = React.useState(false);
   const [historyOpen, setHistoryOpen] = React.useState(false);
-  const [quickPromptSelectResetKey, setQuickPromptSelectResetKey] = React.useState(0);
-  const [selectedQuickPromptValue, setSelectedQuickPromptValue] = React.useState('');
-  const [targetMenuOpen, setTargetMenuOpen] = React.useState(false);
+  const [contextExpanded, setContextExpanded] = React.useState(false);
   const [targetFilter, setTargetFilter] = React.useState('');
-  const [targetMenuLayout, setTargetMenuLayout] = React.useState({
-    maxHeight: 342,
-    placement: 'up'
-  });
   const targetPanel = panels.find((panel) => panel.id === targetId) || null;
   const targetReady = canPanelReceiveInput?.(targetPanel);
   const normalizedContextItems = Array.isArray(contextItems)
@@ -341,16 +294,10 @@ export function FloatingCommandDock({
       value: String(record.id || `${label}-${record.createdAt || record.updatedAt || index}`)
     };
   });
-  const selectedQuickPromptOption = selectedQuickPromptValue
-    ? quickPromptOptions.find((option) => option.value === selectedQuickPromptValue) || null
-    : null;
   const normalizedCommandHistory = Array.isArray(commandHistory)
     ? commandHistory.map((item) => String(item || '')).filter((item) => item.trim()).slice(0, 10)
     : [];
   const hasCommandHistory = normalizedCommandHistory.length > 0;
-  const targetSummary = targetPanel
-    ? t('floatingComposerSubtitle', { name: targetPanel.title })
-    : t('floatingComposerUnavailable');
   const buildTargetOption = (panel) => {
     const executionState = getPanelExecutionState?.(panel) || 'idle';
     const providerLabel = getPanelProviderLabel?.(panel) || '';
@@ -382,86 +329,10 @@ export function FloatingCommandDock({
     };
   };
   const targetOptions = panels.map(buildTargetOption);
-  const targetPanelOption = targetPanel ? buildTargetOption(targetPanel) : null;
   const normalizedTargetFilter = targetFilter.trim().toLocaleLowerCase();
   const visibleTargetOptions = normalizedTargetFilter
     ? targetOptions.filter((option) => option.searchText.includes(normalizedTargetFilter))
     : targetOptions;
-  const targetSelectorTitle = targetPanelOption
-    ? [
-      t('floatingComposerTargetSelector'),
-      targetPanelOption.title,
-      targetPanelOption.providerLabel,
-      targetPanelOption.stateLabel,
-      targetPanelOption.cwd
-    ].filter(Boolean).join('\n')
-    : t('floatingComposerUnavailable');
-  const dockPosition = isCommandDockPosition(position) ? position : null;
-  const dockStyle = dockPosition
-    ? { left: `${dockPosition.left}px`, top: `${dockPosition.top}px` }
-    : undefined;
-
-  const clampCurrentDockPosition = React.useCallback((nextPosition) => {
-    const rect = dockRef.current?.getBoundingClientRect();
-    return clampCommandDockPosition(nextPosition, rect);
-  }, []);
-
-  const updateTargetMenuLayout = React.useCallback(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-
-    const rect = targetMenuRootRef.current?.getBoundingClientRect();
-    if (!rect) {
-      return;
-    }
-
-    const menuGap = 6;
-    const maxMenuHeight = 342;
-    const minMenuHeight = 96;
-    const spaceAbove = Math.max(0, rect.top - commandDockViewportMargin - menuGap);
-    const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - commandDockViewportMargin - menuGap);
-    const placement = spaceAbove >= spaceBelow ? 'up' : 'down';
-    const availableHeight = placement === 'up' ? spaceAbove : spaceBelow;
-    const maxHeight = Math.max(minMenuHeight, Math.min(maxMenuHeight, availableHeight));
-
-    setTargetMenuLayout((current) => (
-      current.placement === placement && Math.abs(current.maxHeight - maxHeight) < 1
-        ? current
-        : { maxHeight, placement }
-    ));
-  }, []);
-
-  React.useLayoutEffect(() => {
-    if (!dockPosition || typeof onPositionChange !== 'function') {
-      return;
-    }
-
-    const nextPosition = clampCurrentDockPosition(dockPosition);
-    if (nextPosition && !areCommandDockPositionsEqual(nextPosition, dockPosition)) {
-      onPositionChange(nextPosition);
-    }
-  }, [clampCurrentDockPosition, collapsed, dockPosition, onPositionChange]);
-
-  React.useEffect(() => {
-    if (!dockPosition || typeof onPositionChange !== 'function') {
-      return undefined;
-    }
-
-    const handleWindowResize = () => {
-      const nextPosition = clampCurrentDockPosition(dockPosition);
-      if (nextPosition && !areCommandDockPositionsEqual(nextPosition, dockPosition)) {
-        onPositionChange(nextPosition);
-      }
-    };
-
-    window.addEventListener('resize', handleWindowResize);
-    return () => window.removeEventListener('resize', handleWindowResize);
-  }, [clampCurrentDockPosition, dockPosition, onPositionChange]);
-
-  React.useEffect(() => () => {
-    dragCleanupRef.current?.(false);
-  }, []);
 
   React.useEffect(() => {
     if (!historyOpen) {
@@ -488,18 +359,18 @@ export function FloatingCommandDock({
   }, [historyOpen]);
 
   React.useEffect(() => {
-    if (!targetMenuOpen) {
+    if (!actionsMenuOpen) {
       return undefined;
     }
 
     const closeOnPointerDown = (event) => {
-      if (!targetMenuRootRef.current?.contains(event.target)) {
-        setTargetMenuOpen(false);
+      if (!dockActionsRootRef.current?.contains(event.target)) {
+        setActionsMenuOpen(false);
       }
     };
     const closeOnEscape = (event) => {
       if (event.key === 'Escape') {
-        setTargetMenuOpen(false);
+        setActionsMenuOpen(false);
       }
     };
 
@@ -509,139 +380,19 @@ export function FloatingCommandDock({
       document.removeEventListener('pointerdown', closeOnPointerDown, true);
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [targetMenuOpen]);
-
-  React.useLayoutEffect(() => {
-    if (targetMenuOpen) {
-      updateTargetMenuLayout();
-    }
-  }, [dockPosition, targetMenuOpen, updateTargetMenuLayout]);
+  }, [actionsMenuOpen]);
 
   React.useEffect(() => {
-    if (!targetMenuOpen) {
-      return undefined;
-    }
-
-    window.addEventListener('resize', updateTargetMenuLayout);
-    return () => window.removeEventListener('resize', updateTargetMenuLayout);
-  }, [targetMenuOpen, updateTargetMenuLayout]);
-
-  React.useEffect(() => {
-    if (collapsed && historyOpen) {
+    if (!actionsMenuOpen) {
       setHistoryOpen(false);
     }
-  }, [collapsed, historyOpen]);
+  }, [actionsMenuOpen]);
 
   React.useEffect(() => {
-    if (collapsed && targetMenuOpen) {
-      setTargetMenuOpen(false);
-    }
-  }, [collapsed, targetMenuOpen]);
-
-  React.useEffect(() => {
-    if (panels.length === 0 && targetMenuOpen) {
-      setTargetMenuOpen(false);
-    }
-  }, [panels.length, targetMenuOpen]);
-
-  React.useEffect(() => {
-    if (!targetMenuOpen && targetFilter) {
+    if (!actionsMenuOpen && targetFilter) {
       setTargetFilter('');
     }
-  }, [targetFilter, targetMenuOpen]);
-
-  const handleDockDragStart = (event) => {
-    if (event.button !== 0 || typeof onPositionChange !== 'function') {
-      return;
-    }
-
-    const rect = dockRef.current?.getBoundingClientRect();
-    if (!rect) {
-      return;
-    }
-
-    event.preventDefault();
-    event.stopPropagation();
-    dragCleanupRef.current?.(false);
-
-    const startPosition = clampCommandDockPosition({
-      left: dockPosition?.left ?? rect.left,
-      top: dockPosition?.top ?? rect.top
-    }, rect);
-
-    if (!startPosition) {
-      return;
-    }
-
-    onPositionChange(startPosition);
-    setDragging(true);
-
-    const dragOffset = {
-      left: event.clientX - startPosition.left,
-      top: event.clientY - startPosition.top
-    };
-    const previousBodyUserSelect = document.body.style.userSelect;
-    const previousBodyCursor = document.body.style.cursor;
-    document.body.style.userSelect = 'none';
-    document.body.style.cursor = 'grabbing';
-    let dragActive = true;
-
-    const handlePointerMove = (moveEvent) => {
-      if (moveEvent.pointerId !== event.pointerId) {
-        return;
-      }
-
-      moveEvent.preventDefault();
-      const nextPosition = clampCommandDockPosition({
-        left: moveEvent.clientX - dragOffset.left,
-        top: moveEvent.clientY - dragOffset.top
-      }, dockRef.current?.getBoundingClientRect());
-
-      if (nextPosition) {
-        onPositionChange(nextPosition);
-      }
-    };
-
-    const cleanupDrag = (updateState = true) => {
-      if (!dragActive) {
-        return;
-      }
-
-      dragActive = false;
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', stopDrag);
-      window.removeEventListener('pointercancel', stopDrag);
-      document.body.style.userSelect = previousBodyUserSelect;
-      document.body.style.cursor = previousBodyCursor;
-      dragCleanupRef.current = null;
-      if (updateState) {
-        setDragging(false);
-      }
-    };
-
-    const stopDrag = (upEvent) => {
-      if (upEvent.pointerId !== event.pointerId) {
-        return;
-      }
-
-      cleanupDrag();
-    };
-
-    dragCleanupRef.current = cleanupDrag;
-    window.addEventListener('pointermove', handlePointerMove, { passive: false });
-    window.addEventListener('pointerup', stopDrag);
-    window.addEventListener('pointercancel', stopDrag);
-  };
-
-  const handleDockPositionReset = (event) => {
-    if (typeof onPositionChange !== 'function') {
-      return;
-    }
-
-    event.preventDefault();
-    event.stopPropagation();
-    onPositionChange(null);
-  };
+  }, [actionsMenuOpen, targetFilter]);
 
   const handleInputKeyDown = (event) => {
     onInputKeyDown?.(event);
@@ -649,12 +400,13 @@ export function FloatingCommandDock({
 
   const handleHistorySelect = (entry) => {
     setHistoryOpen(false);
+    setActionsMenuOpen(false);
     onHistorySelect?.(entry);
   };
 
   const handleTargetSelect = (id) => {
     onTargetChange?.(id);
-    setTargetMenuOpen(false);
+    setActionsMenuOpen(false);
   };
 
   const handleQuickPromptOptionSelect = (nextValue) => {
@@ -663,552 +415,422 @@ export function FloatingCommandDock({
       return;
     }
 
-    setSelectedQuickPromptValue(option.value);
-    setQuickPromptSelectResetKey((current) => current + 1);
+    setActionsMenuOpen(false);
     onQuickPromptSelect?.(option.record);
   };
 
-  const handleQuickPromptDeleteClick = () => {
-    if (!selectedQuickPromptOption) {
+  const handleQuickPromptDeleteClick = (option) => {
+    if (!option) {
       return;
     }
 
-    onQuickPromptDelete?.(selectedQuickPromptOption.record);
+    onQuickPromptDelete?.(option.record);
   };
+
+  const runActionMenuHandler = (handler, ...args) => {
+    setActionsMenuOpen(false);
+    handler?.(...args);
+  };
+
+  const plusButtonLabel = hasContextItems
+    ? `${t('floatingComposerMoreActions')} · ${t('floatingComposerContextCount', { count: normalizedContextItems.length })}`
+    : t('floatingComposerMoreActions');
 
   return (
     <div
       ref={dockRef}
-      className={cn(
-        'pointer-events-none fixed z-[7000] w-[calc(100vw-20px)] max-w-[980px] md:w-[calc(100vw-32px)]',
-        dockPosition ? '' : 'bottom-3 left-1/2 -translate-x-1/2 md:bottom-[18px]',
-        dragging && 'command-dock-is-dragging'
-      )}
-      style={dockStyle}
+      className="pointer-events-none fixed bottom-3 left-1/2 z-[7000] w-[calc(100vw-20px)] max-w-[980px] -translate-x-1/2 md:bottom-[18px] md:w-[calc(100vw-32px)]"
     >
       <Card
-        className={cn(
-          'command-dock-card pointer-events-auto overflow-visible shadow-lg',
-          collapsed && 'is-collapsed'
-        )}
+        className="command-dock-card command-dock-simple pointer-events-auto overflow-visible shadow-lg"
         onPointerDown={(event) => event.stopPropagation()}
         onWheel={(event) => event.stopPropagation()}
         onDragOver={onInputDragOver}
         onDrop={onInputDrop}
       >
-        <CardHeader className={cn('px-3', collapsed ? 'gap-1 py-2.5' : 'gap-2 py-3')}>
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0 flex flex-1 flex-col gap-1">
-              <div className="flex min-w-0 items-center gap-2">
-                <div
-                  className="command-dock-drag-handle min-w-0 flex shrink-0 items-center gap-2"
-                  title={t('floatingComposerDrag')}
-                  onDoubleClick={handleDockPositionReset}
-                  onPointerDown={handleDockDragStart}
-                >
-                  <GripHorizontal className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <CardTitle className="shrink-0 text-sm">{t('floatingComposerTitle')}</CardTitle>
-                </div>
-                {!collapsed && quickPromptOptions.length > 0 && (
-                  <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                    <Select
-                      key={quickPromptSelectResetKey}
-                      ariaLabel={t('quickPrompts')}
-                      className="h-8 min-w-[112px] max-w-[min(240px,38vw)] flex-1 px-2 text-xs"
-                      onValueChange={handleQuickPromptOptionSelect}
-                      options={quickPromptOptions.map(({ label, value }) => ({
-                        label,
-                        value
-                      }))}
-                      placeholder={t('quickPrompts')}
-                      popupClassName="min-w-[14rem]"
-                      title={quickPromptsPath || t('quickPrompts')}
-                    />
-                    <CommandDockIconButton
-                      label={selectedQuickPromptOption
-                        ? `${t('quickPromptDelete')}: ${selectedQuickPromptOption.label}`
-                        : t('quickPromptDelete')}
-                      variant="ghost"
-                      className="h-8 w-8 shrink-0"
-                      onClick={handleQuickPromptDeleteClick}
-                      disabled={!selectedQuickPromptOption || quickPromptsLoading}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </CommandDockIconButton>
-                  </div>
-                )}
-              </div>
-              <CardDescription className="truncate pl-6 text-xs" title={targetPanel?.cwd || undefined}>
-                {targetSummary}
-              </CardDescription>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              {targetPanel && renderProviderBadge?.(targetPanel)}
-              <CommandDockIconButton
-                label={t(collapsed ? 'floatingComposerExpand' : 'floatingComposerCollapse')}
-                variant="ghost"
-                className="h-8 w-8 shrink-0"
-                aria-expanded={!collapsed}
-                onClick={onToggleCollapsed}
+        <div className="command-dock-simple-row">
+          <div className="command-dock-actions-menu-root command-dock-plus-root" ref={dockActionsRootRef}>
+            <CommandDockIconButton
+              label={plusButtonLabel}
+              variant={actionsMenuOpen ? 'primary' : 'outline'}
+              className="command-dock-plus-button"
+              aria-controls={actionsMenuOpen ? 'commandDockActionsMenu' : undefined}
+              aria-expanded={actionsMenuOpen}
+              aria-haspopup="dialog"
+              onClick={() => setActionsMenuOpen((current) => !current)}
+            >
+              <Plus className="h-4 w-4" />
+            </CommandDockIconButton>
+
+            {actionsMenuOpen && (
+              <div
+                id="commandDockActionsMenu"
+                className="command-dock-actions-menu command-dock-plus-menu"
+                role="dialog"
+                aria-label={t('floatingComposerMoreActions')}
               >
-                {collapsed ? <Maximize2 className="h-4 w-4" /> : <Minimize2 className="h-4 w-4" />}
-              </CommandDockIconButton>
-            </div>
-          </div>
-        </CardHeader>
+                <div className="command-dock-plus-section">
+                  <div className="command-dock-menu-label">{t('floatingComposerTarget')}</div>
+                  <label className="command-dock-target-search command-dock-plus-search">
+                    <Search className="h-3.5 w-3.5" />
+                    <input
+                      type="search"
+                      value={targetFilter}
+                      placeholder={t('floatingComposerTargetSearch')}
+                      aria-label={t('floatingComposerTargetSearch')}
+                      autoFocus
+                      onChange={(event) => setTargetFilter(event.target.value)}
+                    />
+                  </label>
 
-        <div
-          className="command-dock-panel-shell"
-          data-open={collapsed ? 'false' : 'true'}
-          aria-hidden={collapsed}
-          inert={collapsed ? true : undefined}
-        >
-          <div className="command-dock-panel-slide">
-            <CardContent className="grid gap-2 px-3 pb-3 pt-0">
-              <div className="relative">
-                <Textarea
-                  ref={inputRef}
-                  rows={1}
-                  spellCheck={false}
-                  value={message}
-                  placeholder={targetPanel
-                    ? t('floatingComposerPlaceholder', { name: targetPanel.title })
-                    : t('floatingComposerUnavailable')}
-                  className="min-h-[108px] max-h-[260px] resize-none pb-12 pr-36 font-mono text-sm leading-6"
-                  aria-autocomplete="list"
-                  aria-controls={skillMention?.open ? 'commandDockSkillMentionList' : undefined}
-                  aria-expanded={Boolean(skillMention?.open)}
-                  aria-activedescendant={
-                    skillMention?.open && skillMentionItems.length > 0
-                      ? `commandDockSkillMentionItem-${skillMention.selectedIndex || 0}`
-                      : undefined
-                  }
-                  onChange={onInputChange}
-                  onCompositionEnd={onInputCompositionEnd}
-                  onCompositionStart={onInputCompositionStart}
-                  onDragOver={onInputDragOver}
-                  onDrop={onInputDrop}
-                  onKeyDown={handleInputKeyDown}
-                  onPaste={onInputPaste}
-                  onScroll={onInputScroll}
-                  onSelect={onInputSelect}
-                />
-                <div ref={historyRootRef} className="command-dock-history-root">
-                  <CommandDockIconButton
-                    label={hasCommandHistory ? t('floatingComposerHistory') : t('floatingComposerHistoryEmpty')}
-                    variant={historyOpen ? 'primary' : 'outline'}
-                    className="absolute bottom-2 right-[72px] h-8 w-8 shadow-sm"
-                    aria-controls={historyOpen ? 'commandDockHistoryList' : undefined}
-                    aria-expanded={historyOpen}
-                    aria-haspopup="menu"
-                    onClick={() => setHistoryOpen((current) => !current)}
-                    disabled={!hasCommandHistory}
-                  >
-                    <History className="h-4 w-4" />
-                  </CommandDockIconButton>
-                  {historyOpen && (
+                  {visibleTargetOptions.length > 0 ? (
                     <div
-                      id="commandDockHistoryList"
-                      className="command-dock-history-menu"
-                      role="menu"
-                      aria-label={t('floatingComposerHistory')}
-                      onMouseDown={(event) => event.preventDefault()}
+                      className="command-dock-target-list command-dock-plus-target-list"
+                      role="listbox"
+                      aria-label={t('floatingComposerTarget')}
                     >
-                      <div className="command-dock-history-menu-header">
-                        <span>{t('floatingComposerHistory')}</span>
-                        <Badge variant="outline" className="command-dock-history-count">
-                          {normalizedCommandHistory.length}/10
-                        </Badge>
-                      </div>
-                      <div className="command-dock-history-list">
-                        {normalizedCommandHistory.length > 0 ? (
-                          normalizedCommandHistory.map((entry, index) => {
-                            const preview = formatCommandDockHistoryPreview(entry);
+                      {visibleTargetOptions.map((option) => {
+                        const detail = [
+                          option.providerLabel,
+                          option.stateLabel,
+                          option.cwd
+                        ].filter(Boolean).join(' · ');
+                        const optionTitle = [
+                          option.title,
+                          option.providerLabel,
+                          option.stateLabel,
+                          option.current ? t('floatingComposerCurrent') : '',
+                          option.cwd
+                        ].filter(Boolean).join('\n');
 
-                            return (
-                              <button
-                                key={`${entry}-${index}`}
-                                type="button"
-                                className="command-dock-history-item"
-                                role="menuitem"
-                                title={entry}
-                                onClick={() => handleHistorySelect(entry)}
-                              >
-                                <span className="command-dock-history-index">{index + 1}</span>
-                                <span className="command-dock-history-text">
-                                  {preview || t('floatingComposerHistoryUntitled')}
-                                </span>
-                              </button>
-                            );
-                          })
-                        ) : (
-                          <div className="command-dock-history-empty">{t('floatingComposerHistoryEmpty')}</div>
-                        )}
-                      </div>
+                        return (
+                          <button
+                            key={option.panel.id}
+                            type="button"
+                            className={cn(
+                              'command-dock-target-option',
+                              option.targeted && 'is-selected',
+                              option.current && 'is-current',
+                              option.sendDisabled && 'is-unavailable'
+                            )}
+                            role="option"
+                            aria-selected={option.targeted}
+                            title={optionTitle}
+                            onClick={() => handleTargetSelect(option.panel.id)}
+                          >
+                            <span className={cn('terminal-endpoint-dot', `is-${option.executionState}`)} />
+                            <span className="command-dock-target-option-copy">
+                              <span className="command-dock-target-option-title-row">
+                                <span className="command-dock-target-option-title">{option.title}</span>
+                                {option.current && (
+                                  <span className="command-dock-target-current">{t('floatingComposerCurrent')}</span>
+                                )}
+                              </span>
+                              <span className="command-dock-target-option-meta">{detail}</span>
+                            </span>
+                            {option.targeted && <Check className="h-4 w-4" />}
+                          </button>
+                        );
+                      })}
                     </div>
+                  ) : (
+                    <div className="command-dock-target-empty">{t('floatingComposerTargetNoMatch')}</div>
                   )}
                 </div>
-                {skillMention?.open && (
-                  <CommandDockSkillMentionMenu
-                    activeIndex={skillMention.selectedIndex || 0}
-                    hasAnyItems={skillMentionHasAnyItems}
-                    items={skillMentionItems}
-                    loading={skillMentionLoading}
-                    onSelect={onSkillMentionSelect}
-                    position={skillMention.position}
-                    t={t}
-                  />
-                )}
-                <Button
-                  type="button"
-                  variant="primary"
-                  size="sm"
-                  className="absolute bottom-2 right-2 h-8 px-3 shadow-sm"
-                  onClick={onSend}
-                  disabled={!canSend}
-                >
-                  {t('floatingComposerSend')}
-                </Button>
-              </div>
-              <div className={cn('command-dock-context-pack', !hasContextItems && 'is-empty')}>
-                <div className="command-dock-context-pack-header">
-                  <span>{t('floatingComposerContextPack')}</span>
-                  <Badge variant="outline" className="command-dock-context-count">
-                    {hasContextItems
-                      ? t('floatingComposerContextCount', { count: normalizedContextItems.length })
-                      : t('floatingComposerContextEmpty')}
-                  </Badge>
-                </div>
-                {hasContextItems && (
-                  <div className="command-dock-context-list">
-                    {normalizedContextItems.map((item) => {
-                      const Icon = getCommandDockContextIcon(item.kind);
-                      const label = getCommandDockContextLabel(item.kind, t);
-                      const title = getCommandDockContextTitle(item, t);
-                      const detail = [
-                        label,
-                        item.path,
-                        item.url,
-                        item.panelTitle,
-                        item.truncated ? 'truncated' : ''
-                      ].filter(Boolean).join('\n');
 
-                      return (
-                        <div
-                          key={item.id || `${item.kind}:${title}`}
-                          className="command-dock-context-chip"
-                          title={detail || title}
-                        >
-                          <Icon className="h-3.5 w-3.5" />
-                          <span className="command-dock-context-kind">{label}</span>
-                          <span className="command-dock-context-title">{title}</span>
+                {quickPromptOptions.length > 0 && (
+                  <div className="command-dock-plus-section">
+                    <div className="command-dock-menu-label">{t('quickPrompts')}</div>
+                    <div className="command-dock-plus-prompt-list">
+                      {quickPromptOptions.map((option) => (
+                        <div className="command-dock-plus-prompt-row" key={option.value}>
                           <button
                             type="button"
-                            className="command-dock-context-remove"
-                            aria-label={`${t('floatingComposerContextRemove')}: ${title}`}
-                            title={t('floatingComposerContextRemove')}
-                            onClick={() => onRemoveContextItem?.(item.id)}
+                            className="command-dock-plus-prompt-button"
+                            title={option.label}
+                            onClick={() => handleQuickPromptOptionSelect(option.value)}
                           >
-                            <X className="h-3.5 w-3.5" />
+                            {option.label}
                           </button>
+                          <CommandDockIconButton
+                            label={`${t('quickPromptDelete')}: ${option.label}`}
+                            variant="ghost"
+                            className="h-8 w-8 shrink-0"
+                            onClick={() => handleQuickPromptDeleteClick(option)}
+                            disabled={quickPromptsLoading}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </CommandDockIconButton>
                         </div>
-                      );
-                    })}
+                      ))}
+                    </div>
                   </div>
                 )}
-              </div>
-            </CardContent>
 
-            <CardFooter className="command-dock-footer border-t px-3 py-2">
-              <div
-                className="command-dock-target-root command-dock-toolbar-target command-dock-footer-toolbar"
-                ref={targetMenuRootRef}
-              >
-                <button
-                  type="button"
-                  className="command-dock-target-trigger"
-                  aria-controls={targetMenuOpen ? 'commandDockTargetMenu' : undefined}
-                  aria-expanded={targetMenuOpen}
-                  aria-haspopup="listbox"
-                  aria-label={t('floatingComposerTargetSelector')}
-                  title={targetSelectorTitle}
-                  onClick={() => setTargetMenuOpen((current) => !current)}
-                  disabled={panels.length === 0}
-                >
-                  {targetPanelOption ? (
-                    <>
-                      <span className={cn('terminal-endpoint-dot', `is-${targetPanelOption.executionState}`)} />
-                      <span className="command-dock-target-copy">
-                        <span className="command-dock-target-title-row">
-                          <span className="command-dock-target-title">{targetPanelOption.title}</span>
-                          {targetPanelOption.current && (
-                            <span className="command-dock-target-current">{t('floatingComposerCurrent')}</span>
-                          )}
-                        </span>
-                        <span className="command-dock-target-meta">
-                          {[targetPanelOption.providerLabel, targetPanelOption.stateLabel].filter(Boolean).join(' · ')}
-                        </span>
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <SquareTerminal className="h-4 w-4 text-muted-foreground" />
-                      <span className="command-dock-target-copy">
-                        <span className="command-dock-target-title-row">
-                          <span className="command-dock-target-title">{t('floatingComposerUnavailable')}</span>
-                        </span>
-                        <span className="command-dock-target-meta">{t('floatingComposerTarget')}</span>
-                      </span>
-                    </>
-                  )}
-                  <span className="command-dock-target-count">
-                    {t('floatingComposerTargetCount', { count: panels.length })}
-                  </span>
-                  <ChevronDown className={cn('command-dock-target-chevron h-4 w-4', targetMenuOpen && 'is-open')} />
-                </button>
-
-                {targetMenuOpen && (
-                  <div
-                    id="commandDockTargetMenu"
-                    className={cn(
-                      'command-dock-target-menu',
-                      targetMenuLayout.placement === 'up' ? 'is-above' : 'is-below'
-                    )}
-                    role="dialog"
-                    aria-label={t('floatingComposerTargetMenu')}
-                    style={{ maxHeight: `${targetMenuLayout.maxHeight}px` }}
-                  >
-                    <label className="command-dock-target-search">
-                      <Search className="h-3.5 w-3.5" />
-                      <input
-                        type="search"
-                        value={targetFilter}
-                        placeholder={t('floatingComposerTargetSearch')}
-                        aria-label={t('floatingComposerTargetSearch')}
-                        autoFocus
-                        onChange={(event) => setTargetFilter(event.target.value)}
-                      />
-                    </label>
-
-                    {visibleTargetOptions.length > 0 ? (
-                      <div
-                        className="command-dock-target-list"
-                        role="listbox"
-                        aria-label={t('floatingComposerTarget')}
-                      >
-                        {visibleTargetOptions.map((option) => {
-                          const detail = [
-                            option.providerLabel,
-                            option.stateLabel,
-                            option.cwd
-                          ].filter(Boolean).join(' · ');
-                          const optionTitle = [
-                            option.title,
-                            option.providerLabel,
-                            option.stateLabel,
-                            option.current ? t('floatingComposerCurrent') : '',
-                            option.cwd
-                          ].filter(Boolean).join('\n');
+                {hasCommandHistory && (
+                  <div className="command-dock-plus-section" ref={historyRootRef}>
+                    <button
+                      type="button"
+                      className="command-dock-plus-section-header"
+                      aria-expanded={historyOpen}
+                      onClick={() => setHistoryOpen((current) => !current)}
+                    >
+                      <span>{t('floatingComposerHistory')}</span>
+                      <Badge variant="outline" className="command-dock-history-count">
+                        {normalizedCommandHistory.length}/10
+                      </Badge>
+                    </button>
+                    {historyOpen && (
+                      <div className="command-dock-history-list command-dock-plus-history-list">
+                        {normalizedCommandHistory.map((entry, index) => {
+                          const preview = formatCommandDockHistoryPreview(entry);
 
                           return (
                             <button
-                              key={option.panel.id}
+                              key={`${entry}-${index}`}
                               type="button"
-                              className={cn(
-                                'command-dock-target-option',
-                                option.targeted && 'is-selected',
-                                option.current && 'is-current',
-                                option.sendDisabled && 'is-unavailable'
-                              )}
-                              role="option"
-                              aria-selected={option.targeted}
-                              title={optionTitle}
-                              onClick={() => handleTargetSelect(option.panel.id)}
+                              className="command-dock-history-item"
+                              role="menuitem"
+                              title={entry}
+                              onClick={() => handleHistorySelect(entry)}
                             >
-                              <span className={cn('terminal-endpoint-dot', `is-${option.executionState}`)} />
-                              <span className="command-dock-target-option-copy">
-                                <span className="command-dock-target-option-title-row">
-                                  <span className="command-dock-target-option-title">{option.title}</span>
-                                  {option.current && (
-                                    <span className="command-dock-target-current">{t('floatingComposerCurrent')}</span>
-                                  )}
-                                </span>
-                                <span className="command-dock-target-option-meta">{detail}</span>
+                              <span className="command-dock-history-index">{index + 1}</span>
+                              <span className="command-dock-history-text">
+                                {preview || t('floatingComposerHistoryUntitled')}
                               </span>
-                              {option.targeted && <Check className="h-4 w-4" />}
                             </button>
                           );
                         })}
                       </div>
-                    ) : (
-                      <div className="command-dock-target-empty">{t('floatingComposerTargetNoMatch')}</div>
                     )}
                   </div>
                 )}
-              </div>
-              <div className="command-dock-footer-actions">
-                <div
-                  className="command-dock-context-actions"
-                  role="group"
-                  aria-label={t('floatingComposerContextPack')}
-                >
-                  <CommandDockIconButton
-                    label={t('floatingComposerContextAddFile')}
-                    variant="outline"
-                    className="h-7 w-7"
-                    onClick={onOpenWorkspaceTree}
-                    disabled={typeof onOpenWorkspaceTree !== 'function'}
-                  >
-                    <FolderOpen className="h-3.5 w-3.5" />
-                  </CommandDockIconButton>
-                  <CommandDockIconButton
-                    label={t('floatingComposerContextAddTerminalSelection')}
-                    variant="outline"
-                    className="h-7 w-7"
-                    onClick={onAddTerminalSelectionContext}
-                    disabled={typeof onAddTerminalSelectionContext !== 'function'}
-                  >
-                    <SquareTerminal className="h-3.5 w-3.5" />
-                  </CommandDockIconButton>
-                  <CommandDockIconButton
-                    label={t('floatingComposerContextAddLatestOutput')}
-                    variant="outline"
-                    className="h-7 w-7"
-                    onClick={onAddLatestOutputContext}
-                    disabled={typeof onAddLatestOutputContext !== 'function' || !targetPanel}
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                  </CommandDockIconButton>
-                  <CommandDockIconButton
-                    label={t('floatingComposerContextAddSelectedText')}
-                    variant="outline"
-                    className="h-7 w-7"
-                    onClick={onAddSelectedTextContext}
-                    disabled={typeof onAddSelectedTextContext !== 'function'}
-                  >
-                    <Clipboard className="h-3.5 w-3.5" />
-                  </CommandDockIconButton>
-                  <CommandDockIconButton
-                    label={t('floatingComposerContextAddUrl')}
-                    variant="outline"
-                    className="h-7 w-7"
-                    onClick={onAddUrlContext}
-                    disabled={typeof onAddUrlContext !== 'function' || contextLoading}
-                  >
-                    {contextLoading ? (
-                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Link2 className="h-3.5 w-3.5" />
-                    )}
-                  </CommandDockIconButton>
-                  <CommandDockIconButton
-                    label={t('floatingComposerContextClear')}
-                    variant="ghost"
-                    className="h-7 w-7"
-                    onClick={onClearContext}
-                    disabled={!hasContextItems || typeof onClearContext !== 'function'}
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </CommandDockIconButton>
+
+                <div className="command-dock-plus-section">
+                  <div className="command-dock-menu-label">{t('floatingComposerContextPack')}</div>
+                  <div className="command-dock-plus-action-grid">
+                    <CommandDockMenuButton
+                      role="menuitem"
+                      Icon={FolderOpen}
+                      disabled={typeof onOpenWorkspaceTree !== 'function'}
+                      onClick={() => runActionMenuHandler(onOpenWorkspaceTree)}
+                    >
+                      {t('floatingComposerContextAddFile')}
+                    </CommandDockMenuButton>
+                    <CommandDockMenuButton
+                      role="menuitem"
+                      Icon={Clipboard}
+                      disabled={typeof onAddSelectedTextContext !== 'function'}
+                      onClick={() => runActionMenuHandler(onAddSelectedTextContext)}
+                    >
+                      {t('floatingComposerContextAddSelectedText')}
+                    </CommandDockMenuButton>
+                    <CommandDockMenuButton
+                      role="menuitem"
+                      Icon={SquareTerminal}
+                      disabled={typeof onAddTerminalSelectionContext !== 'function'}
+                      onClick={() => runActionMenuHandler(onAddTerminalSelectionContext)}
+                    >
+                      {t('floatingComposerContextAddTerminalSelection')}
+                    </CommandDockMenuButton>
+                    <CommandDockMenuButton
+                      role="menuitem"
+                      Icon={RefreshCw}
+                      disabled={typeof onAddLatestOutputContext !== 'function' || !targetPanel}
+                      onClick={() => runActionMenuHandler(onAddLatestOutputContext)}
+                    >
+                      {t('floatingComposerContextAddLatestOutput')}
+                    </CommandDockMenuButton>
+                    <CommandDockMenuButton
+                      role="menuitem"
+                      Icon={Link2}
+                      disabled={typeof onAddUrlContext !== 'function' || contextLoading}
+                      onClick={() => runActionMenuHandler(onAddUrlContext)}
+                    >
+                      {t('floatingComposerContextAddUrl')}
+                    </CommandDockMenuButton>
+                    <CommandDockMenuButton
+                      role="menuitem"
+                      Icon={X}
+                      disabled={!hasContextItems || typeof onClearContext !== 'function'}
+                      onClick={() => runActionMenuHandler(onClearContext)}
+                    >
+                      {t('floatingComposerContextClear')}
+                    </CommandDockMenuButton>
+                  </div>
                 </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1.5 px-2"
-                  title={quickPromptsPath || t('quickPromptSave')}
-                  aria-label={t('quickPromptSave')}
-                  onClick={onQuickPromptSave}
-                  disabled={!canSaveQuickPrompt}
-                >
-                  <Save className="h-3.5 w-3.5" />
-                  {t('quickPromptSave')}
-                </Button>
-                <div
-                  className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-border bg-background p-0.5"
-                  role="group"
-                  aria-label={t('floatingComposerDispatchMode')}
-                >
+
+                {hasContextItems && (
+                  <div className="command-dock-plus-section">
+                    <button
+                      type="button"
+                      className="command-dock-plus-section-header"
+                      aria-expanded={contextExpanded}
+                      onClick={() => setContextExpanded((current) => !current)}
+                    >
+                      <span>{t('floatingComposerContextPack')}</span>
+                      <Badge variant="outline" className="command-dock-context-count">
+                        {t('floatingComposerContextCount', { count: normalizedContextItems.length })}
+                      </Badge>
+                    </button>
+                    {contextExpanded && (
+                      <div className="command-dock-context-list command-dock-plus-context-list">
+                        {normalizedContextItems.map((item) => {
+                          const Icon = getCommandDockContextIcon(item.kind);
+                          const label = getCommandDockContextLabel(item.kind, t);
+                          const title = getCommandDockContextTitle(item, t);
+                          const detail = [
+                            label,
+                            item.path,
+                            item.url,
+                            item.panelTitle,
+                            item.truncated ? 'truncated' : ''
+                          ].filter(Boolean).join('\n');
+
+                          return (
+                            <div
+                              key={item.id || `${item.kind}:${title}`}
+                              className="command-dock-context-chip"
+                              title={detail || title}
+                            >
+                              <Icon className="h-3.5 w-3.5" />
+                              <span className="command-dock-context-kind">{label}</span>
+                              <span className="command-dock-context-title">{title}</span>
+                              <button
+                                type="button"
+                                className="command-dock-context-remove"
+                                aria-label={`${t('floatingComposerContextRemove')}: ${title}`}
+                                title={t('floatingComposerContextRemove')}
+                                onClick={() => onRemoveContextItem?.(item.id)}
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="command-dock-plus-section">
+                  <div className="command-dock-menu-label">{t('floatingComposerDispatchMode')}</div>
                   {dispatchModeOptions.map((option) => {
                     const active = option.id === normalizedDispatchMode;
                     const OptionIcon = option.Icon;
 
                     return (
-                      <CommandDockTooltipButton
+                      <CommandDockMenuButton
                         key={option.id}
-                        type="button"
-                        variant={active ? 'primary' : 'ghost'}
-                        size="sm"
-                        className={cn(
-                          'h-6 rounded-sm px-2 text-[11px]',
-                          !active && 'text-muted-foreground'
-                        )}
-                        tooltip={option.tooltip}
-                        aria-label={`${t('floatingComposerDispatchMode')}: ${option.label}`}
+                        role="menuitemradio"
+                        Icon={OptionIcon}
+                        active={active}
                         aria-pressed={active}
-                        onClick={() => onDispatchModeChange?.(option.id)}
+                        title={option.tooltip}
+                        onClick={() => runActionMenuHandler(onDispatchModeChange, option.id)}
                       >
-                        <OptionIcon className="h-3.5 w-3.5" />
                         {option.label}
-                      </CommandDockTooltipButton>
+                      </CommandDockMenuButton>
                     );
                   })}
+                  <div className="command-dock-menu-separator" />
+                  <CommandDockMenuButton
+                    role="menuitem"
+                    Icon={Play}
+                    title={dispatchTasksTitle}
+                    disabled={!canDispatchTasks}
+                    onClick={() => runActionMenuHandler(onDispatchTasks)}
+                  >
+                    {dispatchingTasks ? t('floatingComposerDispatchingTasks') : t('floatingComposerDispatchTasks')}
+                  </CommandDockMenuButton>
+                  <CommandDockMenuButton
+                    role="menuitem"
+                    Icon={Save}
+                    title={quickPromptsPath || t('quickPromptSave')}
+                    disabled={!canSaveQuickPrompt}
+                    onClick={() => runActionMenuHandler(onQuickPromptSave)}
+                  >
+                    {t('quickPromptSave')}
+                  </CommandDockMenuButton>
+                  <CommandDockMenuButton
+                    role="menuitem"
+                    Icon={SquareTerminal}
+                    active={sessionReviewOpen}
+                    onClick={() => runActionMenuHandler(onToggleSessionReview)}
+                  >
+                    {t('sessionReview')}
+                  </CommandDockMenuButton>
+                  <CommandDockMenuButton
+                    role="menuitem"
+                    Icon={Download}
+                    disabled={!canExport}
+                    onClick={() => canExport && runActionMenuHandler(onExport, targetPanel.id)}
+                  >
+                    {t('exportSession')}
+                  </CommandDockMenuButton>
+                  <CommandDockMenuButton
+                    role="menuitem"
+                    Icon={FolderOpen}
+                    disabled={!canExport}
+                    onClick={() => canExport && runActionMenuHandler(onExportCustom, targetPanel.id)}
+                  >
+                    {t('exportSessionCustom')}
+                  </CommandDockMenuButton>
                 </div>
-                <CommandDockTooltipButton
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1.5 px-2"
-                  tooltip={dispatchTasksTitle}
-                  aria-label={t('floatingComposerDispatchTasks')}
-                  onClick={onDispatchTasks}
-                  disabled={!canDispatchTasks}
-                >
-                  <Play className="h-3.5 w-3.5" />
-                  {dispatchingTasks ? t('floatingComposerDispatchingTasks') : t('floatingComposerDispatchTasks')}
-                </CommandDockTooltipButton>
-                <Button
-                  type="button"
-                  variant={sessionReviewOpen ? 'primary' : 'outline'}
-                  size="sm"
-                  className="h-7 gap-1.5 px-2"
-                  title={t(sessionReviewOpen ? 'sessionReviewClose' : 'sessionReviewOpen')}
-                  aria-label={t(sessionReviewOpen ? 'sessionReviewClose' : 'sessionReviewOpen')}
-                  aria-pressed={sessionReviewOpen}
-                  onClick={onToggleSessionReview}
-                >
-                  <SquareTerminal className="h-3.5 w-3.5" />
-                  {t('sessionReview')}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1.5 px-2"
-                  title={t('exportSession')}
-                  aria-label={t('exportSession')}
-                  onClick={() => canExport && onExport(targetPanel.id)}
-                  disabled={!canExport}
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  {t('exportSession')}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1.5 px-2"
-                  title={t('exportSessionCustom')}
-                  aria-label={t('exportSessionCustom')}
-                  onClick={() => canExport && onExportCustom(targetPanel.id)}
-                  disabled={!canExport}
-                >
-                  <FolderOpen className="h-3.5 w-3.5" />
-                  {t('exportSessionCustom')}
-                </Button>
               </div>
-            </CardFooter>
+            )}
           </div>
+
+          <div className="command-dock-simple-input-wrap">
+            <Textarea
+              ref={inputRef}
+              rows={1}
+              spellCheck={false}
+              value={message}
+              placeholder={targetPanel
+                ? t('floatingComposerPlaceholder', { name: targetPanel.title })
+                : t('floatingComposerUnavailable')}
+              className="command-dock-simple-textarea resize-none font-mono text-sm leading-5"
+              aria-autocomplete="list"
+              aria-controls={skillMention?.open ? 'commandDockSkillMentionList' : undefined}
+              aria-expanded={Boolean(skillMention?.open)}
+              aria-activedescendant={
+                skillMention?.open && skillMentionItems.length > 0
+                  ? `commandDockSkillMentionItem-${skillMention.selectedIndex || 0}`
+                  : undefined
+              }
+              onChange={onInputChange}
+              onCompositionEnd={onInputCompositionEnd}
+              onCompositionStart={onInputCompositionStart}
+              onDragOver={onInputDragOver}
+              onDrop={onInputDrop}
+              onKeyDown={handleInputKeyDown}
+              onPaste={onInputPaste}
+              onScroll={onInputScroll}
+              onSelect={onInputSelect}
+            />
+            {skillMention?.open && (
+              <CommandDockSkillMentionMenu
+                activeIndex={skillMention.selectedIndex || 0}
+                hasAnyItems={skillMentionHasAnyItems}
+                items={skillMentionItems}
+                loading={skillMentionLoading}
+                onSelect={onSkillMentionSelect}
+                position={skillMention.position}
+                t={t}
+              />
+            )}
+          </div>
+
+          <Button
+            type="button"
+            variant="primary"
+            className="command-dock-simple-send"
+            onClick={onSend}
+            disabled={!canSend}
+          >
+            {t('floatingComposerSend')}
+          </Button>
         </div>
       </Card>
     </div>

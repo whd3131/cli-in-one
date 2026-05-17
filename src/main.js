@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { fileURLToPath } = require('url');
+const { fileURLToPath, pathToFileURL } = require('url');
 const TOML = require('@iarna/toml');
 const JSON5 = require('json5');
 const cliProviders = require('./shared/cli-providers.json');
@@ -59,6 +59,8 @@ const AGENT_BRIDGE_RESPONSE_TTL_MS = 30 * 60 * 1000;
 const IMAGE_TOOLS_HTML_FILE_NAME = 'image-tools.html';
 const QUICK_PROMPTS_MAX_ITEMS = 80;
 const QUICK_PROMPT_MAX_LENGTH = 20000;
+const QUICK_PROMPT_ATTACHMENT_MAX_ITEMS = 12;
+const QUICK_PROMPT_ATTACHMENT_TEXT_MAX_CHARS = 80000;
 const COMMAND_PRESETS_MAX_ITEMS = 80;
 const COMMAND_PRESET_MAX_COMMAND_LENGTH = 20000;
 const IMAGE_API_CONFIG_FILE_NAME = 'image-api-config.json';
@@ -2811,6 +2813,154 @@ async function readWorkspaceFileContext(options = {}) {
   };
 }
 
+async function readLocalFileContext(filePath, options = {}) {
+  const rawPath = asString(filePath).trim();
+  if (!rawPath) {
+    throw new Error('请选择要加入的文件。');
+  }
+  const resolvedPath = path.resolve(rawPath);
+
+  const stats = await fs.promises.stat(resolvedPath).catch((error) => {
+    if (error && error.code === 'ENOENT') {
+      throw new Error('选择的文件不存在。');
+    }
+    throw error;
+  });
+
+  if (!stats.isFile()) {
+    throw new Error('只能添加文件。');
+  }
+
+  const bytesToRead = Math.min(stats.size, AGENT_CONTEXT_FILE_MAX_BYTES);
+  const buffer = await readFileHead(resolvedPath, bytesToRead);
+  const binary = looksLikeBinaryBuffer(buffer);
+  const normalized = binary
+    ? { text: '', truncated: false }
+    : normalizeAgentContextText(buffer.toString('utf8'), options.maxChars || QUICK_PROMPT_ATTACHMENT_TEXT_MAX_CHARS);
+
+  return {
+    path: resolvedPath,
+    name: path.basename(resolvedPath),
+    size: stats.size,
+    binary,
+    truncated: normalized.truncated || stats.size > AGENT_CONTEXT_FILE_MAX_BYTES,
+    content: normalized.text
+  };
+}
+
+function inferPromptAttachmentMimeType(filePath) {
+  const extension = path.extname(asString(filePath)).trim().toLowerCase();
+  const mimeTypes = new Map([
+    ['.csv', 'text/csv'],
+    ['.html', 'text/html'],
+    ['.htm', 'text/html'],
+    ['.json', 'application/json'],
+    ['.jsonl', 'application/jsonl'],
+    ['.log', 'text/plain'],
+    ['.md', 'text/markdown'],
+    ['.mdx', 'text/markdown'],
+    ['.pdf', 'application/pdf'],
+    ['.rtf', 'application/rtf'],
+    ['.toml', 'application/toml'],
+    ['.tsv', 'text/tab-separated-values'],
+    ['.txt', 'text/plain'],
+    ['.xml', 'application/xml'],
+    ['.yaml', 'application/yaml'],
+    ['.yml', 'application/yaml'],
+    ['.doc', 'application/msword'],
+    ['.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+    ['.ppt', 'application/vnd.ms-powerpoint'],
+    ['.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+    ['.xls', 'application/vnd.ms-excel'],
+    ['.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']
+  ]);
+
+  return mimeTypes.get(extension) || '';
+}
+
+async function createQuickPromptAttachmentFromPath(filePath, kindHint = '') {
+  const resolvedPath = path.resolve(asString(filePath).trim());
+  const stats = await fs.promises.stat(resolvedPath).catch((error) => {
+    if (error && error.code === 'ENOENT') {
+      throw new Error('选择的文件不存在。');
+    }
+    throw error;
+  });
+
+  if (!stats.isFile()) {
+    throw new Error('只能添加文件。');
+  }
+
+  const image = kindHint === 'image' || isSupportedImageFilePath(resolvedPath);
+  if (image) {
+    if (!isSupportedImageFilePath(resolvedPath)) {
+      throw new Error(`请选择图片文件：${path.basename(resolvedPath)}`);
+    }
+
+    const savedImage = await saveCommandDockImageAsset({
+      bytes: await fs.promises.readFile(resolvedPath),
+      fileName: path.basename(resolvedPath),
+      mimeType: inferImageMimeType(resolvedPath)
+    });
+
+    return {
+      id: crypto.randomUUID(),
+      kind: 'image',
+      title: savedImage.name || path.basename(resolvedPath),
+      path: savedImage.path,
+      content: '',
+      size: savedImage.size,
+      mimeType: inferImageMimeType(savedImage.path),
+      truncated: false,
+      binary: true
+    };
+  }
+
+  const file = await readLocalFileContext(resolvedPath, {
+    maxChars: QUICK_PROMPT_ATTACHMENT_TEXT_MAX_CHARS
+  });
+
+  return {
+    id: crypto.randomUUID(),
+    kind: 'file',
+    title: file.name,
+    path: file.path,
+    content: file.content,
+    size: file.size,
+    mimeType: inferPromptAttachmentMimeType(file.path),
+    truncated: file.truncated,
+    binary: file.binary
+  };
+}
+
+async function chooseQuickPromptAttachments(options = {}) {
+  const kind = normalizeQuickPromptAttachmentKind(options.kind);
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: kind === 'image' ? 'Choose prompt images' : 'Choose prompt documents',
+    properties: ['openFile', 'multiSelections'],
+    filters: kind === 'image'
+      ? [
+          { name: 'Images', extensions: ['apng', 'avif', 'bmp', 'gif', 'jpg', 'jpeg', 'png', 'svg', 'webp'] },
+          { name: 'All files', extensions: ['*'] }
+        ]
+      : [
+          { name: 'Documents', extensions: ['txt', 'md', 'mdx', 'json', 'jsonl', 'csv', 'tsv', 'toml', 'yaml', 'yml', 'xml', 'html', 'htm', 'log', 'pdf', 'doc', 'docx', 'rtf', 'ppt', 'pptx', 'xls', 'xlsx'] },
+          { name: 'All files', extensions: ['*'] }
+        ]
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return [];
+  }
+
+  const attachments = [];
+  for (const filePath of result.filePaths) {
+    attachments.push(await createQuickPromptAttachmentFromPath(filePath, kind));
+  }
+
+  return normalizeQuickPromptAttachments(attachments);
+}
+
 function decodeBasicHtmlEntities(value) {
   return asString(value)
     .replace(/&nbsp;/gi, ' ')
@@ -2989,6 +3139,120 @@ async function openLocalPath(targetPath) {
     throw new Error(result);
   }
 
+  return true;
+}
+
+function getVSCodeExecutableCandidates() {
+  const candidates = [];
+  const seen = new Set();
+  const appendCandidate = (candidatePath) => {
+    const normalizedPath = asString(candidatePath).trim();
+    if (!normalizedPath) {
+      return;
+    }
+
+    const resolvedPath = path.resolve(normalizedPath);
+    const key = process.platform === 'win32' ? resolvedPath.toLowerCase() : resolvedPath;
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    candidates.push(resolvedPath);
+  };
+
+  const pathValue = process.env.PATH || process.env.Path || '';
+  for (const pathEntry of pathValue.split(path.delimiter)) {
+    if (!pathEntry) {
+      continue;
+    }
+
+    appendCandidate(path.join(pathEntry, 'Code.exe'));
+    appendCandidate(path.resolve(pathEntry, '..', 'Code.exe'));
+    if (process.platform !== 'win32') {
+      appendCandidate(path.join(pathEntry, 'code'));
+    }
+  }
+
+  appendCandidate(process.env.LOCALAPPDATA && path.join(
+    process.env.LOCALAPPDATA,
+    'Programs',
+    'Microsoft VS Code',
+    'Code.exe'
+  ));
+  appendCandidate(process.env.ProgramFiles && path.join(
+    process.env.ProgramFiles,
+    'Microsoft VS Code',
+    'Code.exe'
+  ));
+  appendCandidate(process.env['ProgramFiles(x86)'] && path.join(
+    process.env['ProgramFiles(x86)'],
+    'Microsoft VS Code',
+    'Code.exe'
+  ));
+  appendCandidate(process.env.LOCALAPPDATA && path.join(
+    process.env.LOCALAPPDATA,
+    'Programs',
+    'Microsoft VS Code Insiders',
+    'Code - Insiders.exe'
+  ));
+  appendCandidate(process.env.ProgramFiles && path.join(
+    process.env.ProgramFiles,
+    'Microsoft VS Code Insiders',
+    'Code - Insiders.exe'
+  ));
+
+  return candidates;
+}
+
+async function findVSCodeExecutable() {
+  for (const candidatePath of getVSCodeExecutableCandidates()) {
+    try {
+      const stats = await fs.promises.stat(candidatePath);
+      if (stats.isFile()) {
+        return candidatePath;
+      }
+    } catch {
+      // Keep searching known PATH and install locations.
+    }
+  }
+
+  return '';
+}
+
+function openPathWithVSCodeExecutable(executablePath, targetPath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executablePath, ['--reuse-window', targetPath], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    });
+
+    child.once('error', (error) => {
+      reject(new Error(`启动 VSCode 失败：${error.message}`));
+    });
+
+    child.once('spawn', () => {
+      child.unref();
+      resolve(true);
+    });
+  });
+}
+
+async function openPathInVSCode(targetPath) {
+  const normalizedPath = asString(targetPath).trim();
+  if (!normalizedPath) {
+    throw new Error('没有可打开的路径。');
+  }
+
+  const resolvedPath = path.resolve(normalizedPath);
+  const executablePath = await findVSCodeExecutable();
+  if (executablePath) {
+    return openPathWithVSCodeExecutable(executablePath, resolvedPath);
+  }
+
+  const fileUrl = pathToFileURL(resolvedPath).toString().replace(/^file:\/+/i, '');
+  await electronShell.openExternal(`vscode://file/${fileUrl}`);
   return true;
 }
 
@@ -4335,6 +4599,33 @@ async function saveCommandDockImageAsset(options = {}) {
     name: path.basename(filePath),
     size: stats.size
   };
+}
+
+async function saveCommandDockImagePathAsset(filePath) {
+  const resolvedPath = path.resolve(asString(filePath).trim());
+  if (!resolvedPath) {
+    throw new Error('图片路径为空。');
+  }
+
+  const stats = await fs.promises.stat(resolvedPath).catch((error) => {
+    if (error && error.code === 'ENOENT') {
+      throw new Error('图片文件不存在。');
+    }
+    throw error;
+  });
+
+  if (!stats.isFile()) {
+    throw new Error('只能保存图片文件。');
+  }
+  if (!isSupportedImageFilePath(resolvedPath)) {
+    throw new Error('请选择图片文件。');
+  }
+
+  return saveCommandDockImageAsset({
+    bytes: await fs.promises.readFile(resolvedPath),
+    fileName: path.basename(resolvedPath),
+    mimeType: inferImageMimeType(resolvedPath)
+  });
 }
 
 async function saveAgentAvatarAsset(options = {}) {
@@ -6807,6 +7098,70 @@ function normalizeQuickPromptTitle(value, prompt, fallback = 'Prompt') {
   return (title || deriveQuickPromptTitle(prompt, fallback)).slice(0, 120);
 }
 
+function normalizeQuickPromptAttachmentKind(value) {
+  const kind = asString(value).trim().toLowerCase();
+  return kind === 'image' ? 'image' : 'file';
+}
+
+function normalizeQuickPromptAttachment(record, index = 0) {
+  if (!record || typeof record !== 'object') {
+    return null;
+  }
+
+  const pathValue = asString(record.path).trim();
+  const content = normalizeAgentContextText(
+    record.content,
+    QUICK_PROMPT_ATTACHMENT_TEXT_MAX_CHARS
+  );
+  const title = asString(record.title || record.name).trim()
+    || (pathValue ? path.basename(pathValue) : '');
+
+  if (!pathValue && !content.text) {
+    return null;
+  }
+
+  return {
+    id: asString(record.id).trim() || `attachment-${Date.now()}-${index}-${crypto.randomBytes(3).toString('hex')}`,
+    kind: normalizeQuickPromptAttachmentKind(record.kind),
+    title,
+    path: pathValue,
+    content: content.text,
+    size: Number.isFinite(record.size) && record.size >= 0 ? record.size : null,
+    mimeType: asString(record.mimeType).trim(),
+    truncated: Boolean(record.truncated || content.truncated)
+  };
+}
+
+function normalizeQuickPromptAttachments(value) {
+  const attachments = [];
+  const seen = new Set();
+
+  for (const [index, record] of (Array.isArray(value) ? value : []).entries()) {
+    const attachment = normalizeQuickPromptAttachment(record, index);
+    if (!attachment) {
+      continue;
+    }
+
+    const key = [
+      attachment.kind,
+      attachment.path ? `path:${attachment.path.toLowerCase()}` : '',
+      attachment.content ? `content:${attachment.content.slice(0, 200)}` : '',
+      attachment.title
+    ].filter(Boolean).join(':');
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    attachments.push(attachment);
+    if (attachments.length >= QUICK_PROMPT_ATTACHMENT_MAX_ITEMS) {
+      break;
+    }
+  }
+
+  return attachments;
+}
+
 function normalizeQuickPromptRecord(record, index) {
   const prompt = normalizeQuickPromptContent(record?.prompt ?? record?.content);
   const id = asString(record?.id).trim() || createQuickPromptId();
@@ -6818,6 +7173,7 @@ function normalizeQuickPromptRecord(record, index) {
     id,
     title: normalizeQuickPromptTitle(record?.title ?? record?.name, prompt, `Prompt ${index + 1}`),
     prompt,
+    attachments: normalizeQuickPromptAttachments(record?.attachments),
     createdAt,
     updatedAt
   };
@@ -6913,6 +7269,7 @@ async function saveQuickPrompt(payload = {}) {
     id: existing?.id || requestedId || createQuickPromptId(),
     title: normalizeQuickPromptTitle(payload.title ?? payload.name, prompt, existing?.title || 'Prompt'),
     prompt,
+    attachments: normalizeQuickPromptAttachments(payload.attachments ?? existing?.attachments),
     createdAt: existing?.createdAt || Date.now(),
     updatedAt: Date.now()
   };
@@ -7666,6 +8023,10 @@ app.whenReady().then(async () => {
     return openLocalPath(targetPath);
   });
 
+  ipcMain.handle('workspace:open-path-vscode', (_event, targetPath) => {
+    return openPathInVSCode(targetPath);
+  });
+
   ipcMain.handle('workspace:open-url', (_event, targetUrl) => {
     return openExternalUrl(targetUrl);
   });
@@ -7836,6 +8197,14 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('command-dock:save-image', (_event, payload) => {
     return saveCommandDockImageAsset(payload || {});
+  });
+
+  ipcMain.handle('command-dock:save-image-path', (_event, filePath) => {
+    return saveCommandDockImagePathAsset(filePath);
+  });
+
+  ipcMain.handle('quick-prompts:choose-attachments', (_event, options = {}) => {
+    return chooseQuickPromptAttachments(options || {});
   });
 
   ipcMain.handle('quick-prompts:list', () => {

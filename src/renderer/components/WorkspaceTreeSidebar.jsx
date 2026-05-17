@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
+  Code2,
   Copy,
   ExternalLink,
   File,
@@ -17,7 +18,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils';
 import {
   formatWorkspaceTreeSummary,
-  getWorkspaceTreeInsertPath
+  getWorkspaceTreeDragPath,
+  getWorkspaceTreeInsertPath,
+  workspaceTreeFileDragType
 } from '@/lib/workspaceTree';
 
 function TreeIconButton({ label, children, ...props }) {
@@ -59,8 +62,10 @@ function WorkspaceTreeNode({
   loadingIds,
   node,
   normalizeInsertPath,
+  onCopyPath,
   onInsert,
   onLoadChildren,
+  onOpenContextMenu,
   onSelect,
   onToggle,
   selectedNodeId,
@@ -75,9 +80,12 @@ function WorkspaceTreeNode({
   const expanded = canExpand && expandedIds.has(node.id);
   const label = getWorkspaceTreeNodeLabel(node, t);
   const insertPath = getWorkspaceTreeInsertPath(node, normalizeInsertPath);
+  const dragPath = getWorkspaceTreeDragPath(node, normalizeInsertPath);
   const selectable = Boolean(insertPath);
+  const draggable = Boolean(dragPath);
   const selected = selectable && node?.id === selectedNodeId;
   const title = [node?.relativePath || label, node?.path].filter(Boolean).join('\n');
+  const absolutePath = String(node?.path || '').trim();
   const rowClassName = cn(
     'workspace-tree-row',
     directory && 'is-directory',
@@ -103,7 +111,7 @@ function WorkspaceTreeNode({
       {node?.link && <span className="workspace-tree-node-tag">{t('workspaceTreeLink')}</span>}
     </>
   );
-  const interactive = canExpand || selectable;
+  const interactive = canExpand || selectable || draggable;
   const handleClick = () => {
     if (canExpand) {
       onToggle(node);
@@ -118,6 +126,32 @@ function WorkspaceTreeNode({
     if (selectable) {
       onInsert?.(node);
     }
+  };
+  const handleContextMenu = (event) => {
+    if (!absolutePath || typeof onCopyPath !== 'function') {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    onOpenContextMenu?.(event, node);
+  };
+  const handleDragStart = (event) => {
+    if (!draggable || !dragPath) {
+      event.preventDefault();
+      return;
+    }
+
+    const payload = JSON.stringify({
+      id: node.id || '',
+      name: label,
+      path: dragPath,
+      type: node?.type || ''
+    });
+
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData(workspaceTreeFileDragType, payload);
+    event.dataTransfer.setData('text/plain', `@${dragPath}`);
   };
 
   return (
@@ -134,13 +168,21 @@ function WorkspaceTreeNode({
           style={rowStyle}
           title={title || undefined}
           aria-pressed={selectable ? selected : undefined}
+          draggable={draggable}
           onClick={handleClick}
+          onContextMenu={handleContextMenu}
           onDoubleClick={handleDoubleClick}
+          onDragStart={handleDragStart}
         >
           {rowChildren}
         </button>
       ) : (
-        <div className={rowClassName} style={rowStyle} title={title || undefined}>
+        <div
+          className={rowClassName}
+          style={rowStyle}
+          title={title || undefined}
+          onContextMenu={handleContextMenu}
+        >
           {rowChildren}
         </div>
       )}
@@ -155,8 +197,10 @@ function WorkspaceTreeNode({
               loadingIds={loadingIds}
               node={child}
               normalizeInsertPath={normalizeInsertPath}
+              onCopyPath={onCopyPath}
               onInsert={onInsert}
               onLoadChildren={onLoadChildren}
+              onOpenContextMenu={onOpenContextMenu}
               onSelect={onSelect}
               onToggle={onToggle}
               selectedNodeId={selectedNodeId}
@@ -169,7 +213,17 @@ function WorkspaceTreeNode({
   );
 }
 
-function WorkspaceTreeView({ normalizeInsertPath, onInsert, onLoadChildren, onSelect, root, selectedNodeId, t }) {
+function WorkspaceTreeView({
+  normalizeInsertPath,
+  onCopyPath,
+  onInsert,
+  onLoadChildren,
+  onOpenContextMenu,
+  onSelect,
+  root,
+  selectedNodeId,
+  t
+}) {
   const [expandedIds, setExpandedIds] = useState(() => new Set());
   const [loadingIds, setLoadingIds] = useState(() => new Set());
 
@@ -242,8 +296,10 @@ function WorkspaceTreeView({ normalizeInsertPath, onInsert, onLoadChildren, onSe
         loadingIds={loadingIds}
         node={root}
         normalizeInsertPath={normalizeInsertPath}
+        onCopyPath={onCopyPath}
         onInsert={onInsert}
         onLoadChildren={onLoadChildren}
+        onOpenContextMenu={onOpenContextMenu}
         onSelect={onSelect}
         onToggle={toggleNode}
         selectedNodeId={selectedNodeId}
@@ -253,7 +309,17 @@ function WorkspaceTreeView({ normalizeInsertPath, onInsert, onLoadChildren, onSe
   );
 }
 
-function WorkspaceTreeContent({ normalizeInsertPath, onInsert, onLoadChildren, onSelect, selectedNodeId, state, t }) {
+function WorkspaceTreeContent({
+  normalizeInsertPath,
+  onCopyPath,
+  onInsert,
+  onLoadChildren,
+  onOpenContextMenu,
+  onSelect,
+  selectedNodeId,
+  state,
+  t
+}) {
   const snapshot = state.snapshot;
   const root = snapshot?.root || null;
 
@@ -285,8 +351,10 @@ function WorkspaceTreeContent({ normalizeInsertPath, onInsert, onLoadChildren, o
   return (
     <WorkspaceTreeView
       normalizeInsertPath={normalizeInsertPath}
+      onCopyPath={onCopyPath}
       onInsert={onInsert}
       onLoadChildren={onLoadChildren}
+      onOpenContextMenu={onOpenContextMenu}
       onSelect={onSelect}
       root={root}
       selectedNodeId={selectedNodeId}
@@ -301,10 +369,12 @@ export function WorkspaceTreeSidebar({
   normalizeInsertPath,
   onClose,
   onCopy,
+  onCopyNodePath,
   onInsertNode,
   onInsertSelected,
   onLoadNodeChildren,
   onOpen,
+  onOpenNodeInVSCode,
   onRefresh,
   onSelectNode,
   open,
@@ -313,6 +383,7 @@ export function WorkspaceTreeSidebar({
   state,
   t
 }) {
+  const [contextMenu, setContextMenu] = useState(null);
   const snapshot = state.snapshot;
   const currentTreePath = snapshot?.cwd || state.requestedPath || currentPath || '';
   const summary = state.status === 'error'
@@ -322,9 +393,102 @@ export function WorkspaceTreeSidebar({
   const selectionSummary = selectedPath
     ? t('workspaceTreeSelectedFile', { path: selectedPath })
     : t('workspaceTreeSelectFileHint');
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+  const openNodeContextMenu = useCallback((event, node) => {
+    const copyPath = String(node?.path || '').trim();
+    if (!copyPath) {
+      return;
+    }
+
+    const menuWidth = 220;
+    const menuHeight = 86;
+    const left = Math.min(Math.max(8, event.clientX), Math.max(8, window.innerWidth - menuWidth - 8));
+    const top = Math.min(Math.max(8, event.clientY), Math.max(8, window.innerHeight - menuHeight - 8));
+
+    setContextMenu({
+      left,
+      top,
+      node,
+      path: copyPath
+    });
+  }, []);
+  const copyContextMenuPath = useCallback(() => {
+    if (!contextMenu?.path) {
+      return;
+    }
+
+    onCopyNodePath?.(contextMenu.node);
+    closeContextMenu();
+  }, [closeContextMenu, contextMenu, onCopyNodePath]);
+  const openContextMenuPathInVSCode = useCallback(() => {
+    if (!contextMenu?.path) {
+      return;
+    }
+
+    onOpenNodeInVSCode?.(contextMenu.node);
+    closeContextMenu();
+  }, [closeContextMenu, contextMenu, onOpenNodeInVSCode]);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return undefined;
+    }
+
+    const handlePointerDown = () => closeContextMenu();
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        closeContextMenu();
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('blur', closeContextMenu);
+    window.addEventListener('resize', closeContextMenu);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('blur', closeContextMenu);
+      window.removeEventListener('resize', closeContextMenu);
+    };
+  }, [closeContextMenu, contextMenu]);
 
   return (
     <aside className={cn('workspace-tree-sidebar', open && 'is-open')} aria-label={t('workspaceTreeTitle')}>
+      {contextMenu && (
+        <div
+          className="workspace-tree-context-menu"
+          role="menu"
+          aria-label={t('workspaceTreeContextMenu')}
+          style={{ left: contextMenu.left, top: contextMenu.top }}
+          onContextMenu={(event) => event.preventDefault()}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="workspace-tree-context-menu-item"
+            role="menuitem"
+            title={contextMenu.path}
+            onClick={openContextMenuPathInVSCode}
+          >
+            <Code2 className="workspace-tree-context-menu-icon" aria-hidden="true" />
+            <span>{t('workspaceTreeOpenInVSCode')}</span>
+          </button>
+          <button
+            type="button"
+            className="workspace-tree-context-menu-item"
+            role="menuitem"
+            title={contextMenu.path}
+            onClick={copyContextMenuPath}
+          >
+            <Copy className="workspace-tree-context-menu-icon" aria-hidden="true" />
+            <span>{t('workspaceTreeCopyAbsolutePath')}</span>
+          </button>
+        </div>
+      )}
+
       {!open && (
         <div className="workspace-tree-rail">
           <TreeIconButton
@@ -398,8 +562,10 @@ export function WorkspaceTreeSidebar({
           <div className="workspace-tree-panel-body">
             <WorkspaceTreeContent
               normalizeInsertPath={normalizeInsertPath}
+              onCopyPath={onCopyNodePath}
               onInsert={canInsertToComposer ? onInsertNode : undefined}
               onLoadChildren={onLoadNodeChildren}
+              onOpenContextMenu={openNodeContextMenu}
               onSelect={onSelectNode}
               selectedNodeId={selectedNodeId}
               state={state}
