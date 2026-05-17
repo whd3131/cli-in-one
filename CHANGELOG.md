@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/whd3131/cli-in-one/compare/v1.2.2...v1.3.0) (2026-05-17)
+
+
+### Features
+
+* refine workspace command interface ([d785785](https://github.com/whd3131/cli-in-one/commit/d7857854c3f55d4a4f44d84712d94c03def1c22e))
+
 ## [1.2.2](https://github.com/whd3131/cli-in-one/compare/v1.2.1...v1.2.2) (2026-04-29)
 
 This patch release turns CLI in One into a fuller agent orchestration workspace. It adds live session-to-session dispatch, richer Quick Send context assembly, scheduled agent runbooks, a dedicated diff review handoff flow, and linked canvas todo cards while tightening image-generation history, workspace inspection, and GitHub release lookups.
